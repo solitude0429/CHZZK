@@ -191,6 +191,41 @@
     diagnostics.generatedAt = now.toISOString();
     return true;
   }
+  function createDiagnosticsSnapshot(diagnostics) {
+    return {
+      decisions: [...(diagnostics.decisions ?? [])],
+      generatedAt: diagnostics.generatedAt,
+      qualities: { ...(diagnostics.qualities ?? {}) },
+      samples: [...(diagnostics.samples ?? [])],
+      sessionRules: {
+        activeRuleIds: [...(diagnostics.sessionRules?.activeRuleIds ?? [])],
+        activeTabIds: [...(diagnostics.sessionRules?.activeTabIds ?? [])],
+        lastError: diagnostics.sessionRules?.lastError ?? null,
+        updatedAt: diagnostics.sessionRules?.updatedAt ?? /* @__PURE__ */ new Date(0).toISOString(),
+      },
+      totalHlsRequests: diagnostics.totalHlsRequests ?? 0,
+    };
+  }
+  function analyzeDiagnostics(snapshot, { targetQuality = "1080p" } = {}) {
+    const qualities = Object.keys(snapshot?.qualities ?? {});
+    const highestObservedQuality =
+      qualities
+        .map((quality) => ({ label: quality, value: qualityNumber(quality) }))
+        .filter((entry) => entry.value != null)
+        .sort((a, b) => b.value - a.value)[0]?.label ?? null;
+    const highestObservedNumber = qualityNumber(highestObservedQuality);
+    const targetNumber = qualityNumber(targetQuality);
+    const needsPolicyUpdate = Boolean(
+      highestObservedNumber && targetNumber && highestObservedNumber > targetNumber,
+    );
+    return {
+      highestObservedQuality,
+      needsPolicyUpdate,
+      observedQualities: qualities.sort((a, b) => (qualityNumber(a) ?? 0) - (qualityNumber(b) ?? 0)),
+      suggestedTargetQuality: needsPolicyUpdate ? highestObservedQuality : targetQuality,
+      targetQuality,
+    };
+  }
 
   // src/shared/session-rules.js
   var DEFAULT_SESSION_RULE_BASE_ID = 1e5;
@@ -335,10 +370,120 @@
     };
   }
 
+  // src/shared/telemetry.js
+  var TELEMETRY_ENDPOINT = "https://chzzk-report.alpha-apple.dedyn.io/report";
+  var TELEMETRY_SCOPE = "chzzk-live";
+  var TELEMETRY_SCHEMA_VERSION = 1;
+  var MAX_ERROR_TEXT = 300;
+  var MAX_URL_TEXT = 500;
+  var SENSITIVE_QUERY_RE = /[?#].*$/;
+  function isChzzkLivePageUrl(value) {
+    if (typeof value !== "string" || value === "") return false;
+    try {
+      const parsed = new URL(value);
+      return (
+        parsed.protocol === "https:" &&
+        parsed.hostname === "chzzk.naver.com" &&
+        parsed.pathname.startsWith("/live/")
+      );
+    } catch {
+      return false;
+    }
+  }
+  function stripSensitiveTail(value) {
+    return typeof value === "string"
+      ? value.slice(0, MAX_URL_TEXT).replace(SENSITIVE_QUERY_RE, "?[redacted]")
+      : "";
+  }
+  function sanitizeErrorText(value) {
+    if (value == null) return null;
+    return String(value)
+      .slice(0, MAX_ERROR_TEXT)
+      .replace(/https?:\/\/[^\s)]+/gi, (url) => stripSensitiveTail(url));
+  }
+  function stableHash(value) {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+  }
+  function sanitizeNumericMap(value = {}) {
+    const out = {};
+    for (const [key, raw] of Object.entries(value ?? {})) {
+      if (!/^[A-Za-z0-9_-]{1,40}$/.test(key)) continue;
+      const number = Number(raw);
+      if (!Number.isFinite(number) || number < 0) continue;
+      out[key] = Math.min(Math.trunc(number), 1e5);
+    }
+    return out;
+  }
+  function summarizeDiagnosticsForTelemetry(snapshot = {}) {
+    const decisionsByReason = {};
+    for (const decision of snapshot.decisions ?? []) {
+      const reason = String(decision?.reason ?? "unknown").slice(0, 80);
+      decisionsByReason[reason] = (decisionsByReason[reason] ?? 0) + 1;
+    }
+    const samples = (snapshot.samples ?? []).slice(-20).map((sample) => ({
+      quality: String(sample?.quality ?? "").slice(0, 16) || null,
+      seenAt: sample?.seenAt ?? null,
+      type: String(sample?.type ?? "").slice(0, 40) || null,
+      url: stripSensitiveTail(sample?.url ?? ""),
+    }));
+    return {
+      decisionsByReason,
+      generatedAt: snapshot.generatedAt ?? null,
+      qualities: sanitizeNumericMap(snapshot.qualities ?? {}),
+      samples,
+      sessionRules: {
+        activeRuleCount: (snapshot.sessionRules?.activeRuleIds ?? []).length,
+        activeTabCount: (snapshot.sessionRules?.activeTabIds ?? []).length,
+        lastError: sanitizeErrorText(snapshot.sessionRules?.lastError),
+        updatedAt: snapshot.sessionRules?.updatedAt ?? null,
+      },
+      totalHlsRequests: Math.max(0, Math.trunc(Number(snapshot.totalHlsRequests ?? 0) || 0)),
+    };
+  }
+  function makeTelemetryReport({ addonId, diagnostics, eventType, extensionVersion, structure } = {}) {
+    const now = /* @__PURE__ */ new Date().toISOString();
+    return {
+      addonId: addonId ?? null,
+      diagnostics: diagnostics ? summarizeDiagnosticsForTelemetry(diagnostics) : null,
+      eventType,
+      extensionVersion: extensionVersion ?? null,
+      schemaVersion: TELEMETRY_SCHEMA_VERSION,
+      scope: TELEMETRY_SCOPE,
+      sentAt: now,
+      structure: structure ?? null,
+    };
+  }
+  function isTelemetryReportSafe(report) {
+    if (!report || report.schemaVersion !== TELEMETRY_SCHEMA_VERSION) return false;
+    if (report.scope !== TELEMETRY_SCOPE) return false;
+    if (!/^[a-z0-9_.@-]+$/i.test(String(report.addonId ?? ""))) return false;
+    if (!/^[a-z0-9_.:-]+$/i.test(String(report.extensionVersion ?? ""))) return false;
+    const serialized = JSON.stringify(report);
+    if (serialized.length > 64e3) return false;
+    if (/[?&](Policy|Signature|Key-Pair-Id|Expires|token|auth|session)=/i.test(serialized)) return false;
+    return true;
+  }
+
   // src/runtime/background.js
   var api = globalThis.browser ?? globalThis.chrome;
   var STORAGE_KEY = "chzzkDiagnostics";
+  var REPORT_STATE_KEY = "chzzkTelemetryReportState";
+  var TELEMETRY_MIN_REPORT_INTERVAL_MS = 5 * 60 * 1e3;
+  var REPORT_DEDUPE_TTL_MS = 60 * 60 * 1e3;
   var activeRulesByTab = /* @__PURE__ */ new Map();
+  function extensionIdentity() {
+    const manifest = api.runtime.getManifest();
+    return {
+      addonId: manifest.browser_specific_settings?.gecko?.id ?? "chzzk@solitude0429.local",
+      extensionVersion: manifest.version,
+    };
+  }
   async function loadDiagnostics() {
     const stored = await api.storage.local.get(STORAGE_KEY);
     return (
@@ -351,8 +496,78 @@
   }
   async function mutateDiagnostics(mutator) {
     const diagnostics = await loadDiagnostics();
-    mutator(diagnostics);
+    const result = mutator(diagnostics);
     await saveDiagnostics(diagnostics);
+    return { diagnostics, result };
+  }
+  async function loadReportState() {
+    const stored = await api.storage.local.get(REPORT_STATE_KEY);
+    return stored?.[REPORT_STATE_KEY] ?? { lastSentAt: 0, sentByKey: {} };
+  }
+  async function saveReportState(state) {
+    await api.storage.local.set({ [REPORT_STATE_KEY]: state });
+  }
+  function telemetryDedupeKey(report) {
+    return stableHash({
+      diagnostics: report.diagnostics
+        ? {
+            decisionsByReason: report.diagnostics.decisionsByReason,
+            qualities: report.diagnostics.qualities,
+            sessionRules: report.diagnostics.sessionRules,
+            totalHlsRequests: report.diagnostics.totalHlsRequests,
+          }
+        : null,
+      eventType: report.eventType,
+      structureHash: report.structure?.structureHash ?? null,
+    });
+  }
+  async function postTelemetryReport(report, { force = false } = {}) {
+    const enriched = {
+      ...report,
+      ...extensionIdentity(),
+      scope: TELEMETRY_SCOPE,
+    };
+    if (!isTelemetryReportSafe(enriched)) return false;
+    const now = Date.now();
+    const state = await loadReportState();
+    const key = telemetryDedupeKey(enriched);
+    const previous = Number(state.sentByKey?.[key] ?? 0);
+    if (!force && previous && now - previous < REPORT_DEDUPE_TTL_MS) return false;
+    if (!force && now - Number(state.lastSentAt ?? 0) < TELEMETRY_MIN_REPORT_INTERVAL_MS) return false;
+    const response = await fetch(TELEMETRY_ENDPOINT, {
+      body: JSON.stringify(enriched),
+      cache: "no-store",
+      credentials: "omit",
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!response.ok) throw new Error(`telemetry report failed: HTTP ${response.status}`);
+    state.lastSentAt = now;
+    state.sentByKey = { ...(state.sentByKey ?? {}), [key]: now };
+    await saveReportState(state);
+    return true;
+  }
+  function diagnosticsReportFromSnapshot(snapshot, eventType) {
+    return makeTelemetryReport({
+      diagnostics: snapshot,
+      eventType,
+      ...extensionIdentity(),
+    });
+  }
+  async function maybeReportDiagnostics(snapshot, decision) {
+    const analysis = analyzeDiagnostics(snapshot, { targetQuality: quality_policy_default.targetQuality });
+    const interesting = Boolean(
+      analysis.needsPolicyUpdate ||
+      snapshot.sessionRules?.lastError ||
+      decision?.reason === "unknown-quality-shape" ||
+      decision?.ok,
+    );
+    if (!interesting) return;
+    await postTelemetryReport(diagnosticsReportFromSnapshot(snapshot, "diagnostics-summary")).catch(
+      (error) => {
+        console.warn("[CHZZK] telemetry report failed", error);
+      },
+    );
   }
   function currentRuleState(lastError = null) {
     return {
@@ -404,27 +619,40 @@
         updateSessionRuleDiagnostics(diagnostics, currentRuleState());
       });
     } catch (error) {
-      await mutateDiagnostics((diagnostics) => {
-        updateSessionRuleDiagnostics(diagnostics, currentRuleState(String(error?.message ?? error)));
+      const { diagnostics } = await mutateDiagnostics((current) => {
+        updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
       });
+      await postTelemetryReport(
+        diagnosticsReportFromSnapshot(createDiagnosticsSnapshot(diagnostics), "session-rule-error"),
+        {
+          force: true,
+        },
+      ).catch(() => {});
     }
   }
   async function handleRequest(details) {
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
     const decision = shouldBootstrapSessionRule(details, quality_policy_default);
     if (shouldRecord) {
-      await mutateDiagnostics((diagnostics) => {
-        recordDiagnosticUrl(diagnostics, details.url, { context: details });
-        recordDecision(diagnostics, decision, details);
+      const { diagnostics } = await mutateDiagnostics((current) => {
+        recordDiagnosticUrl(current, details.url, { context: details });
+        recordDecision(current, decision, details);
       });
+      await maybeReportDiagnostics(createDiagnosticsSnapshot(diagnostics), decision);
     }
     if (!decision.ok) return;
     try {
       await ensureTabSessionRule(decision.tabId);
     } catch (error) {
-      await mutateDiagnostics((diagnostics) => {
-        updateSessionRuleDiagnostics(diagnostics, currentRuleState(String(error?.message ?? error)));
+      const { diagnostics } = await mutateDiagnostics((current) => {
+        updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
       });
+      await postTelemetryReport(
+        diagnosticsReportFromSnapshot(createDiagnosticsSnapshot(diagnostics), "session-rule-error"),
+        {
+          force: true,
+        },
+      ).catch(() => {});
       console.warn("[CHZZK] failed to install session redirect rule", error);
     }
   }
@@ -439,6 +667,13 @@
       types: quality_policy_default.resourceTypes,
     },
   );
+  api.runtime.onMessage?.addListener((message, sender) => {
+    if (message?.type !== "chzzk.telemetry.report" || message?.scope !== TELEMETRY_SCOPE) return false;
+    if (sender?.url && !isChzzkLivePageUrl(sender.url)) return false;
+    return postTelemetryReport(message.report, {
+      force: String(message.report?.eventType ?? "").includes("error"),
+    });
+  });
   api.tabs?.onRemoved?.addListener((tabId) => {
     removeTabSessionRule(tabId).catch((error) =>
       console.warn("[CHZZK] failed to remove tab session rule", error),

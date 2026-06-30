@@ -32,3 +32,10 @@ await build({
   outfile: "diagnostics.js",
 });
 await formatOutput("diagnostics.js");
+
+await build({
+  ...common,
+  entryPoints: ["src/runtime/site-observer.js"],
+  outfile: "site-observer.js",
+});
+await formatOutput("site-observer.js");

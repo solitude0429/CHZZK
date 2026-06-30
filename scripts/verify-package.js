@@ -15,6 +15,7 @@ const allowedFiles = new Set([
   "diagnostics.js",
   "icon.png",
   "manifest.json",
+  "site-observer.js",
 ]);
 
 const zip = readdirSync("dist").find((name) => name === expectedZip);
