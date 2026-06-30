@@ -3,11 +3,6 @@ name: Sign and publish Firefox add-on
 on:
   workflow_dispatch:
     inputs:
-      deploy_updates:
-        description: Deploy updates.json to GitHub Pages
-        required: true
-        type: boolean
-        default: true
       publish_release:
         description: Create or update the GitHub release for this package version
         required: true
@@ -16,15 +11,10 @@ on:
 
 permissions:
   contents: write
-  id-token: write
-  pages: write
 
 jobs:
   sign-unlisted:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -87,10 +77,10 @@ jobs:
           cat > release-notes.md <<EOF
           ## Summary
           - AMO unlisted signed Firefox install package.
-          - Firefox automatic-update manifest is published to GitHub Pages.
+          - Firefox automatic-update manifest targets the private internal HTTPS update host.
 
           ## Update manifest
-          - https://solitude0429.github.io/CHZZK/updates.json
+          - https://alpha-apple.dedyn.io/chzzk/updates.json
 
           ## Assets
           - \`chzzk-${{ steps.package.outputs.version }}-signed.xpi\` — signed install/update package.
@@ -126,14 +116,3 @@ jobs:
         with:
           name: chzzk-update-site
           path: dist/update-site
-      - uses: actions/configure-pages@v5
-        if: ${{ inputs.deploy_updates }}
-        with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v3
-        if: ${{ inputs.deploy_updates }}
-        with:
-          path: dist/update-site
-      - uses: actions/deploy-pages@v4
-        if: ${{ inputs.deploy_updates }}
-        id: deployment

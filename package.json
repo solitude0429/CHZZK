@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
@@ -11,6 +11,7 @@
     "build:runtime": "node scripts/build-runtime.js",
     "build:update-manifest": "node scripts/build-update-manifest.js",
     "check:generated": "node scripts/check-generated.js",
+    "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check .",
     "lint": "eslint .",

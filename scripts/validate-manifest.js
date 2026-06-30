@@ -39,7 +39,7 @@ assert.deepEqual(
 );
 assert.equal(
   manifest.browser_specific_settings?.gecko?.update_url,
-  "https://solitude0429.github.io/CHZZK/updates.json",
+  "https://alpha-apple.dedyn.io/chzzk/updates.json",
   "Firefox auto-update manifest URL must remain stable",
 );
 assert.equal(manifest.icons?.["32"], "icon.png", "CHZZK favicon must be registered");
