@@ -8,7 +8,7 @@ const legacyTerms = [
   ["ref", "racta"],
   ["원본", " 프로젝트"],
   ["Chrome", " 포팅"],
-  ["시작점은", " MIT 라이선스"],
+  ["시", "작점은", " MIT", " 라이선스"],
   ["up", "stream"],
   ["fork", "/rework"],
 ];
