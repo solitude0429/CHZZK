@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
@@ -9,15 +9,17 @@
     "audit:package": "node scripts/verify-package.js",
     "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
+    "build:update-manifest": "node scripts/build-update-manifest.js",
     "check:generated": "node scripts/check-generated.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "lint:webext": "web-ext lint --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json policy reg scripts src tests",
+    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json policy reg scripts src tests",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
     "validate:manifest": "node scripts/validate-manifest.js",
     "validate:project": "node scripts/validate-project-cleanliness.js",
+    "validate:update-manifest": "node scripts/validate-update-manifest.js",
     "verify": "npm run check:generated && npm run validate:manifest && npm run validate:project && npm run lint && npm run lint:webext && npm run test && npm run audit:deps && npm run build && npm run audit:package"
   },
   "devDependencies": {
