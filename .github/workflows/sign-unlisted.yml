@@ -104,6 +104,8 @@ jobs:
           path: dist/update-site
       - uses: actions/configure-pages@v5
         if: ${{ inputs.deploy_updates }}
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         if: ${{ inputs.deploy_updates }}
         with:
