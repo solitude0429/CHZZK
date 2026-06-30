@@ -18,10 +18,11 @@
     "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules ops package-lock.json package.json policy reg scripts src tests",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
+    "test:ops": "python3 -m py_compile ops/*.py && python3 ops/test_chzzk_telemetry_collector.py",
     "validate:manifest": "node scripts/validate-manifest.js",
     "validate:project": "node scripts/validate-project-cleanliness.js",
     "validate:update-manifest": "node scripts/validate-update-manifest.js",
-    "verify": "npm run check:generated && npm run validate:manifest && npm run validate:project && npm run lint && npm run lint:webext && npm run test && npm run audit:deps && npm run build && npm run audit:package"
+    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run lint && npm run lint:webext && npm run test && npm run test:ops && npm run audit:deps && npm run build && npm run audit:package"
   },
   "devDependencies": {
     "esbuild": "^0.28.1",
