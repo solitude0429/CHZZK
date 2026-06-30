@@ -13,7 +13,7 @@
     "check:generated": "node scripts/check-generated.js",
     "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
-    "format:check": "prettier --check .",
+    "format:check": "prettier --check package.json .github/workflows/*.yml .github/PULL_REQUEST_TEMPLATE/*.md",
     "lint": "eslint .",
     "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules ops package-lock.json package.json policy reg scripts src tests",
     "sign:unlisted": "node scripts/sign-unlisted.js",
