@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "chzzk@solitude0429.local",
+      "data_collection_permissions": {
+        "required": ["none"]
+      },
+      "strict_min_version": "140.0"
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  },
+  "name": "CHZZK",
+  "description": "Personal Firefox extension for CHZZK high-quality playback selection.",
+  "version": "0.1.0",
+  "permissions": ["activeTab", "scripting", "declarativeNetRequest"],
+  "host_permissions": [
+    "*://chzzk.naver.com/live/*",
+    "*://*.akamaized.net/*",
+    "*://*.navercdn.com/*",
+    "*://*.pstatic.net/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "action": {
+    "default_icon": "icon.png",
+    "default_title": "CHZZK"
+  }
+}

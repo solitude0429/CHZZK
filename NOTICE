@@ -1,0 +1,11 @@
+CHZZK
+=====
+
+This project is a personal fork/rework of the MIT-licensed upstream project:
+
+- Upstream: bass9030/FUCK-CHZZK-GRID
+- Upstream purpose: browser extension for CHZZK high-quality playback behavior
+- Upstream license: MIT
+
+The upstream MIT license text is preserved in LICENSE. Local changes rename the project to CHZZK and add
+project-specific validation, testing, documentation, and safer diagnostics.
