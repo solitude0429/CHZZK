@@ -33,27 +33,51 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
-      - run: npm run sign:unlisted
-        env:
-          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
-          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-      - name: Normalize signed XPI name
+      - name: Prepare package metadata
         id: package
         run: |
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
-          signed_count=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | wc -l | tr -d ' ')
-          test "$signed_count" = "1"
-          signed_xpi=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | head -n 1)
-          release_xpi="dist/chzzk-${version}-signed.xpi"
-          cp "$signed_xpi" "$release_xpi"
-          sha256=$(sha256sum "$release_xpi" | cut -d' ' -f1)
           {
             echo "version=$version"
             echo "tag=v$version"
-            echo "release_xpi=$release_xpi"
-            echo "sha256=$sha256"
+            echo "release_xpi=dist/chzzk-${version}-signed.xpi"
           } >> "$GITHUB_OUTPUT"
+      - name: Reuse existing release XPI when available
+        id: existing_xpi
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.package.outputs.tag }}"
+          version="${{ steps.package.outputs.version }}"
+          asset="chzzk-${version}-signed.xpi"
+          if gh release view "$tag" >/dev/null 2>&1 && gh release download "$tag" -p "$asset" -D dist >/dev/null 2>&1; then
+            echo "reused=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Sign with AMO unlisted channel
+        if: ${{ steps.existing_xpi.outputs.reused != 'true' }}
+        run: npm run sign:unlisted
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+      - name: Normalize signed XPI name and checksum
+        id: signed_xpi
+        run: |
+          set -euo pipefail
+          version="${{ steps.package.outputs.version }}"
+          release_xpi="${{ steps.package.outputs.release_xpi }}"
+          if [ "${{ steps.existing_xpi.outputs.reused }}" != "true" ]; then
+            signed_count=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | wc -l | tr -d ' ')
+            test "$signed_count" = "1"
+            signed_xpi=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | head -n 1)
+            cp "$signed_xpi" "$release_xpi"
+          fi
+          test -f "$release_xpi"
+          sha256=$(sha256sum "$release_xpi" | cut -d' ' -f1)
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
       - run: npm run build:update-manifest
       - run: npm run validate:update-manifest
       - name: Write release notes
@@ -73,7 +97,7 @@ jobs:
           - \`chzzk-${{ steps.package.outputs.version }}.zip\` — unsigned source/runtime package from \`web-ext build\`.
 
           ## Checksums
-          - \`chzzk-${{ steps.package.outputs.version }}-signed.xpi\` SHA-256: \`${{ steps.package.outputs.sha256 }}\`
+          - \`chzzk-${{ steps.package.outputs.version }}-signed.xpi\` SHA-256: \`${{ steps.signed_xpi.outputs.sha256 }}\`
           - \`chzzk-${{ steps.package.outputs.version }}.zip\` SHA-256: \`${zip_sha}\`
           EOF
       - name: Create or update release
