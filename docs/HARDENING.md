@@ -1,6 +1,6 @@
 # CHZZK hardening notes
 
-This branch hardens the `0.0.5` telemetry/update loop without changing the core CHZZK HLS redirect policy.
+This document summarizes the `0.0.6` telemetry/session-rule hardening release without changing the configured CHZZK HLS redirect target policy.
 
 ## Runtime behavior
 
@@ -23,11 +23,11 @@ This branch hardens the `0.0.5` telemetry/update loop without changing the core 
 
 - NDJSON writes are protected by a process-local lock.
 - Report POSTs are rate-limited per client key.
-- Sanitization rejects signed CDN query values and token/auth/session-like query strings.
+- Sanitization rejects signed CDN query values and token/auth/session-like query strings before storage.
 
 ## Verification
 
-`npm run verify` now includes:
+`npm run verify` includes:
 
 - `npm run format:check`
 - generated runtime refresh
@@ -37,3 +37,10 @@ This branch hardens the `0.0.5` telemetry/update loop without changing the core 
 - Python ops compile/tests
 - dependency audit
 - package build/audit
+
+## Release invariants
+
+- `package.json`, `manifest.json`, and release notes must describe the same extension version.
+- `policy/quality-policy.json` is the source of truth for the configured HLS redirect target.
+- README must describe the quality policy as a redirect attempt toward the configured target, not as a guarantee that CHZZK/NAVER provides that quality for every stream.
+- Signed XPI/update-site artifacts must be generated only from a verified build.
