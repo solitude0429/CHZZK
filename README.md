@@ -4,8 +4,8 @@
 
 ## 현재 버전
 
-- `0.0.5`
-- 자동 업데이트 인프라 위에 CHZZK live 전용 구조/오류 telemetry 수집 루프를 추가한 패치입니다.
+- `0.0.6`
+- telemetry/session-rule hardening을 릴리즈 산출물에 반영한 패치입니다.
 - collector 전송은 기본 local-only이며, popup에서 명시적으로 켠 category만 외부 collector로 전송합니다.
 - 이후 변경은 patch/minor 단위로 올립니다.
 
