@@ -98,7 +98,14 @@ def sanitize_text(value: Any, *, max_len: int = 500) -> str | None:
     return text
 
 
+def assert_no_sensitive_material(value: Any) -> None:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if len(serialized.encode("utf-8")) > MAX_BODY_BYTES or SENSITIVE_RE.search(serialized):
+        raise ValueError("report contains disallowed sensitive material")
+
+
 def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
+    assert_no_sensitive_material(report)
     if report.get("schemaVersion") != 1:
         raise ValueError("unsupported schemaVersion")
     if report.get("scope") != "chzzk-live":
@@ -167,9 +174,7 @@ def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
             "tagCounts": sanitize_numeric_map(structure.get("tagCounts")),
         }
 
-    serialized = json.dumps(clean, ensure_ascii=False, sort_keys=True)
-    if len(serialized.encode("utf-8")) > MAX_BODY_BYTES or SENSITIVE_RE.search(serialized):
-        raise ValueError("report contains disallowed sensitive material")
+    assert_no_sensitive_material(clean)
     return clean
 
 
