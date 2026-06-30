@@ -9,7 +9,7 @@ const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta
 const version = packageJson.version;
 const addonId = manifest.browser_specific_settings?.gecko?.id;
 const strictMinVersion = manifest.browser_specific_settings?.gecko?.strict_min_version;
-const defaultReleaseBaseUrl = `https://github.com/solitude0429/CHZZK/releases/download/v${version}`;
+const defaultReleaseBaseUrl = `https://alpha-apple.dedyn.io/chzzk`;
 
 assert.ok(addonId, "manifest must define browser_specific_settings.gecko.id");
 assert.ok(strictMinVersion, "manifest must define browser_specific_settings.gecko.strict_min_version");

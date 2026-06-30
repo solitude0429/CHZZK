@@ -14,15 +14,15 @@ const update = updates.addons?.[addonId]?.updates?.[0];
 
 assert.equal(
   updateUrl,
-  "https://solitude0429.github.io/CHZZK/updates.json",
-  "manifest update_url must be the GitHub Pages update manifest",
+  "https://alpha-apple.dedyn.io/chzzk/updates.json",
+  "manifest update_url must be the internal HTTPS update manifest",
 );
 assert.ok(update, `updates.json must include ${addonId}`);
 assert.equal(update.version, packageJson.version, "update entry version must match package.json");
 assert.match(
   update.update_link,
-  /^https:\/\/github\.com\/solitude0429\/CHZZK\/releases\/download\/v[^/]+\/chzzk-[^-]+-signed\.xpi$/,
-  "update_link must point at the signed release XPI",
+  /^https:\/\/alpha-apple\.dedyn\.io\/chzzk\/chzzk-[^/]+-signed\.xpi$/,
+  "update_link must point at the internally hosted signed XPI",
 );
 assert.equal(
   update.update_hash,

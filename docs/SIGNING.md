@@ -30,7 +30,7 @@ npm run sign:unlisted
 2. Actions → `Sign and publish Firefox add-on` → Run workflow
 3. workflow artifact `chzzk-signed-xpi`를 내려받아 Firefox에 설치합니다.
 4. `publish_release`가 켜져 있으면 해당 버전의 GitHub Release가 생성/갱신됩니다.
-5. `deploy_updates`가 켜져 있으면 GitHub Pages의 `updates.json`이 갱신됩니다.
+5. 내부 update host 배포가 필요하면 VPS에서 `npm run deploy:updates:internal`을 실행합니다.
 
 ## 주의
 
