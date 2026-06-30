@@ -11,7 +11,7 @@
   "mediaExtensions": ["m3u8"],
   "maxDiagnosticsSamples": 200,
   "notes": [
-    "targetQuality is the highest currently expected NAVER-provided CHZZK HLS quality.",
+    "targetQuality is the configured CHZZK HLS redirect target, not a guarantee that NAVER currently provides that quality for every live stream.",
     "Runtime redirects are installed as tab-scoped session DNR rules only after a trusted CHZZK live HLS request is observed.",
     "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values.",
     "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects."
