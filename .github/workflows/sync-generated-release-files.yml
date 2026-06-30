@@ -1,0 +1,32 @@
+name: Sync generated release files
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "package.json"
+      - "manifest.json"
+      - "policy/quality-policy.json"
+      - "src/**"
+      - ".github/workflows/sync-generated-release-files.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync-generated-release-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --package-lock-only --ignore-scripts
+      - run: npm ci
+      - run: npm run build:runtime
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: chore: sync generated release files
+          file_pattern: package-lock.json background.js diagnostics.js site-observer.js
