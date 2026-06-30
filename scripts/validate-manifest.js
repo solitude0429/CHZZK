@@ -5,11 +5,12 @@ import { readFile } from "node:fs/promises";
 import { buildScopedSessionRule } from "../src/shared/session-rules.js";
 
 const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const policy = JSON.parse(await readFile(new URL("../policy/quality-policy.json", import.meta.url), "utf8"));
 
 assert.equal(manifest.manifest_version, 3, "manifest_version must be 3");
 assert.equal(manifest.name, "CHZZK", "extension name must be CHZZK");
-assert.equal(manifest.version, "0.5.0", "manifest version must match the v0.5 enterprise runtime");
+assert.equal(manifest.version, packageJson.version, "manifest version must match package.json");
 assert.ok(
   manifest.permissions.includes("declarativeNetRequest"),
   "DNR permission is required for CHZZK session redirect rules",
@@ -36,7 +37,7 @@ assert.deepEqual(
   ["none"],
   "manifest must declare no remote data collection",
 );
-assert.equal(manifest.icons?.["32"], "icon.png", "official CHZZK favicon must be registered");
+assert.equal(manifest.icons?.["32"], "icon.png", "CHZZK favicon must be registered");
 assert.equal(manifest.action?.default_icon?.["32"], "icon.png", "action icon must use the CHZZK favicon");
 assert.equal(manifest.action?.default_popup, "diagnostics.html", "diagnostics popup must be registered");
 

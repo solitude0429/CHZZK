@@ -1,8 +1,12 @@
 # CHZZK
 
-개인용 Firefox WebExtension 프로젝트입니다. 시작점은 MIT 라이선스의 `bass9030/FUCK-CHZZK-GRID`이지만,
-현재 구조는 기존 확장과 다르게 **화질 메뉴를 속여 표시하지 않고**, CHZZK live tab에서 관측된 신뢰 가능한 HLS 요청에만
-탭 단위 session DNR redirect를 설치합니다.
+개인용 Firefox WebExtension 프로젝트입니다. 화질 메뉴를 속여 표시하지 않고, CHZZK live tab에서 관측된 신뢰 가능한 HLS 요청에만 탭 단위 session DNR redirect를 설치합니다.
+
+## 현재 버전
+
+- `0.0.1`
+- 설치 검증이 끝난 초기 기준선입니다.
+- 이후 변경은 patch/minor 단위로 올립니다.
 
 ## 목표
 
@@ -11,19 +15,17 @@
 - 화질 메뉴의 `480p` 항목을 `1080p with CHZZK GRID™`처럼 표시하지 않습니다.
 - DOM을 조작하지 않고, content script/page injection/`scripting` 권한 없이 동작합니다.
 - redirect는 항상-on static ruleset이 아니라 **CHZZK live tab에서 HLS 요청이 관측된 뒤 해당 tab에만 설치되는 session rule**입니다.
-- 확장 아이콘은 CHZZK 공식 favicon을 사용합니다.
+- 확장 아이콘은 CHZZK favicon을 사용합니다.
 
-## v0.5 아키텍처
+## 아키텍처
 
 ### 1. Global static DNR 제거
 
-`manifest.json`에는 더 이상 `declarative_net_request.rule_resources`가 없습니다. 즉 브라우저 시작부터 모든 CDN 요청에
-항상 켜져 있는 static redirect rule을 싣지 않습니다.
+`manifest.json`에는 `declarative_net_request.rule_resources`가 없습니다. 즉 브라우저 시작부터 모든 CDN 요청에 항상 켜져 있는 static redirect rule을 싣지 않습니다.
 
 ### 2. Session-scoped redirect
 
-background runtime은 다음 조건을 모두 만족하는 요청을 관측했을 때만 `declarativeNetRequest.updateSessionRules()`로
-session rule을 설치합니다.
+background runtime은 다음 조건을 모두 만족하는 요청을 관측했을 때만 `declarativeNetRequest.updateSessionRules()`로 session rule을 설치합니다.
 
 - `tabId`가 유효함
 - page context가 `https://chzzk.naver.com/live/...`
@@ -45,8 +47,7 @@ session rule을 설치합니다.
 1440p playlist       → 그대로 유지
 ```
 
-따라서 현재 CHZZK의 360/480/720뿐 아니라 나중에 540/900/1000p 같은 낮은 중간 화질이 생겨도 별도 코드 수정 없이
-같은 정책으로 처리됩니다. 반대로 1440p 같은 더 높은 화질이 관측되면 diagnostics analyzer가 target 변경을 제안합니다.
+따라서 현재 CHZZK의 360/480/720뿐 아니라 나중에 540/900/1000p 같은 낮은 중간 화질이 생겨도 별도 코드 수정 없이 같은 정책으로 처리됩니다. 반대로 1440p 같은 더 높은 화질이 관측되면 diagnostics analyzer가 target 변경을 제안합니다.
 
 ## 개발
 
@@ -60,6 +61,7 @@ npm run verify
 ```bash
 npm run check:generated
 npm run validate:manifest
+npm run validate:project
 npm run lint
 npm run lint:webext
 npm test
@@ -68,8 +70,7 @@ npm run build
 npm run audit:package
 ```
 
-runtime 파일 `background.js`, `diagnostics.js`는 생성물입니다. 직접 수정하지 말고 `src/runtime/*`, `src/shared/*`,
-`policy/quality-policy.json`을 수정한 뒤 `npm run build:runtime`를 실행하세요.
+runtime 파일 `background.js`, `diagnostics.js`는 생성물입니다. 직접 수정하지 말고 `src/runtime/*`, `src/shared/*`, `policy/quality-policy.json`을 수정한 뒤 `npm run build:runtime`를 실행하세요.
 
 ## Firefox 임시 프로필에서 실행
 
@@ -103,20 +104,17 @@ npm run diagnostics:analyze -- diagnostics.json --apply
 npm run verify
 ```
 
-URL shape가 변경된 경우에는 redacted fixture를 추가하고 `src/shared/quality.js` / `src/shared/session-rules.js` 테스트를 먼저
-추가한 뒤 수정합니다.
+URL shape가 변경된 경우에는 redacted fixture를 추가하고 `src/shared/quality.js` / `src/shared/session-rules.js` 테스트를 먼저 추가한 뒤 수정합니다.
 
 ## 정식 서명 설치
 
-Firefox Release/Beta에 일반 설치하려면 Mozilla 서명이 필요합니다. 개인용이면 AMO unlisted 채널을 사용합니다.
-자세한 절차는 `docs/SIGNING.md`를 확인하세요.
+Firefox Release/Beta에 일반 설치하려면 Mozilla 서명이 필요합니다. 개인용이면 AMO unlisted 채널을 사용합니다. 자세한 절차는 `docs/SIGNING.md`를 확인하세요.
 
 주의: Mozilla unlisted signing은 Firefox 설치 가능성을 위한 서명이지, 네이버가 공식 승인한 프로그램이라는 의미가 아닙니다.
 
 ## NLiveConnector 팝업이 계속 뜰 때
 
-네이버 라이브 스트리밍 커넥터(NLiveConnector)를 제거한 뒤 사용하세요. 제거 후에도
-`naverliveconnector` 링크 허용 팝업이 계속 뜨면 `reg/fix-live-connector.reg` 내용을 확인한 뒤 Windows에서 적용할 수 있습니다.
+네이버 라이브 스트리밍 커넥터/NLiveConnector를 제거한 뒤 사용하세요. 제거 후에도 `naverliveconnector` 링크 허용 팝업이 계속 뜨면 `reg/fix-live-connector.reg` 내용을 확인한 뒤 Windows에서 적용할 수 있습니다.
 
 ## 운영 문서
 
@@ -126,10 +124,7 @@ Firefox Release/Beta에 일반 설치하려면 Mozilla 서명이 필요합니다
 - `docs/TESTING.md` — 자동/수동 검증 절차
 - `docs/TROUBLESHOOTING.md` — 문제 진단 절차
 
-## 라이선스/출처
+## 라이선스
 
-- 원본 프로젝트: `bass9030/FUCK-CHZZK-GRID`
-- Chrome 포팅 참고: `refracta/FUCK-CHZZK-GRID-CHROME`
-- CHZZK 공식 favicon: `https://ssl.pstatic.net/static/nng/glive/icon/favicon.png`
 - 라이선스: MIT
 - 자세한 내용: `LICENSE`, `NOTICE`
