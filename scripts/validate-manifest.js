@@ -21,7 +21,17 @@ assert.ok(
   "webRequest permission is required for local diagnostics and session-rule bootstrap",
 );
 assert.ok(!manifest.permissions.includes("scripting"), "scripting permission must not be needed");
-assert.equal(manifest.content_scripts, undefined, "content scripts must not be needed");
+assert.deepEqual(
+  manifest.content_scripts,
+  [
+    {
+      matches: ["https://chzzk.naver.com/live/*"],
+      js: ["site-observer.js"],
+      run_at: "document_idle",
+    },
+  ],
+  "content script must be scoped to CHZZK live pages only",
+);
 assert.equal(
   manifest.declarative_net_request,
   undefined,
@@ -32,10 +42,17 @@ assert.ok(
   manifest.host_permissions.includes("*://chzzk.naver.com/live/*"),
   "CHZZK live host permission is required",
 );
+assert.ok(
+  manifest.host_permissions.includes("https://chzzk-report.alpha-apple.dedyn.io/report"),
+  "CHZZK telemetry collector permission is required",
+);
 assert.deepEqual(
-  manifest.browser_specific_settings?.gecko?.data_collection_permissions?.required,
-  ["none"],
-  "manifest must declare no remote data collection",
+  manifest.browser_specific_settings?.gecko?.data_collection_permissions,
+  {
+    required: ["websiteContent"],
+    optional: ["technicalAndInteraction"],
+  },
+  "manifest must declare CHZZK-only website structure collection and optional technical reports",
 );
 assert.equal(
   manifest.browser_specific_settings?.gecko?.update_url,

@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 const manifest = JSON.parse(readFileSync(new URL("../../manifest.json", import.meta.url), "utf8"));
 
 describe("personal CHZZK extension policy", () => {
-  it("does not inject into or depend on CHZZK player DOM", () => {
+  it("does not inject into or control CHZZK player DOM", () => {
     assert.ok(manifest.permissions?.includes("declarativeNetRequest"));
     assert.ok(
       manifest.permissions?.includes("storage"),
@@ -16,7 +16,17 @@ describe("personal CHZZK extension policy", () => {
       "webRequest permission should be used only for local diagnostics and session-rule bootstrap",
     );
     assert.ok(!manifest.permissions?.includes("scripting"), "scripting permission should not be needed");
-    assert.equal(manifest.content_scripts, undefined, "content scripts should not be shipped");
+    assert.deepEqual(
+      manifest.content_scripts,
+      [
+        {
+          matches: ["https://chzzk.naver.com/live/*"],
+          js: ["site-observer.js"],
+          run_at: "document_idle",
+        },
+      ],
+      "the only content script must be the CHZZK live-site observer",
+    );
     assert.equal(
       existsSync(new URL("../../inject.js", import.meta.url)),
       false,

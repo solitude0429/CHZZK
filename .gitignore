@@ -3,3 +3,5 @@ dist/
 web-ext-artifacts/
 *.zip
 .hermes/
+__pycache__/
+*.pyc
