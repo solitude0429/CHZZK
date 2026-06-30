@@ -1,0 +1,12 @@
+{
+  "targetQuality": "1080p",
+  "minRedirectQuality": "100p",
+  "urlQualityPrefixes": ["chunklist_", "/"],
+  "mediaExtensions": ["m3u8"],
+  "maxDiagnosticsSamples": 200,
+  "notes": [
+    "targetQuality is the highest currently expected NAVER-provided CHZZK HLS quality.",
+    "rules.json is generated; edit this policy and run npm run render:rules.",
+    "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values."
+  ]
+}

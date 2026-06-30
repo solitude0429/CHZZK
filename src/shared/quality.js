@@ -1,19 +1,7 @@
-export const HIGHEST_QUALITY = "1080p";
-export const LOWER_QUALITIES = ["144p", "240p", "270p", "360p", "480p", "720p"];
-
-const QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
+export const QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
+const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
-const LOWER_QUALITY_PATTERN = LOWER_QUALITIES.join("|");
-const HIGHEST_QUALITY_REPLACEMENTS = [
-  {
-    from: new RegExp(`chunklist_(${LOWER_QUALITY_PATTERN})(?=\\.m3u8(?:[?#]|$))`, "i"),
-    to: `chunklist_${HIGHEST_QUALITY}`,
-  },
-  {
-    from: new RegExp(`(?<=/)(${LOWER_QUALITY_PATTERN})(?=/)`, "i"),
-    to: HIGHEST_QUALITY,
-  },
-];
+const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
 
 export function normalizeQualityLabel(value) {
   if (typeof value !== "string") return null;
@@ -21,10 +9,17 @@ export function normalizeQualityLabel(value) {
   const resolutionMatch = value.match(RESOLUTION_RE);
   if (resolutionMatch) return `${Number(resolutionMatch[2])}p`;
 
-  const qualityMatch = value.match(QUALITY_RE);
+  const qualityMatch = value.match(TEXT_QUALITY_RE);
   if (!qualityMatch) return null;
 
   return `${Number(qualityMatch[1])}p`;
+}
+
+export function qualityNumber(label) {
+  const normalized = normalizeQualityLabel(label);
+  if (!normalized) return null;
+  const match = normalized.match(QUALITY_LABEL_RE);
+  return match ? Number(match[1]) : null;
 }
 
 export function parseQualityFromUrl(url) {
@@ -37,7 +32,8 @@ export function parseQualityFromUrl(url) {
     pathname = url.split("?")[0].split("#")[0];
   }
 
-  return normalizeQualityLabel(pathname);
+  const pathQuality = pathname.match(PATH_QUALITY_RE);
+  return pathQuality ? normalizeQualityLabel(pathQuality[1]) : normalizeQualityLabel(pathname);
 }
 
 export function redactMediaUrl(url) {
@@ -54,15 +50,85 @@ export function redactMediaUrl(url) {
   }
 }
 
-export function buildHighestQualityRedirectUrl(url) {
-  if (typeof url !== "string") return null;
+function compactDigitsPattern(width) {
+  return width === 1 ? "[0-9]" : `[0-9]{${width}}`;
+}
 
-  const currentQuality = parseQualityFromUrl(url);
-  if (!LOWER_QUALITIES.includes(currentQuality)) return null;
-
-  for (const { from, to } of HIGHEST_QUALITY_REPLACEMENTS) {
-    if (from.test(url)) return url.replace(from, to);
+function regexForZeroToMax(maxText) {
+  if (!/^\d+$/.test(maxText)) throw new Error(`invalid numeric max: ${maxText}`);
+  if ([...maxText].every((digit) => digit === "9")) return compactDigitsPattern(maxText.length);
+  if (maxText.length === 1) {
+    const maxDigit = Number(maxText);
+    return maxDigit === 0 ? "0" : `[0-${maxDigit}]`;
   }
 
-  return null;
+  const firstDigit = Number(maxText[0]);
+  const rest = maxText.slice(1);
+  const parts = [];
+  if (firstDigit > 0) parts.push(`[0-${firstDigit - 1}]${compactDigitsPattern(rest.length)}`);
+  parts.push(`${firstDigit}${regexForZeroToMax(rest)}`);
+  return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
+}
+
+function regexFromPowerOfTenToMax(maxText) {
+  if (!/^\d+$/.test(maxText)) throw new Error(`invalid numeric max: ${maxText}`);
+  if ([...maxText].every((digit) => digit === "9")) {
+    return maxText.length === 1 ? "[1-9]" : `[1-9]${compactDigitsPattern(maxText.length - 1)}`;
+  }
+
+  const firstDigit = Number(maxText[0]);
+  const rest = maxText.slice(1);
+  const parts = [];
+  if (firstDigit > 1) parts.push(`[1-${firstDigit - 1}]${compactDigitsPattern(rest.length)}`);
+  parts.push(`${firstDigit}${regexForZeroToMax(rest)}`);
+  return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
+}
+
+export function lowerQualityNumberRegex(targetQuality, minQuality = "100p") {
+  const target = qualityNumber(targetQuality);
+  const min = qualityNumber(minQuality);
+  if (!target || !min || min >= target) {
+    throw new Error(`invalid quality range: min=${minQuality}, target=${targetQuality}`);
+  }
+
+  const parts = [];
+  const targetDigits = String(target).length;
+  for (let width = String(min).length; width <= targetDigits; width += 1) {
+    const start = Math.max(min, 10 ** (width - 1));
+    const end = Math.min(target - 1, 10 ** width - 1);
+    if (start > end) continue;
+
+    if (start === 10 ** (width - 1) && end === 10 ** width - 1) {
+      parts.push(width === 1 ? "[1-9]" : `[1-9]${compactDigitsPattern(width - 1)}`);
+      continue;
+    }
+
+    if (start === 10 ** (width - 1)) {
+      parts.push(regexFromPowerOfTenToMax(String(end)));
+      continue;
+    }
+
+    throw new Error(`unsupported non-power-of-ten lower bound: ${start}-${end}`);
+  }
+
+  return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
+}
+
+export function buildQualityRegexFilter({ targetQuality, minRedirectQuality = "100p" }) {
+  const lowerPattern = lowerQualityNumberRegex(targetQuality, minRedirectQuality);
+  return `(.*(?:chunklist_|/))(${lowerPattern}p)(.*\\.m3u8.*)`;
+}
+
+export function buildHighestQualityRedirectUrl(
+  url,
+  { targetQuality = "1080p", minRedirectQuality = "100p" } = {},
+) {
+  if (typeof url !== "string") return null;
+
+  const currentQuality = qualityNumber(parseQualityFromUrl(url));
+  const target = qualityNumber(targetQuality);
+  const min = qualityNumber(minRedirectQuality);
+  if (!currentQuality || !target || !min || currentQuality < min || currentQuality >= target) return null;
+
+  return url.replace(/(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i, `$1${targetQuality}$3`);
 }
