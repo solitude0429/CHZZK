@@ -80,7 +80,7 @@ jobs:
           - Firefox automatic-update manifest targets the private internal HTTPS update host.
 
           ## Update manifest
-          - https://alpha-apple.dedyn.io/chzzk/updates.json
+          - https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 
           ## Assets
           - \`chzzk-${{ steps.package.outputs.version }}-signed.xpi\` — signed install/update package.

@@ -29,7 +29,7 @@ assert.equal(statSync(signedXpiPath).isFile(), true, `${releaseXpi} must exist`)
 run("node", ["scripts/build-update-manifest.js"], {
   env: {
     ...process.env,
-    RELEASE_BASE_URL: "https://alpha-apple.dedyn.io/chzzk",
+    RELEASE_BASE_URL: "https://chzzk-updates.alpha-apple.dedyn.io",
     SIGNED_XPI: signedXpiPath,
     UPDATE_SITE_DIR: workDir,
   },
@@ -49,4 +49,4 @@ for (const file of ["updates.json", "index.html", releaseXpi, releaseZip]) {
 }
 
 console.log(`deployed CHZZK ${version} update files to ${targetDir}`);
-console.log("update manifest: https://alpha-apple.dedyn.io/chzzk/updates.json");
+console.log("update manifest: https://chzzk-updates.alpha-apple.dedyn.io/updates.json");

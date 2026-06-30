@@ -4,7 +4,7 @@
 
 ## 현재 버전
 
-- `0.0.3`
+- `0.0.4`
 - `0.0.1` 설치 검증 이후 자동 업데이트 인프라를 추가한 패치입니다.
 - 이후 변경은 patch/minor 단위로 올립니다.
 
@@ -110,7 +110,7 @@ URL shape가 변경된 경우에는 redacted fixture를 추가하고 `src/shared
 
 Firefox Release/Beta에 일반 설치하려면 Mozilla 서명이 필요합니다. 개인용이면 AMO unlisted 채널을 사용합니다. 자세한 절차는 `docs/SIGNING.md`를 확인하세요.
 
-`0.0.3`부터는 자동 업데이트용 `update_url`이 들어 있습니다. update manifest와 signed XPI는 내부 HTTPS update host의 `https://alpha-apple.dedyn.io/chzzk/` 아래에 배포됩니다. 자세한 구조와 릴리즈 절차는 `docs/UPDATES.md`를 확인하세요.
+`0.0.4`부터는 자동 업데이트용 `update_url`이 들어 있습니다. update manifest와 signed XPI는 내부 HTTPS update host의 `https://chzzk-updates.alpha-apple.dedyn.io/` 아래에 배포됩니다. 자세한 구조와 릴리즈 절차는 `docs/UPDATES.md`를 확인하세요.
 
 주의: Mozilla unlisted signing은 Firefox 설치 가능성을 위한 서명이지, 네이버가 공식 승인한 프로그램이라는 의미가 아닙니다.
 

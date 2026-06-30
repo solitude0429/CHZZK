@@ -14,14 +14,14 @@ const update = updates.addons?.[addonId]?.updates?.[0];
 
 assert.equal(
   updateUrl,
-  "https://alpha-apple.dedyn.io/chzzk/updates.json",
+  "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
   "manifest update_url must be the internal HTTPS update manifest",
 );
 assert.ok(update, `updates.json must include ${addonId}`);
 assert.equal(update.version, packageJson.version, "update entry version must match package.json");
 assert.match(
   update.update_link,
-  /^https:\/\/alpha-apple\.dedyn\.io\/chzzk\/chzzk-[^/]+-signed\.xpi$/,
+  /^https:\/\/chzzk-updates\.alpha-apple\.dedyn\.io\/chzzk-[^/]+-signed\.xpi$/,
   "update_link must point at the internally hosted signed XPI",
 );
 assert.equal(

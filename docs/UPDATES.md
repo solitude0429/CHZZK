@@ -5,7 +5,7 @@
 ## 구조
 
 - 확장 `manifest.json`의 `browser_specific_settings.gecko.update_url`:
-  - `https://alpha-apple.dedyn.io/chzzk/updates.json`
+  - `https://chzzk-updates.alpha-apple.dedyn.io/updates.json`
 - `updates.json`과 signed XPI는 VPS nginx의 `/var/www/chzzk-updates/`에서 제공됩니다.
 - GitHub Release는 서명 산출물의 원본 보관소입니다.
 - VPS 배포 스크립트가 private GitHub Release에서 signed XPI를 내려받고 내부 update host에 복사합니다.
@@ -13,7 +13,7 @@
 
 ## 첫 설치 주의
 
-자동 업데이트는 `update_url`이 들어 있는 버전부터 동작합니다. `0.0.1`에는 `update_url`이 없었고, `0.0.2`는 GitHub Pages 경로 실험용이었기 때문에, 자동 업데이트를 쓰려면 `0.0.3` 이상 signed XPI를 한 번 수동 설치해야 합니다.
+자동 업데이트는 `update_url`이 들어 있는 버전부터 동작합니다. `0.0.1`에는 `update_url`이 없었고, `0.0.2`~`0.0.3`은 update host 정리 전 실험용이었기 때문에, 자동 업데이트를 쓰려면 `0.0.4` 이상 signed XPI를 한 번 수동 설치해야 합니다.
 
 이전에 더 높은 번호의 실험 버전을 설치했다면 Firefox 업데이트 경로로 `0.0.x`가 들어가지 않습니다. 그 경우 기존 확장을 제거한 뒤 최신 signed XPI를 설치하세요.
 
@@ -44,7 +44,7 @@ npm run deploy:updates:internal
 배포 후 다음 URL이 열려야 합니다.
 
 ```text
-https://alpha-apple.dedyn.io/chzzk/updates.json
+https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 ```
 
 로컬에서 update manifest를 만들고 검증하려면 signed XPI가 필요합니다.
