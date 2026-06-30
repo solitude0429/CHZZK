@@ -45,7 +45,8 @@ npx web-ext run --source-dir . --firefox-profile /tmp/chzzk-firefox-profile
 2. CHZZK 라이브 페이지를 엽니다.
 3. 화질 메뉴에서 `CHZZK` 배지가 붙은 항목을 선택합니다.
 4. 개발자도구 Network 탭에서 실제 HLS 요청 품질을 확인합니다.
-5. 문제가 있으면 URL query/cookie/token은 제거하고 DOM/HLS fixture만 저장합니다.
+5. 콘솔에서 `[CHZZK] observed HLS qualities` 로그를 확인합니다. 이 로그는 query/hash를 제거한 URL만 표시합니다.
+6. 문제가 있으면 URL query/cookie/token은 제거하고 DOM/HLS fixture만 저장합니다.
 
 ## 라이선스/출처
 

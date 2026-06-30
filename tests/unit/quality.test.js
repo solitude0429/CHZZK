@@ -6,7 +6,9 @@ import {
   normalizeQualityLabel,
   parseQualitiesFromPlaylist,
   parseQualityFromUrl,
+  planQualityUpgrade,
   redactMediaUrl,
+  rewriteMediaUrlQuality,
 } from "../../src/shared/quality.js";
 
 describe("quality helpers", () => {
@@ -44,5 +46,42 @@ chunklist_480p.m3u8
       redactMediaUrl("https://example.test/1080p/chunklist.m3u8?Policy=secret#frag"),
       "https://example.test/1080p/chunklist.m3u8?[redacted]",
     );
+  });
+
+  it("rewrites only the quality segment while preserving signed URL tails", () => {
+    assert.equal(
+      rewriteMediaUrlQuality("https://cdn.test/live/chunklist_480p.m3u8?Policy=secret#frag", "1080p"),
+      "https://cdn.test/live/chunklist_1080p.m3u8?Policy=secret#frag",
+    );
+    assert.equal(
+      rewriteMediaUrlQuality("https://cdn.test/live/480p/chunklist.m3u8?Policy=secret", "1080p"),
+      "https://cdn.test/live/1080p/chunklist.m3u8?Policy=secret",
+    );
+  });
+
+  it("refuses to rewrite when the requested target is not in observed variants", () => {
+    const plan = planQualityUpgrade({
+      mediaUrl: "https://cdn.test/live/chunklist_480p.m3u8?Policy=secret",
+      observedQualities: ["480p", "720p"],
+      preferredQuality: "1080p",
+    });
+
+    assert.equal(plan.action, "keep");
+    assert.equal(plan.reason, "preferred-quality-unavailable");
+    assert.equal(plan.targetQuality, "720p");
+    assert.equal(plan.redirectUrl, null);
+  });
+
+  it("plans a highest-available upgrade only when the variant is observed", () => {
+    const plan = planQualityUpgrade({
+      mediaUrl: "https://cdn.test/live/chunklist_480p.m3u8?Policy=secret",
+      observedQualities: ["480p", "720p", "1080p"],
+    });
+
+    assert.equal(plan.action, "upgrade");
+    assert.equal(plan.currentQuality, "480p");
+    assert.equal(plan.targetQuality, "1080p");
+    assert.equal(plan.redirectUrl, "https://cdn.test/live/chunklist_1080p.m3u8?Policy=secret");
+    assert.equal(plan.logUrl, "https://cdn.test/live/chunklist_480p.m3u8?[redacted]");
   });
 });

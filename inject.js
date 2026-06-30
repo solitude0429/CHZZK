@@ -7,6 +7,9 @@
   const DISPLAY_LABEL = "1080p";
   const BADGE_TEXT = "CHZZK";
   const LIVE_URL_RE = /^https:\/\/chzzk\.naver\.com\/live\/[0-9a-z]+/i;
+  const MEDIA_PLAYLIST_RE = /\.m3u8(?:[?#]|$)/i;
+  const QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
+  const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   const QUALITY_LIST_SELECTOR = "ul.pzp-setting-quality-pane__list-container";
   const QUALITY_ITEM_SELECTORS = [
     `${QUALITY_LIST_SELECTOR} > li`,
@@ -16,6 +19,9 @@
 
   let qualityListElement = null;
   let observerTick = 0;
+  let performanceScanCursor = 0;
+  let lastQualityDiagnostic = "";
+  const observedQualities = new Set();
 
   function log(...args) {
     console.log(LOG_PREFIX, ...args);
@@ -31,6 +37,101 @@
 
   function safeText(element) {
     return element?.innerText?.trim() ?? "";
+  }
+
+  function normalizeQualityLabel(value) {
+    if (typeof value !== "string") return null;
+
+    const resolutionMatch = value.match(RESOLUTION_RE);
+    if (resolutionMatch) return `${Number(resolutionMatch[2])}p`;
+
+    const qualityMatch = value.match(QUALITY_RE);
+    if (!qualityMatch) return null;
+
+    return `${Number(qualityMatch[1])}p`;
+  }
+
+  function qualityRank(label) {
+    const normalized = normalizeQualityLabel(label);
+    if (!normalized) return -1;
+    return Number(normalized.slice(0, -1));
+  }
+
+  function chooseHighestQuality(labels) {
+    const normalizedLabels = [...new Set(labels.map(normalizeQualityLabel).filter(Boolean))];
+    if (normalizedLabels.length === 0) return null;
+
+    return normalizedLabels.sort((a, b) => qualityRank(b) - qualityRank(a))[0];
+  }
+
+  function parseQualityFromUrl(url) {
+    if (typeof url !== "string") return null;
+    let pathname = url;
+
+    try {
+      pathname = new URL(url).pathname;
+    } catch {
+      pathname = url.split("?")[0].split("#")[0];
+    }
+
+    return normalizeQualityLabel(pathname);
+  }
+
+  function redactMediaUrl(url) {
+    if (typeof url !== "string" || url === "") return "";
+
+    try {
+      const parsed = new URL(url);
+      const hadSensitiveTail = parsed.search || parsed.hash;
+      parsed.search = "";
+      parsed.hash = "";
+      return `${parsed.toString()}${hadSensitiveTail ? "?[redacted]" : ""}`;
+    } catch {
+      return url.replace(/[?#].*$/, "?[redacted]");
+    }
+  }
+
+  function recordMediaUrl(url) {
+    if (typeof url !== "string" || !MEDIA_PLAYLIST_RE.test(url)) return;
+
+    const quality = parseQualityFromUrl(url);
+    if (!quality) return;
+
+    observedQualities.add(quality);
+    const highestQuality = chooseHighestQuality([...observedQualities]);
+    const diagnosticKey = `${highestQuality}:${[...observedQualities].sort().join(",")}`;
+    if (diagnosticKey === lastQualityDiagnostic) return;
+
+    lastQualityDiagnostic = diagnosticKey;
+    log("observed HLS qualities", {
+      highestQuality,
+      qualities: [...observedQualities].sort((a, b) => qualityRank(a) - qualityRank(b)),
+      sampleUrl: redactMediaUrl(url),
+    });
+  }
+
+  function scanPerformanceEntries() {
+    if (!globalThis.performance?.getEntriesByType) return;
+
+    const entries = performance.getEntriesByType("resource");
+    for (let index = performanceScanCursor; index < entries.length; index += 1) {
+      recordMediaUrl(entries[index]?.name);
+    }
+    performanceScanCursor = entries.length;
+  }
+
+  function startMediaDiagnostics() {
+    scanPerformanceEntries();
+
+    if (!globalThis.PerformanceObserver) return;
+    try {
+      const performanceObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) recordMediaUrl(entry.name);
+      });
+      performanceObserver.observe({ type: "resource", buffered: true });
+    } catch (error) {
+      warn("media diagnostics unavailable", error);
+    }
   }
 
   function getQualityItems() {
@@ -168,6 +269,7 @@
     if (document.readyState !== "complete" || !isLivePage()) return;
 
     try {
+      scanPerformanceEntries();
       updateQualityText();
       bindQualityListEvents();
       restoreQuality();
@@ -185,6 +287,7 @@
   globalThis.__CHZZK_EXTENSION_INJECTED__ = true;
 
   log("page script injected");
+  startMediaDiagnostics();
   const observer = new MutationObserver(scheduleTick);
   observer.observe(document.body, {
     attributeFilter: ["class", "aria-selected"],

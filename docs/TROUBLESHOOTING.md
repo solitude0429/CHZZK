@@ -19,6 +19,14 @@ add a regression test under `tests/fixtures/dom/` before changing selectors.
 Check whether the current session actually receives a high-quality HLS variant. If the playlist or URL does not expose
 that variant, the extension should fail closed instead of guessing or looping.
 
+The injected page script logs `[CHZZK] observed HLS qualities` when it sees HLS playlist requests. The logged sample URL
+has query strings and fragments redacted, so it can be copied into an issue after any remaining account/session details
+are removed.
+
+The shared helper `planQualityUpgrade` only returns an upgrade plan when the target quality is already present in the
+observed quality set. If a preferred quality such as `1080p` is not observed, tests require it to keep the current URL
+instead of inventing an unavailable variant.
+
 ## Sensitive data handling
 
 When sharing diagnostics, remove:

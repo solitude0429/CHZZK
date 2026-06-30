@@ -72,3 +72,70 @@ export function redactMediaUrl(url) {
     return url.replace(/[?#].*$/, "?[redacted]");
   }
 }
+
+export function rewriteMediaUrlQuality(url, targetQuality) {
+  const target = normalizeQualityLabel(targetQuality);
+  const current = parseQualityFromUrl(url);
+  if (typeof url !== "string" || !target || !current) return null;
+  if (target === current) return url;
+
+  const currentHeight = current.slice(0, -1);
+  const targetHeight = target.slice(0, -1);
+  const replacements = [
+    {
+      from: new RegExp(`chunklist_${currentHeight}p(?=\\.m3u8(?:[?#]|$))`, "i"),
+      to: `chunklist_${targetHeight}p`,
+    },
+    {
+      from: new RegExp(`(?<=/)${currentHeight}p(?=/)`, "i"),
+      to: `${targetHeight}p`,
+    },
+  ];
+
+  for (const { from, to } of replacements) {
+    if (from.test(url)) return url.replace(from, to);
+  }
+
+  return null;
+}
+
+export function planQualityUpgrade({ mediaUrl, observedQualities = [], preferredQuality = null } = {}) {
+  const currentQuality = parseQualityFromUrl(mediaUrl);
+  const availableQualities = [...new Set(observedQualities.map(normalizeQualityLabel).filter(Boolean))].sort(
+    (a, b) => qualityRank(a) - qualityRank(b),
+  );
+  const highestQuality = chooseHighestQuality(availableQualities);
+  const preferred = normalizeQualityLabel(preferredQuality);
+  const targetQuality = preferred && availableQualities.includes(preferred) ? preferred : highestQuality;
+  const basePlan = {
+    action: "keep",
+    availableQualities,
+    currentQuality,
+    highestQuality,
+    logUrl: redactMediaUrl(mediaUrl),
+    reason: "no-upgrade-needed",
+    redirectUrl: null,
+    targetQuality,
+  };
+
+  if (!currentQuality) return { ...basePlan, reason: "current-quality-unknown" };
+  if (availableQualities.length === 0 || !targetQuality) {
+    return { ...basePlan, reason: "no-observed-qualities" };
+  }
+  if (preferred && !availableQualities.includes(preferred)) {
+    return { ...basePlan, reason: "preferred-quality-unavailable" };
+  }
+  if (qualityRank(targetQuality) <= qualityRank(currentQuality)) {
+    return { ...basePlan, reason: "already-at-or-above-target" };
+  }
+
+  const redirectUrl = rewriteMediaUrlQuality(mediaUrl, targetQuality);
+  if (!redirectUrl) return { ...basePlan, reason: "unsupported-url-shape" };
+
+  return {
+    ...basePlan,
+    action: "upgrade",
+    reason: "highest-observed-quality-available",
+    redirectUrl,
+  };
+}
