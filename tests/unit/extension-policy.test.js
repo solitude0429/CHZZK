@@ -2,22 +2,34 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
+import { buildQualityRegexFilter } from "../../src/shared/quality.js";
+
 const manifest = JSON.parse(readFileSync(new URL("../../manifest.json", import.meta.url), "utf8"));
+const policy = JSON.parse(readFileSync(new URL("../../policy/quality-policy.json", import.meta.url), "utf8"));
 const rules = JSON.parse(readFileSync(new URL("../../rules.json", import.meta.url), "utf8"));
 
 describe("personal CHZZK extension policy", () => {
-  it("uses network-level redirect only, so player DOM changes cannot break the core behavior", () => {
+  it("does not inject into or depend on CHZZK player DOM", () => {
     assert.ok(manifest.permissions?.includes("declarativeNetRequest"));
+    assert.ok(
+      manifest.permissions?.includes("storage"),
+      "storage permission should be used only for local diagnostics",
+    );
+    assert.ok(
+      manifest.permissions?.includes("webRequest"),
+      "webRequest permission should be used only for local diagnostics",
+    );
     assert.ok(!manifest.permissions?.includes("scripting"), "scripting permission should not be needed");
-    assert.equal(manifest.background, undefined, "no background injection script should be shipped");
+    assert.equal(manifest.content_scripts, undefined, "content scripts should not be shipped");
     assert.equal(
       existsSync(new URL("../../inject.js", import.meta.url)),
       false,
       "no page script should be packaged",
     );
+    assert.deepEqual(manifest.background, { scripts: ["background.js"] }, "background is diagnostics-only");
   });
 
-  it("ships a single static ruleset that redirects any lower selected quality to the highest target", () => {
+  it("ships a generated static ruleset based on policy, not a hard-coded current quality list", () => {
     assert.deepEqual(manifest.declarative_net_request?.rule_resources, [
       {
         enabled: true,
@@ -29,8 +41,15 @@ describe("personal CHZZK extension policy", () => {
     assert.equal(rules.length, 1);
     const [rule] = rules;
     assert.equal(rule.action?.type, "redirect");
-    assert.equal(rule.action?.redirect?.regexSubstitution, "\\11080p\\3");
-    assert.equal(rule.condition?.regexFilter, "(.*)(144p|240p|270p|360p|480p|720p)(.*\\.m3u8.*)");
+    assert.equal(rule.action?.redirect?.regexSubstitution, `\\1${policy.targetQuality}\\3`);
+    assert.equal(
+      rule.condition?.regexFilter,
+      buildQualityRegexFilter({
+        minRedirectQuality: policy.minRedirectQuality,
+        targetQuality: policy.targetQuality,
+      }),
+    );
+    assert.equal(rule.condition.regexFilter.includes("360p|480p|720p"), false);
     assert.deepEqual([...rule.condition.resourceTypes].sort(), ["media", "xmlhttprequest"]);
   });
 
@@ -38,6 +57,9 @@ describe("personal CHZZK extension policy", () => {
     const runtimeText = [
       readFileSync(new URL("../../manifest.json", import.meta.url), "utf8"),
       readFileSync(new URL("../../rules.json", import.meta.url), "utf8"),
+      existsSync(new URL("../../background.js", import.meta.url))
+        ? readFileSync(new URL("../../background.js", import.meta.url), "utf8")
+        : "",
     ].join("\n");
 
     assert.equal(runtimeText.includes("with CHZZK GRID"), false);

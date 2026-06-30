@@ -9,6 +9,6 @@ This project is a personal fork/rework of the MIT-licensed upstream project:
 
 The Chrome MV3 port by refracta/FUCK-CHZZK-GRID-CHROME was also used as a reference for Manifest V3 DNR behavior.
 
-Local changes rename the project to CHZZK and change the behavior into a personal extension: no player-menu relabeling, no page script, no DOM dependency, and a static network-level redirect from lower CHZZK HLS playlist qualities to the highest target quality. The extension icon is CHZZK's official favicon from https://ssl.pstatic.net/static/nng/glive/icon/favicon.png.
+Local changes rename the project to CHZZK and change the behavior into a personal extension: no player-menu relabeling, no page script, no DOM dependency, a generated range-based DNR rule from lower numeric CHZZK HLS playlist qualities to the configured target quality, and local-only redacted diagnostics to help update policy if NAVER changes quality levels or URL shapes. The extension icon is CHZZK's official favicon from https://ssl.pstatic.net/static/nng/glive/icon/favicon.png.
 
 The upstream MIT license text is preserved in LICENSE.

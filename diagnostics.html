@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CHZZK diagnostics</title>
+    <style>
+      body {
+        font:
+          13px system-ui,
+          sans-serif;
+        margin: 12px;
+        min-width: 420px;
+      }
+      button {
+        margin: 4px 4px 8px 0;
+      }
+      pre,
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+      }
+      textarea {
+        height: 240px;
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>CHZZK diagnostics</h1>
+    <p>
+      HLS URL query/hash는 저장 전에 제거됩니다. 문제 보고 시 계정/세션 정보가 남아 있지 않은지 한 번 더
+      확인하세요.
+    </p>
+    <button id="refresh">새로고침</button>
+    <button id="copy">JSON 복사</button>
+    <button id="clear">로그 삭제</button>
+    <pre id="summary"></pre>
+    <textarea id="payload" spellcheck="false"></textarea>
+    <script src="diagnostics.js"></script>
+  </body>
+</html>
