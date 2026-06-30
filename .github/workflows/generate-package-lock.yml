@@ -1,0 +1,27 @@
+name: Generate package lock
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "package.json"
+      - ".github/workflows/generate-package-lock.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  generate-package-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --package-lock-only --ignore-scripts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-lock-generated
+          path: package-lock.json
