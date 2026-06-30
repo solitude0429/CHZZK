@@ -1,14 +1,9 @@
 CHZZK
 =====
 
-This project is a personal fork/rework of the MIT-licensed upstream project:
+Personal Firefox WebExtension for tab-scoped CHZZK HLS quality session redirects.
 
-- Upstream: bass9030/FUCK-CHZZK-GRID
-- Upstream purpose: browser extension that bypasses CHZZK's NAVER Live Streaming Connector/grid-program requirement for high-quality playback
-- Upstream license: MIT
+The extension icon uses the CHZZK favicon from:
+https://ssl.pstatic.net/static/nng/glive/icon/favicon.png
 
-The Chrome MV3 port by refracta/FUCK-CHZZK-GRID-CHROME was also used as a reference for Manifest V3 DNR behavior.
-
-Local changes rename the project to CHZZK and change the behavior into a personal extension: no player-menu relabeling, no page script, no DOM dependency, a generated range-based DNR rule from lower numeric CHZZK HLS playlist qualities to the configured target quality, and local-only redacted diagnostics to help update policy if NAVER changes quality levels or URL shapes. The extension icon is CHZZK's official favicon from https://ssl.pstatic.net/static/nng/glive/icon/favicon.png.
-
-The upstream MIT license text is preserved in LICENSE.
+Project license: MIT. See LICENSE.

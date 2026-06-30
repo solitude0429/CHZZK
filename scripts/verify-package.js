@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+
+const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const expectedZip = `chzzk-${packageJson.version}.zip`;
 
 const allowedFiles = new Set([
   "LICENSE",
@@ -13,8 +17,8 @@ const allowedFiles = new Set([
   "manifest.json",
 ]);
 
-const zip = readdirSync("dist").find((name) => /^chzzk-0\.5\.0\.zip$/.test(name));
-assert.ok(zip, "dist/chzzk-0.5.0.zip must exist");
+const zip = readdirSync("dist").find((name) => name === expectedZip);
+assert.ok(zip, `dist/${expectedZip} must exist`);
 
 const result = spawnSync("unzip", ["-Z1", `dist/${zip}`], { encoding: "utf8" });
 if (result.status !== 0) {
