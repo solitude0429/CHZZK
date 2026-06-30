@@ -13,8 +13,8 @@
     }
   },
   "name": "CHZZK",
-  "description": "Personal Firefox extension that redirects CHZZK HLS playlist quality to the highest NAVER-provided target.",
-  "version": "0.4.0",
+  "description": "Personal Firefox extension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
+  "version": "0.5.0",
   "permissions": ["declarativeNetRequest", "storage", "webRequest"],
   "host_permissions": [
     "*://*.akamaized.net/*",
@@ -22,15 +22,6 @@
     "*://*.pstatic.net/*",
     "*://chzzk.naver.com/live/*"
   ],
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "ruleset_1",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
   "background": {
     "scripts": ["background.js"]
   },

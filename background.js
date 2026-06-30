@@ -1,19 +1,57 @@
 (() => {
-  "use strict";
+  // policy/quality-policy.json
+  var quality_policy_default = {
+    targetQuality: "1080p",
+    minRedirectQuality: "100p",
+    trustedInitiatorDomains: ["chzzk.naver.com"],
+    trustedRequestDomains: ["akamaized.net", "navercdn.com", "pstatic.net"],
+    resourceTypes: ["media", "xmlhttprequest"],
+    requestMethods: ["get"],
+    sessionRuleBaseId: 1e5,
+    redirectRulePriority: 1,
+    urlQualityPrefixes: ["chunklist_", "/"],
+    mediaExtensions: ["m3u8"],
+    maxDiagnosticsSamples: 200,
+    notes: [
+      "targetQuality is the highest currently expected NAVER-provided CHZZK HLS quality.",
+      "Runtime redirects are installed as tab-scoped session DNR rules only after a trusted CHZZK live HLS request is observed.",
+      "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values.",
+      "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects.",
+    ],
+  };
 
-  const api = globalThis.browser ?? globalThis.chrome;
-  const STORAGE_KEY = "chzzkDiagnostics";
-  const MAX_SAMPLES = 200;
-  const HLS_RE = /\.m3u8(?:[?#]|$)/i;
-  const QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
-  const CHZZK_PAGE_RE = /^https?:\/\/chzzk\.naver\.com\/live\//i;
-
-  function parseQualityFromUrl(url) {
-    const match = String(url ?? "").match(QUALITY_RE);
-    return match ? `${Number.parseInt(match[1], 10)}p` : null;
+  // src/shared/quality.js
+  var QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
+  var PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
+  var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
+  var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
+  function normalizeQualityLabel(value) {
+    if (typeof value !== "string") return null;
+    const resolutionMatch = value.match(RESOLUTION_RE);
+    if (resolutionMatch) return `${Number(resolutionMatch[2])}p`;
+    const qualityMatch = value.match(TEXT_QUALITY_RE);
+    if (!qualityMatch) return null;
+    return `${Number(qualityMatch[1])}p`;
   }
-
-  function redactUrl(url) {
+  function qualityNumber(label) {
+    const normalized = normalizeQualityLabel(label);
+    if (!normalized) return null;
+    const match = normalized.match(QUALITY_LABEL_RE);
+    return match ? Number(match[1]) : null;
+  }
+  function parseQualityFromUrl(url) {
+    if (typeof url !== "string") return null;
+    let pathname = url;
+    try {
+      pathname = new URL(url).pathname;
+    } catch {
+      pathname = url.split("?")[0].split("#")[0];
+    }
+    const pathQuality = pathname.match(PATH_QUALITY_RE);
+    return pathQuality ? normalizeQualityLabel(pathQuality[1]) : normalizeQualityLabel(pathname);
+  }
+  function redactMediaUrl(url) {
+    if (typeof url !== "string" || url === "") return "";
     try {
       const parsed = new URL(url);
       const hadSensitiveTail = parsed.search || parsed.hash;
@@ -21,75 +59,395 @@
       parsed.hash = "";
       return `${parsed.toString()}${hadSensitiveTail ? "?[redacted]" : ""}`;
     } catch {
-      return String(url ?? "").replace(/[?#].*$/, "?[redacted]");
+      return url.replace(/[?#].*$/, "?[redacted]");
     }
   }
+  function compactDigitsPattern(width) {
+    return width === 1 ? "[0-9]" : `[0-9]{${width}}`;
+  }
+  function regexForZeroToMax(maxText) {
+    if (!/^\d+$/.test(maxText)) throw new Error(`invalid numeric max: ${maxText}`);
+    if ([...maxText].every((digit) => digit === "9")) return compactDigitsPattern(maxText.length);
+    if (maxText.length === 1) {
+      const maxDigit = Number(maxText);
+      return maxDigit === 0 ? "0" : `[0-${maxDigit}]`;
+    }
+    const firstDigit = Number(maxText[0]);
+    const rest = maxText.slice(1);
+    const parts = [];
+    if (firstDigit > 0) parts.push(`[0-${firstDigit - 1}]${compactDigitsPattern(rest.length)}`);
+    parts.push(`${firstDigit}${regexForZeroToMax(rest)}`);
+    return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
+  }
+  function regexFromPowerOfTenToMax(maxText) {
+    if (!/^\d+$/.test(maxText)) throw new Error(`invalid numeric max: ${maxText}`);
+    if ([...maxText].every((digit) => digit === "9")) {
+      return maxText.length === 1 ? "[1-9]" : `[1-9]${compactDigitsPattern(maxText.length - 1)}`;
+    }
+    const firstDigit = Number(maxText[0]);
+    const rest = maxText.slice(1);
+    const parts = [];
+    if (firstDigit > 1) parts.push(`[1-${firstDigit - 1}]${compactDigitsPattern(rest.length)}`);
+    parts.push(`${firstDigit}${regexForZeroToMax(rest)}`);
+    return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
+  }
+  function lowerQualityNumberRegex(targetQuality, minQuality = "100p") {
+    const target = qualityNumber(targetQuality);
+    const min = qualityNumber(minQuality);
+    if (!target || !min || min >= target) {
+      throw new Error(`invalid quality range: min=${minQuality}, target=${targetQuality}`);
+    }
+    const parts = [];
+    const targetDigits = String(target).length;
+    for (let width = String(min).length; width <= targetDigits; width += 1) {
+      const start = Math.max(min, 10 ** (width - 1));
+      const end = Math.min(target - 1, 10 ** width - 1);
+      if (start > end) continue;
+      if (start === 10 ** (width - 1) && end === 10 ** width - 1) {
+        parts.push(width === 1 ? "[1-9]" : `[1-9]${compactDigitsPattern(width - 1)}`);
+        continue;
+      }
+      if (start === 10 ** (width - 1)) {
+        parts.push(regexFromPowerOfTenToMax(String(end)));
+        continue;
+      }
+      throw new Error(`unsupported non-power-of-ten lower bound: ${start}-${end}`);
+    }
+    return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
+  }
+  function buildQualityRegexFilter({ targetQuality, minRedirectQuality = "100p" }) {
+    const lowerPattern = lowerQualityNumberRegex(targetQuality, minRedirectQuality);
+    return `(.*(?:chunklist_|/))(${lowerPattern}p)(.*\\.m3u8.*)`;
+  }
 
-  function emptyDiagnostics() {
+  // src/shared/diagnostics.js
+  function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
     return {
-      generatedAt: new Date(0).toISOString(),
-      maxSamples: MAX_SAMPLES,
+      decisions: [],
+      generatedAt: /* @__PURE__ */ new Date(0).toISOString(),
+      maxSamples,
       qualities: {},
       samples: [],
+      sessionRules: {
+        activeRuleIds: [],
+        activeTabIds: [],
+        lastError: null,
+        updatedAt: /* @__PURE__ */ new Date(0).toISOString(),
+      },
       totalHlsRequests: 0,
     };
   }
-
-  async function loadDiagnostics() {
-    const stored = await api.storage.local.get(STORAGE_KEY);
-    return stored?.[STORAGE_KEY] ?? emptyDiagnostics();
+  function capList(list, maxItems) {
+    if (list.length > maxItems) {
+      list.splice(0, list.length - maxItems);
+    }
   }
-
-  async function saveDiagnostics(diagnostics) {
-    await api.storage.local.set({ [STORAGE_KEY]: diagnostics });
-  }
-
-  function isLikelyChzzkRequest(details) {
-    const pageUrl = details.documentUrl ?? details.originUrl ?? details.initiator ?? "";
-    return pageUrl === "" || CHZZK_PAGE_RE.test(pageUrl);
-  }
-
-  async function recordRequest(details) {
-    if (!details?.url || !HLS_RE.test(details.url) || !isLikelyChzzkRequest(details)) return;
-
-    const quality = parseQualityFromUrl(details.url);
-    if (!quality) return;
-
-    const now = new Date().toISOString();
-    const diagnostics = await loadDiagnostics();
-    diagnostics.generatedAt = now;
-    diagnostics.maxSamples = MAX_SAMPLES;
+  function recordDiagnosticUrl(diagnostics, url, { context = {}, now = /* @__PURE__ */ new Date() } = {}) {
+    if (!diagnostics || typeof url !== "string" || !/\.m3u8(?:[?#]|$)/i.test(url)) return false;
+    const quality = parseQualityFromUrl(url);
+    if (!quality) return false;
     diagnostics.totalHlsRequests = (diagnostics.totalHlsRequests ?? 0) + 1;
     diagnostics.qualities ??= {};
     diagnostics.qualities[quality] = (diagnostics.qualities[quality] ?? 0) + 1;
     diagnostics.samples ??= [];
     diagnostics.samples.push({
       quality,
-      requestId: details.requestId,
-      seenAt: now,
-      type: details.type,
-      url: redactUrl(details.url),
+      seenAt: now.toISOString(),
+      tabId: context.tabId ?? null,
+      type: context.type ?? null,
+      url: redactMediaUrl(url),
     });
-    if (diagnostics.samples.length > MAX_SAMPLES) {
-      diagnostics.samples.splice(0, diagnostics.samples.length - MAX_SAMPLES);
-    }
-
-    await saveDiagnostics(diagnostics);
+    capList(diagnostics.samples, diagnostics.maxSamples ?? 200);
+    diagnostics.generatedAt = now.toISOString();
+    return true;
+  }
+  function recordDecision(diagnostics, decision, details = {}, { now = /* @__PURE__ */ new Date() } = {}) {
+    if (!diagnostics || !decision) return false;
+    diagnostics.decisions ??= [];
+    diagnostics.decisions.push({
+      ok: Boolean(decision.ok),
+      quality: decision.quality ?? null,
+      reason: decision.reason ?? "unknown",
+      seenAt: now.toISOString(),
+      tabId: decision.tabId ?? details.tabId ?? null,
+      type: details.type ?? null,
+      url: redactMediaUrl(details.url ?? ""),
+    });
+    capList(diagnostics.decisions, diagnostics.maxSamples ?? 200);
+    diagnostics.generatedAt = now.toISOString();
+    return true;
+  }
+  function updateSessionRuleDiagnostics(
+    diagnostics,
+    { activeRuleIds = [], activeTabIds = [], lastError = null, now = /* @__PURE__ */ new Date() } = {},
+  ) {
+    if (!diagnostics) return false;
+    diagnostics.sessionRules = {
+      activeRuleIds: [...activeRuleIds].sort((a, b) => a - b),
+      activeTabIds: [...activeTabIds].sort((a, b) => a - b),
+      lastError,
+      updatedAt: now.toISOString(),
+    };
+    diagnostics.generatedAt = now.toISOString();
+    return true;
   }
 
+  // src/shared/session-rules.js
+  var DEFAULT_SESSION_RULE_BASE_ID = 1e5;
+  var DEFAULT_RESOURCE_TYPES = ["media", "xmlhttprequest"];
+  var DEFAULT_REQUEST_METHODS = ["get"];
+  function asArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+  function canonicalDomainFromUrl(value) {
+    if (typeof value !== "string" || value === "") return null;
+    try {
+      return new URL(value).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+  function domainMatches(hostname, canonicalDomain) {
+    return hostname === canonicalDomain || hostname.endsWith(`.${canonicalDomain}`);
+  }
+  function trustedInitiatorDomains(policy) {
+    return asArray(policy.trustedInitiatorDomains).length > 0
+      ? asArray(policy.trustedInitiatorDomains)
+      : ["chzzk.naver.com"];
+  }
+  function trustedRequestDomains(policy) {
+    return asArray(policy.trustedRequestDomains).length > 0
+      ? asArray(policy.trustedRequestDomains)
+      : ["akamaized.net", "navercdn.com", "pstatic.net"];
+  }
+  function resourceTypes(policy) {
+    return asArray(policy.resourceTypes).length > 0 ? asArray(policy.resourceTypes) : DEFAULT_RESOURCE_TYPES;
+  }
+  function requestMethods(policy) {
+    return asArray(policy.requestMethods).length > 0
+      ? asArray(policy.requestMethods)
+      : DEFAULT_REQUEST_METHODS;
+  }
+  function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
+    if (!Number.isSafeInteger(tabId) || tabId < 0) {
+      throw new Error(`invalid tabId for session DNR rule: ${tabId}`);
+    }
+    return baseId + tabId;
+  }
+  function isTrustedRequestDomain(url, policy) {
+    const hostname = canonicalDomainFromUrl(url);
+    if (!hostname) return false;
+    return trustedRequestDomains(policy).some((domain) => domainMatches(hostname, domain));
+  }
+  function isChzzkLiveUrl(url, policy) {
+    if (typeof url !== "string" || url === "") return false;
+    try {
+      const parsed = new URL(url);
+      if (
+        !trustedInitiatorDomains(policy).some((domain) =>
+          domainMatches(parsed.hostname.toLowerCase(), domain),
+        )
+      ) {
+        return false;
+      }
+      return parsed.pathname === "/live" || parsed.pathname.startsWith("/live/");
+    } catch {
+      return false;
+    }
+  }
+  function isTrustedChzzkContext(details, policy) {
+    if (!details || details.tabId == null || details.tabId < 0) return false;
+    if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
+    if (isChzzkLiveUrl(details.originUrl, policy)) return true;
+    const initiatorDomain = canonicalDomainFromUrl(details.initiator);
+    const hasTrustedInitiator = Boolean(
+      initiatorDomain &&
+      trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
+    );
+    return Boolean(
+      hasTrustedInitiator &&
+      [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
+    );
+  }
+  function shouldRecordDiagnostics(details, policy) {
+    if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
+    if (!Number.isSafeInteger(details.tabId) || details.tabId < 0) return false;
+    if (!isTrustedRequestDomain(details.url, policy)) return false;
+    return isTrustedChzzkContext(details, policy);
+  }
+  function shouldBootstrapSessionRule(details, policy) {
+    const tabId = details?.tabId;
+    if (!Number.isSafeInteger(tabId) || tabId < 0) {
+      return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
+    }
+    const allowedTypes = resourceTypes(policy);
+    if (details.type && !allowedTypes.includes(details.type)) {
+      return { ok: false, reason: "unsupported-resource-type", tabId };
+    }
+    const allowedMethods = requestMethods(policy);
+    const method = String(details.method ?? "GET").toLowerCase();
+    if (!allowedMethods.includes(method)) {
+      return { ok: false, reason: "unsupported-request-method", tabId };
+    }
+    if (!isTrustedRequestDomain(details.url, policy)) {
+      return { ok: false, reason: "untrusted-request-domain", tabId };
+    }
+    if (!isTrustedChzzkContext(details, policy)) {
+      return { ok: false, reason: "untrusted-initiator", tabId };
+    }
+    const quality = parseQualityFromUrl(details.url);
+    const current = qualityNumber(quality);
+    const target = qualityNumber(policy.targetQuality);
+    const min = qualityNumber(policy.minRedirectQuality ?? "100p");
+    if (!quality || !current || !target || !min) {
+      return { ok: false, reason: "unknown-quality-shape", tabId };
+    }
+    if (current < min) {
+      return { ok: false, quality, reason: "quality-below-minimum", tabId };
+    }
+    if (current >= target) {
+      return { ok: false, quality, reason: "target-or-higher-quality", tabId };
+    }
+    return { ok: true, quality, reason: "eligible-lower-quality-chzzk-hls", tabId };
+  }
+  function buildScopedSessionRule({ policy, tabId }) {
+    return {
+      id: sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? DEFAULT_SESSION_RULE_BASE_ID }),
+      priority: policy.redirectRulePriority ?? 1,
+      action: {
+        type: "redirect",
+        redirect: {
+          regexSubstitution: `\\1${policy.targetQuality}\\3`,
+        },
+      },
+      condition: {
+        regexFilter: buildQualityRegexFilter({
+          minRedirectQuality: policy.minRedirectQuality,
+          targetQuality: policy.targetQuality,
+        }),
+        initiatorDomains: trustedInitiatorDomains(policy),
+        isUrlFilterCaseSensitive: false,
+        requestDomains: trustedRequestDomains(policy),
+        requestMethods: requestMethods(policy),
+        resourceTypes: resourceTypes(policy),
+        tabIds: [tabId],
+      },
+    };
+  }
+
+  // src/runtime/background.js
+  var api = globalThis.browser ?? globalThis.chrome;
+  var STORAGE_KEY = "chzzkDiagnostics";
+  var activeRulesByTab = /* @__PURE__ */ new Map();
+  async function loadDiagnostics() {
+    const stored = await api.storage.local.get(STORAGE_KEY);
+    return (
+      stored?.[STORAGE_KEY] ??
+      createEmptyDiagnostics({ maxSamples: quality_policy_default.maxDiagnosticsSamples })
+    );
+  }
+  async function saveDiagnostics(diagnostics) {
+    await api.storage.local.set({ [STORAGE_KEY]: diagnostics });
+  }
+  async function mutateDiagnostics(mutator) {
+    const diagnostics = await loadDiagnostics();
+    mutator(diagnostics);
+    await saveDiagnostics(diagnostics);
+  }
+  function currentRuleState(lastError = null) {
+    return {
+      activeRuleIds: [...activeRulesByTab.values()],
+      activeTabIds: [...activeRulesByTab.keys()],
+      lastError,
+    };
+  }
+  function ownedRuleIdsFromSessionRules(rules) {
+    const baseId = quality_policy_default.sessionRuleBaseId ?? 1e5;
+    return rules
+      .map((rule) => rule.id)
+      .filter((id) => Number.isSafeInteger(id) && id >= baseId && id < baseId + 1e5);
+  }
+  async function clearOwnedSessionRules() {
+    if (!api.declarativeNetRequest?.getSessionRules) return;
+    const rules = await api.declarativeNetRequest.getSessionRules();
+    const removeRuleIds = ownedRuleIdsFromSessionRules(rules ?? []);
+    if (removeRuleIds.length > 0) {
+      await api.declarativeNetRequest.updateSessionRules({ removeRuleIds });
+    }
+    activeRulesByTab.clear();
+    await mutateDiagnostics((diagnostics) => {
+      updateSessionRuleDiagnostics(diagnostics, currentRuleState());
+    });
+  }
+  async function ensureTabSessionRule(tabId) {
+    const ruleId = sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
+    if (activeRulesByTab.get(tabId) === ruleId) return;
+    const rule = buildScopedSessionRule({ policy: quality_policy_default, tabId });
+    await api.declarativeNetRequest.updateSessionRules({
+      addRules: [rule],
+      removeRuleIds: [ruleId],
+    });
+    activeRulesByTab.set(tabId, ruleId);
+    await mutateDiagnostics((diagnostics) => {
+      updateSessionRuleDiagnostics(diagnostics, currentRuleState());
+    });
+  }
+  async function removeTabSessionRule(tabId) {
+    if (!Number.isSafeInteger(tabId) || tabId < 0) return;
+    const ruleId =
+      activeRulesByTab.get(tabId) ??
+      sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
+    activeRulesByTab.delete(tabId);
+    try {
+      await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
+      await mutateDiagnostics((diagnostics) => {
+        updateSessionRuleDiagnostics(diagnostics, currentRuleState());
+      });
+    } catch (error) {
+      await mutateDiagnostics((diagnostics) => {
+        updateSessionRuleDiagnostics(diagnostics, currentRuleState(String(error?.message ?? error)));
+      });
+    }
+  }
+  async function handleRequest(details) {
+    const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
+    const decision = shouldBootstrapSessionRule(details, quality_policy_default);
+    if (shouldRecord) {
+      await mutateDiagnostics((diagnostics) => {
+        recordDiagnosticUrl(diagnostics, details.url, { context: details });
+        recordDecision(diagnostics, decision, details);
+      });
+    }
+    if (!decision.ok) return;
+    try {
+      await ensureTabSessionRule(decision.tabId);
+    } catch (error) {
+      await mutateDiagnostics((diagnostics) => {
+        updateSessionRuleDiagnostics(diagnostics, currentRuleState(String(error?.message ?? error)));
+      });
+      console.warn("[CHZZK] failed to install session redirect rule", error);
+    }
+  }
   api.webRequest.onBeforeRequest.addListener(
     (details) => {
-      recordRequest(details).catch((error) => console.warn("[CHZZK] diagnostics failed", error));
+      handleRequest(details).catch((error) =>
+        console.warn("[CHZZK] diagnostics/session bootstrap failed", error),
+      );
     },
     {
       urls: ["*://*.akamaized.net/*", "*://*.navercdn.com/*", "*://*.pstatic.net/*"],
-      types: ["media", "xmlhttprequest"],
+      types: quality_policy_default.resourceTypes,
     },
   );
-
-  api.runtime.onInstalled?.addListener(async () => {
-    const diagnostics = await loadDiagnostics();
-    diagnostics.maxSamples = MAX_SAMPLES;
-    await saveDiagnostics(diagnostics);
+  api.tabs?.onRemoved?.addListener((tabId) => {
+    removeTabSessionRule(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to remove tab session rule", error),
+    );
+  });
+  api.runtime.onInstalled?.addListener(() => {
+    clearOwnedSessionRules().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  });
+  api.runtime.onStartup?.addListener(() => {
+    clearOwnedSessionRules().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
   });
 })();

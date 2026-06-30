@@ -21,14 +21,17 @@ describe("highest-quality redirect helpers", () => {
   });
 
   it("parses quality labels from known HLS URL shapes", () => {
-    assert.equal(parseQualityFromUrl("https://example.test/live/chunklist_1080p.m3u8?token=secret"), "1080p");
+    assert.equal(
+      parseQualityFromUrl("https://example.test/live/chunklist_1080p.m3u8?token=example"),
+      "1080p",
+    );
     assert.equal(parseQualityFromUrl("https://example.test/abc/1080p/segment.m3u8"), "1080p");
     assert.equal(parseQualityFromUrl("https://example.test/abc/playlist.m3u8"), null);
   });
 
   it("redacts query strings and fragments from media URLs before logging", () => {
     assert.equal(
-      redactMediaUrl("https://example.test/1080p/chunklist.m3u8?Policy=secret#frag"),
+      redactMediaUrl("https://example.test/1080p/chunklist.m3u8?Policy=example#frag"),
       "https://example.test/1080p/chunklist.m3u8?[redacted]",
     );
   });
@@ -54,27 +57,27 @@ describe("highest-quality redirect helpers", () => {
   it("redirects current and future lower numeric HLS qualities while preserving signed URL tails", () => {
     for (const quality of ["144p", "270p", "360p", "480p", "540p", "720p", "900p", "1000p", "1079p"]) {
       assert.equal(
-        buildHighestQualityRedirectUrl(`https://cdn.test/live/chunklist_${quality}.m3u8?Policy=secret#frag`),
-        "https://cdn.test/live/chunklist_1080p.m3u8?Policy=secret#frag",
+        buildHighestQualityRedirectUrl(`https://cdn.test/live/chunklist_${quality}.m3u8?Policy=example#frag`),
+        "https://cdn.test/live/chunklist_1080p.m3u8?Policy=example#frag",
       );
       assert.equal(
-        buildHighestQualityRedirectUrl(`https://cdn.test/live/${quality}/chunklist.m3u8?Policy=secret`),
-        "https://cdn.test/live/1080p/chunklist.m3u8?Policy=secret",
+        buildHighestQualityRedirectUrl(`https://cdn.test/live/${quality}/chunklist.m3u8?Policy=example`),
+        "https://cdn.test/live/1080p/chunklist.m3u8?Policy=example",
       );
     }
   });
 
   it("does not rewrite target-or-higher playlist requests", () => {
     assert.equal(
-      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1080p.m3u8?Policy=secret"),
+      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1080p.m3u8?Policy=example"),
       null,
     );
     assert.equal(
-      buildHighestQualityRedirectUrl("https://cdn.test/live/1080p/chunklist.m3u8?Policy=secret"),
+      buildHighestQualityRedirectUrl("https://cdn.test/live/1080p/chunklist.m3u8?Policy=example"),
       null,
     );
     assert.equal(
-      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1440p.m3u8?Policy=secret"),
+      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1440p.m3u8?Policy=example"),
       null,
     );
   });

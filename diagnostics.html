@@ -10,7 +10,7 @@
           13px system-ui,
           sans-serif;
         margin: 12px;
-        min-width: 420px;
+        min-width: 460px;
       }
       button {
         margin: 4px 4px 8px 0;
@@ -21,17 +21,24 @@
         width: 100%;
       }
       textarea {
-        height: 240px;
+        height: 280px;
         font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
         font-size: 12px;
+      }
+      .warning {
+        color: #8a4b00;
       }
     </style>
   </head>
   <body>
     <h1>CHZZK diagnostics</h1>
     <p>
-      HLS URL query/hash는 저장 전에 제거됩니다. 문제 보고 시 계정/세션 정보가 남아 있지 않은지 한 번 더
-      확인하세요.
+      CHZZK live tab에서 관측된 HLS 요청만 로컬에 저장합니다. HLS URL query/hash는 저장 전에 제거됩니다. 문제
+      보고 시 계정/세션 정보가 남아 있지 않은지 한 번 더 확인하세요.
+    </p>
+    <p class="warning">
+      이 popup은 네이버 공식 승인 상태를 의미하지 않습니다. Firefox 설치용 서명과 서비스 제공자 승인은
+      별개입니다.
     </p>
     <button id="refresh">새로고침</button>
     <button id="copy">JSON 복사</button>
