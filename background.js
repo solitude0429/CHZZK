@@ -13,7 +13,7 @@
     mediaExtensions: ["m3u8"],
     maxDiagnosticsSamples: 200,
     notes: [
-      "targetQuality is the highest currently expected NAVER-provided CHZZK HLS quality.",
+      "targetQuality is the configured CHZZK HLS redirect target, not a guarantee that NAVER currently provides that quality for every live stream.",
       "Runtime redirects are installed as tab-scoped session DNR rules only after a trusted CHZZK live HLS request is observed.",
       "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values.",
       "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects.",
@@ -229,6 +229,7 @@
 
   // src/shared/session-rules.js
   var DEFAULT_SESSION_RULE_BASE_ID = 1e5;
+  var SESSION_RULE_ID_RANGE = 1e5;
   var DEFAULT_RESOURCE_TYPES = ["media", "xmlhttprequest"];
   var DEFAULT_REQUEST_METHODS = ["get"];
   function asArray(value) {
@@ -264,7 +265,7 @@
       : DEFAULT_REQUEST_METHODS;
   }
   function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0) {
+    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
       throw new Error(`invalid tabId for session DNR rule: ${tabId}`);
     }
     return baseId + tabId;
@@ -291,7 +292,9 @@
     }
   }
   function isTrustedChzzkContext(details, policy) {
-    if (!details || details.tabId == null || details.tabId < 0) return false;
+    if (!details || details.tabId == null || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
+      return false;
+    }
     if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
     if (isChzzkLiveUrl(details.originUrl, policy)) return true;
     const initiatorDomain = canonicalDomainFromUrl(details.initiator);
@@ -306,13 +309,15 @@
   }
   function shouldRecordDiagnostics(details, policy) {
     if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
-    if (!Number.isSafeInteger(details.tabId) || details.tabId < 0) return false;
+    if (!Number.isSafeInteger(details.tabId) || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
+      return false;
+    }
     if (!isTrustedRequestDomain(details.url, policy)) return false;
     return isTrustedChzzkContext(details, policy);
   }
   function shouldBootstrapSessionRule(details, policy) {
     const tabId = details?.tabId;
-    if (!Number.isSafeInteger(tabId) || tabId < 0) {
+    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
       return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
     }
     const allowedTypes = resourceTypes(policy);
@@ -470,19 +475,74 @@
     return true;
   }
 
+  // src/shared/settings.js
+  var SETTINGS_KEY = "chzzkSettings";
+  var DEFAULT_SETTINGS = Object.freeze({
+    telemetry: Object.freeze({
+      collectorEnabled: false,
+      sendDiagnostics: false,
+      sendErrors: false,
+      sendStructure: false,
+    }),
+  });
+  function asBoolean(value, fallback) {
+    return typeof value === "boolean" ? value : fallback;
+  }
+  function normalizeSettings(value = {}) {
+    const telemetry = value?.telemetry ?? {};
+    return {
+      telemetry: {
+        collectorEnabled: asBoolean(telemetry.collectorEnabled, DEFAULT_SETTINGS.telemetry.collectorEnabled),
+        sendDiagnostics: asBoolean(telemetry.sendDiagnostics, DEFAULT_SETTINGS.telemetry.sendDiagnostics),
+        sendErrors: asBoolean(telemetry.sendErrors, DEFAULT_SETTINGS.telemetry.sendErrors),
+        sendStructure: asBoolean(telemetry.sendStructure, DEFAULT_SETTINGS.telemetry.sendStructure),
+      },
+    };
+  }
+  function telemetryEventCategory(eventType) {
+    const type = String(eventType ?? "");
+    if (type === "session-rule-error" || type.includes("error") || type.includes("unhandledrejection")) {
+      return "errors";
+    }
+    if (type.startsWith("site-")) return "structure";
+    if (type === "diagnostics-summary") return "diagnostics";
+    return "diagnostics";
+  }
+  function isTelemetryEventEnabled(settings, eventType) {
+    const { telemetry } = normalizeSettings(settings);
+    if (!telemetry.collectorEnabled) return false;
+    switch (telemetryEventCategory(eventType)) {
+      case "errors":
+        return telemetry.sendErrors;
+      case "structure":
+        return telemetry.sendStructure;
+      case "diagnostics":
+        return telemetry.sendDiagnostics;
+      default:
+        return false;
+    }
+  }
+
   // src/runtime/background.js
   var api = globalThis.browser ?? globalThis.chrome;
   var STORAGE_KEY = "chzzkDiagnostics";
   var REPORT_STATE_KEY = "chzzkTelemetryReportState";
   var TELEMETRY_MIN_REPORT_INTERVAL_MS = 5 * 60 * 1e3;
   var REPORT_DEDUPE_TTL_MS = 60 * 60 * 1e3;
+  var TELEMETRY_POST_TIMEOUT_MS = 2e3;
+  var SESSION_RULE_ID_RANGE2 = 1e5;
   var activeRulesByTab = /* @__PURE__ */ new Map();
+  var diagnosticsMutationQueue = Promise.resolve();
   function extensionIdentity() {
     const manifest = api.runtime.getManifest();
     return {
       addonId: manifest.browser_specific_settings?.gecko?.id ?? "chzzk@solitude0429.local",
       extensionVersion: manifest.version,
     };
+  }
+  async function loadSettings() {
+    const stored = await api.storage.local.get(SETTINGS_KEY);
+    return normalizeSettings(stored?.[SETTINGS_KEY]);
   }
   async function loadDiagnostics() {
     const stored = await api.storage.local.get(STORAGE_KEY);
@@ -500,12 +560,32 @@
     await saveDiagnostics(diagnostics);
     return { diagnostics, result };
   }
+  async function enqueueDiagnosticsMutation(mutator) {
+    const operation = diagnosticsMutationQueue.then(() => mutateDiagnostics(mutator));
+    diagnosticsMutationQueue = operation.catch((error) => {
+      console.warn("[CHZZK] diagnostics mutation failed", error);
+    });
+    return operation;
+  }
   async function loadReportState() {
     const stored = await api.storage.local.get(REPORT_STATE_KEY);
     return stored?.[REPORT_STATE_KEY] ?? { lastSentAt: 0, sentByKey: {} };
   }
   async function saveReportState(state) {
     await api.storage.local.set({ [REPORT_STATE_KEY]: state });
+  }
+  function pruneReportState(state, now = Date.now()) {
+    const sentByKey = {};
+    for (const [key, sentAt] of Object.entries(state?.sentByKey ?? {})) {
+      const timestamp = Number(sentAt);
+      if (Number.isFinite(timestamp) && now - timestamp < REPORT_DEDUPE_TTL_MS) {
+        sentByKey[key] = timestamp;
+      }
+    }
+    return {
+      lastSentAt: Number(state?.lastSentAt ?? 0) || 0,
+      sentByKey,
+    };
   }
   function telemetryDedupeKey(report) {
     return stableHash({
@@ -528,20 +608,29 @@
       scope: TELEMETRY_SCOPE,
     };
     if (!isTelemetryReportSafe(enriched)) return false;
+    const settings = await loadSettings();
+    if (!isTelemetryEventEnabled(settings, enriched.eventType)) return false;
     const now = Date.now();
-    const state = await loadReportState();
+    const state = pruneReportState(await loadReportState(), now);
     const key = telemetryDedupeKey(enriched);
     const previous = Number(state.sentByKey?.[key] ?? 0);
     if (!force && previous && now - previous < REPORT_DEDUPE_TTL_MS) return false;
     if (!force && now - Number(state.lastSentAt ?? 0) < TELEMETRY_MIN_REPORT_INTERVAL_MS) return false;
-    const response = await fetch(TELEMETRY_ENDPOINT, {
-      body: JSON.stringify(enriched),
-      cache: "no-store",
-      credentials: "omit",
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    if (!response.ok) throw new Error(`telemetry report failed: HTTP ${response.status}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TELEMETRY_POST_TIMEOUT_MS);
+    try {
+      const response = await fetch(TELEMETRY_ENDPOINT, {
+        body: JSON.stringify(enriched),
+        cache: "no-store",
+        credentials: "omit",
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`telemetry report failed: HTTP ${response.status}`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
     state.lastSentAt = now;
     state.sentByKey = { ...(state.sentByKey ?? {}), [key]: now };
     await saveReportState(state);
@@ -580,7 +669,7 @@
     const baseId = quality_policy_default.sessionRuleBaseId ?? 1e5;
     return rules
       .map((rule) => rule.id)
-      .filter((id) => Number.isSafeInteger(id) && id >= baseId && id < baseId + 1e5);
+      .filter((id) => Number.isSafeInteger(id) && id >= baseId && id < baseId + SESSION_RULE_ID_RANGE2);
   }
   async function clearOwnedSessionRules() {
     if (!api.declarativeNetRequest?.getSessionRules) return;
@@ -590,7 +679,7 @@
       await api.declarativeNetRequest.updateSessionRules({ removeRuleIds });
     }
     activeRulesByTab.clear();
-    await mutateDiagnostics((diagnostics) => {
+    await enqueueDiagnosticsMutation((diagnostics) => {
       updateSessionRuleDiagnostics(diagnostics, currentRuleState());
     });
   }
@@ -603,57 +692,56 @@
       removeRuleIds: [ruleId],
     });
     activeRulesByTab.set(tabId, ruleId);
-    await mutateDiagnostics((diagnostics) => {
+    await enqueueDiagnosticsMutation((diagnostics) => {
       updateSessionRuleDiagnostics(diagnostics, currentRuleState());
     });
   }
+  async function reportSessionRuleError(error) {
+    const { diagnostics } = await enqueueDiagnosticsMutation((current) => {
+      updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
+    });
+    await postTelemetryReport(
+      diagnosticsReportFromSnapshot(createDiagnosticsSnapshot(diagnostics), "session-rule-error"),
+      { force: true },
+    ).catch(() => {});
+  }
   async function removeTabSessionRule(tabId) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0) return;
+    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE2) return;
     const ruleId =
       activeRulesByTab.get(tabId) ??
       sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
     activeRulesByTab.delete(tabId);
     try {
       await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
-      await mutateDiagnostics((diagnostics) => {
+      await enqueueDiagnosticsMutation((diagnostics) => {
         updateSessionRuleDiagnostics(diagnostics, currentRuleState());
       });
     } catch (error) {
-      const { diagnostics } = await mutateDiagnostics((current) => {
-        updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
-      });
-      await postTelemetryReport(
-        diagnosticsReportFromSnapshot(createDiagnosticsSnapshot(diagnostics), "session-rule-error"),
-        {
-          force: true,
-        },
-      ).catch(() => {});
+      await reportSessionRuleError(error);
     }
+  }
+  async function recordRequestDiagnostics(details, decision) {
+    const { diagnostics } = await enqueueDiagnosticsMutation((current) => {
+      recordDiagnosticUrl(current, details.url, { context: details });
+      recordDecision(current, decision, details);
+    });
+    await maybeReportDiagnostics(createDiagnosticsSnapshot(diagnostics), decision);
   }
   async function handleRequest(details) {
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
     const decision = shouldBootstrapSessionRule(details, quality_policy_default);
-    if (shouldRecord) {
-      const { diagnostics } = await mutateDiagnostics((current) => {
-        recordDiagnosticUrl(current, details.url, { context: details });
-        recordDecision(current, decision, details);
-      });
-      await maybeReportDiagnostics(createDiagnosticsSnapshot(diagnostics), decision);
+    if (decision.ok) {
+      try {
+        await ensureTabSessionRule(decision.tabId);
+      } catch (error) {
+        await reportSessionRuleError(error);
+        console.warn("[CHZZK] failed to install session redirect rule", error);
+      }
     }
-    if (!decision.ok) return;
-    try {
-      await ensureTabSessionRule(decision.tabId);
-    } catch (error) {
-      const { diagnostics } = await mutateDiagnostics((current) => {
-        updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
-      });
-      await postTelemetryReport(
-        diagnosticsReportFromSnapshot(createDiagnosticsSnapshot(diagnostics), "session-rule-error"),
-        {
-          force: true,
-        },
-      ).catch(() => {});
-      console.warn("[CHZZK] failed to install session redirect rule", error);
+    if (shouldRecord) {
+      recordRequestDiagnostics(details, decision).catch((error) =>
+        console.warn("[CHZZK] diagnostics recording/reporting failed", error),
+      );
     }
   }
   api.webRequest.onBeforeRequest.addListener(
@@ -677,6 +765,14 @@
   api.tabs?.onRemoved?.addListener((tabId) => {
     removeTabSessionRule(tabId).catch((error) =>
       console.warn("[CHZZK] failed to remove tab session rule", error),
+    );
+  });
+  api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+    if (!activeRulesByTab.has(tabId)) return;
+    const nextUrl = changeInfo?.url;
+    if (typeof nextUrl !== "string" || isChzzkLivePageUrl(nextUrl)) return;
+    removeTabSessionRule(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to remove inactive tab session rule", error),
     );
   });
   api.runtime.onInstalled?.addListener(() => {

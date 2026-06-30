@@ -1,4 +1,52 @@
 (() => {
+  // src/shared/settings.js
+  var SETTINGS_KEY = "chzzkSettings";
+  var DEFAULT_SETTINGS = Object.freeze({
+    telemetry: Object.freeze({
+      collectorEnabled: false,
+      sendDiagnostics: false,
+      sendErrors: false,
+      sendStructure: false,
+    }),
+  });
+  function asBoolean(value, fallback) {
+    return typeof value === "boolean" ? value : fallback;
+  }
+  function normalizeSettings(value = {}) {
+    const telemetry = value?.telemetry ?? {};
+    return {
+      telemetry: {
+        collectorEnabled: asBoolean(telemetry.collectorEnabled, DEFAULT_SETTINGS.telemetry.collectorEnabled),
+        sendDiagnostics: asBoolean(telemetry.sendDiagnostics, DEFAULT_SETTINGS.telemetry.sendDiagnostics),
+        sendErrors: asBoolean(telemetry.sendErrors, DEFAULT_SETTINGS.telemetry.sendErrors),
+        sendStructure: asBoolean(telemetry.sendStructure, DEFAULT_SETTINGS.telemetry.sendStructure),
+      },
+    };
+  }
+  function telemetryEventCategory(eventType) {
+    const type = String(eventType ?? "");
+    if (type === "session-rule-error" || type.includes("error") || type.includes("unhandledrejection")) {
+      return "errors";
+    }
+    if (type.startsWith("site-")) return "structure";
+    if (type === "diagnostics-summary") return "diagnostics";
+    return "diagnostics";
+  }
+  function isTelemetryEventEnabled(settings, eventType) {
+    const { telemetry } = normalizeSettings(settings);
+    if (!telemetry.collectorEnabled) return false;
+    switch (telemetryEventCategory(eventType)) {
+      case "errors":
+        return telemetry.sendErrors;
+      case "structure":
+        return telemetry.sendStructure;
+      case "diagnostics":
+        return telemetry.sendDiagnostics;
+      default:
+        return false;
+    }
+  }
+
   // src/shared/telemetry.js
   var TELEMETRY_SCOPE = "chzzk-live";
   var TELEMETRY_SCHEMA_VERSION = 1;
@@ -174,6 +222,11 @@
   var lastStructureHash = null;
   var lastMutationReportAt = 0;
   var pendingTimer = null;
+  var observer = null;
+  async function telemetryEnabled(eventType) {
+    const stored = await api.storage.local.get(SETTINGS_KEY);
+    return isTelemetryEventEnabled(stored?.[SETTINGS_KEY], eventType);
+  }
   function countSelector(selector) {
     try {
       return document.querySelectorAll(selector).length;
@@ -208,7 +261,10 @@
     });
   }
   async function sendStructureReport(reason) {
+    const eventType = `site-${reason}`;
     if (!isChzzkLivePageUrl(globalThis.location.href)) return;
+    if (reason === "mutation" && document.visibilityState === "hidden") return;
+    if (!(await telemetryEnabled(eventType))) return;
     const structure = collectStructure();
     if (!structure) return;
     const now = Date.now();
@@ -217,20 +273,23 @@
     lastStructureHash = structure.structureHash;
     if (reason === "mutation") lastMutationReportAt = now;
     await api.runtime.sendMessage({
-      report: makeTelemetryReport({ eventType: `site-${reason}`, structure }),
+      report: makeTelemetryReport({ eventType, structure }),
       scope: TELEMETRY_SCOPE,
       type: "chzzk.telemetry.report",
     });
   }
   function scheduleStructureReport(reason = "mutation") {
+    if (document.visibilityState === "hidden") return;
     if (pendingTimer) clearTimeout(pendingTimer);
     pendingTimer = setTimeout(() => {
       pendingTimer = null;
       sendStructureReport(reason).catch(() => {});
     }, REPORT_DEBOUNCE_MS);
   }
-  function reportPageError(eventType, errorLike) {
+  async function reportPageError(eventType, errorLike) {
+    const reportEventType = `site-${eventType}`;
     if (!isChzzkLivePageUrl(globalThis.location.href)) return;
+    if (!(await telemetryEnabled(reportEventType))) return;
     const structure = collectStructure();
     const diagnostics = {
       decisions: [
@@ -252,25 +311,46 @@
       },
       totalHlsRequests: 0,
     };
-    api.runtime
-      .sendMessage({
-        report: makeTelemetryReport({ diagnostics, eventType: `site-${eventType}`, structure }),
-        scope: TELEMETRY_SCOPE,
-        type: "chzzk.telemetry.report",
-      })
-      .catch(() => {});
+    await api.runtime.sendMessage({
+      report: makeTelemetryReport({ diagnostics, eventType: reportEventType, structure }),
+      scope: TELEMETRY_SCOPE,
+      type: "chzzk.telemetry.report",
+    });
+  }
+  function observeBody() {
+    if (observer || !document.body || document.visibilityState === "hidden") return;
+    observer = new MutationObserver(() => scheduleStructureReport("mutation"));
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["class"],
+      childList: true,
+      subtree: true,
+    });
+  }
+  function disconnectObserver() {
+    if (!observer) return;
+    observer.disconnect();
+    observer = null;
+  }
+  function handleVisibilityChange() {
+    if (document.visibilityState === "hidden") {
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = null;
+      disconnectObserver();
+      return;
+    }
+    observeBody();
+    scheduleStructureReport("mutation");
   }
   if (isChzzkLivePageUrl(globalThis.location.href)) {
     sendStructureReport("load").catch(() => {});
-    const observer = new MutationObserver(() => scheduleStructureReport("mutation"));
-    if (document.body) {
-      observer.observe(document.body, { attributes: true, childList: true, subtree: true });
-    }
+    observeBody();
+    globalThis.addEventListener("visibilitychange", handleVisibilityChange);
     globalThis.addEventListener("error", (event) => {
-      reportPageError("error", event.error ?? event.message);
+      reportPageError("error", event.error ?? event.message).catch(() => {});
     });
     globalThis.addEventListener("unhandledrejection", (event) => {
-      reportPageError("unhandledrejection", event.reason);
+      reportPageError("unhandledrejection", event.reason).catch(() => {});
     });
   }
 })();
