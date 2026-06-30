@@ -3,7 +3,7 @@
   "version": "0.0.6",
   "private": true,
   "type": "module",
-  "description": "Personal Firefox WebExtension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
+  "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",
   "scripts": {
     "audit:deps": "npm audit --audit-level=moderate",
     "audit:package": "node scripts/verify-package.js",
