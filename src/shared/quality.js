@@ -1,16 +1,17 @@
-export const SOURCE_QUALITY = "480p";
-export const TARGET_QUALITY = "1080p";
+export const HIGHEST_QUALITY = "1080p";
+export const LOWER_QUALITIES = ["144p", "240p", "270p", "360p", "480p", "720p"];
 
 const QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
-const GRID_BYPASS_REPLACEMENTS = [
+const LOWER_QUALITY_PATTERN = LOWER_QUALITIES.join("|");
+const HIGHEST_QUALITY_REPLACEMENTS = [
   {
-    from: /chunklist_480p(?=\.m3u8(?:[?#]|$))/i,
-    to: "chunklist_1080p",
+    from: new RegExp(`chunklist_(${LOWER_QUALITY_PATTERN})(?=\\.m3u8(?:[?#]|$))`, "i"),
+    to: `chunklist_${HIGHEST_QUALITY}`,
   },
   {
-    from: /(?<=\/)480p(?=\/)/i,
-    to: "1080p",
+    from: new RegExp(`(?<=/)(${LOWER_QUALITY_PATTERN})(?=/)`, "i"),
+    to: HIGHEST_QUALITY,
   },
 ];
 
@@ -53,10 +54,13 @@ export function redactMediaUrl(url) {
   }
 }
 
-export function buildGridBypassRedirectUrl(url) {
-  if (typeof url !== "string" || parseQualityFromUrl(url) !== SOURCE_QUALITY) return null;
+export function buildHighestQualityRedirectUrl(url) {
+  if (typeof url !== "string") return null;
 
-  for (const { from, to } of GRID_BYPASS_REPLACEMENTS) {
+  const currentQuality = parseQualityFromUrl(url);
+  if (!LOWER_QUALITIES.includes(currentQuality)) return null;
+
+  for (const { from, to } of HIGHEST_QUALITY_REPLACEMENTS) {
     if (from.test(url)) return url.replace(from, to);
   }
 

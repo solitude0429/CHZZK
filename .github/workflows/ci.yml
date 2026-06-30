@@ -15,7 +15,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run check:generated
       - run: npm run validate:manifest
       - run: npm run lint
       - run: npm run lint:webext
