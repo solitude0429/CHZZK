@@ -5,16 +5,20 @@
   "type": "module",
   "description": "Personal Firefox WebExtension project for CHZZK high-quality playback selection.",
   "scripts": {
-    "build": "web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json scripts src tests",
+    "build": "npm run bundle:inject && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json scripts src tests",
+    "bundle:inject": "node scripts/build-inject.js",
+    "check:generated": "npm run bundle:inject && git diff --exit-code inject.js",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "lint:webext": "web-ext lint --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json scripts src tests",
     "test": "node --test tests/unit/*.test.js",
     "validate:manifest": "node scripts/validate-manifest.js",
-    "verify": "npm run validate:manifest && npm run lint && npm run lint:webext && npm run test && npm run build"
+    "verify": "npm run bundle:inject && npm run validate:manifest && npm run lint && npm run lint:webext && npm run test && npm run build"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "eslint": "^8.57.1",
+    "happy-dom": "^20.10.6",
     "prettier": "^3.3.3",
     "web-ext": "^10.4.0"
   }

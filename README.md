@@ -25,11 +25,16 @@ npm run verify
 개별 검증:
 
 ```bash
+npm run bundle:inject
 npm run validate:manifest
 npm run lint
+npm run lint:webext
 npm test
 npm run build
 ```
+
+`inject.js`는 빌드 산출물입니다. 런타임 로직은 `src/inject-main.js`와 `src/shared/*.js`를 수정한 뒤
+`npm run bundle:inject`로 갱신합니다.
 
 ## Firefox 임시 프로필에서 실행
 
