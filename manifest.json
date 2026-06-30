@@ -16,7 +16,7 @@
   },
   "name": "CHZZK",
   "description": "Personal Firefox extension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "permissions": ["declarativeNetRequest", "storage", "webRequest"],
   "host_permissions": [
     "*://*.akamaized.net/*",
