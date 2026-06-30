@@ -3,6 +3,9 @@ name: Sign Firefox add-on
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sign-unlisted:
     runs-on: ubuntu-latest

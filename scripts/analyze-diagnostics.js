@@ -32,6 +32,6 @@ if (apply && analysis.needsPolicyUpdate) {
     ],
   };
   await writeFile(policyUrl, `${JSON.stringify(updatedPolicy, null, 2)}\n`);
-  const render = spawnSync("npm", ["run", "render:rules"], { stdio: "inherit" });
-  process.exit(render.status ?? 1);
+  const build = spawnSync("npm", ["run", "build:runtime"], { stdio: "inherit" });
+  process.exit(build.status ?? 1);
 }

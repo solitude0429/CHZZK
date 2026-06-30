@@ -1,12 +1,19 @@
 {
   "targetQuality": "1080p",
   "minRedirectQuality": "100p",
+  "trustedInitiatorDomains": ["chzzk.naver.com"],
+  "trustedRequestDomains": ["akamaized.net", "navercdn.com", "pstatic.net"],
+  "resourceTypes": ["media", "xmlhttprequest"],
+  "requestMethods": ["get"],
+  "sessionRuleBaseId": 100000,
+  "redirectRulePriority": 1,
   "urlQualityPrefixes": ["chunklist_", "/"],
   "mediaExtensions": ["m3u8"],
   "maxDiagnosticsSamples": 200,
   "notes": [
     "targetQuality is the highest currently expected NAVER-provided CHZZK HLS quality.",
-    "rules.json is generated; edit this policy and run npm run render:rules.",
-    "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values."
+    "Runtime redirects are installed as tab-scoped session DNR rules only after a trusted CHZZK live HLS request is observed.",
+    "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values.",
+    "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects."
   ]
 }

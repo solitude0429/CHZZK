@@ -1,23 +1,26 @@
 {
   "name": "chzzk",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
-  "description": "Personal Firefox WebExtension that redirects CHZZK HLS playlist quality to the highest NAVER-provided target.",
+  "description": "Personal Firefox WebExtension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
   "scripts": {
-    "build": "npm run render:rules && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json policy reg scripts src tests",
-    "check:generated": "npm run render:rules && git diff --exit-code rules.json",
+    "audit:deps": "npm audit --audit-level=moderate",
+    "audit:package": "node scripts/verify-package.js",
+    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json policy reg scripts src tests",
+    "build:runtime": "node scripts/build-runtime.js",
+    "check:generated": "node scripts/check-generated.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "lint:webext": "web-ext lint --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules package-lock.json package.json policy reg scripts src tests",
-    "render:rules": "node scripts/render-rules.js",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
     "validate:manifest": "node scripts/validate-manifest.js",
-    "verify": "npm run render:rules && npm run validate:manifest && npm run lint && npm run lint:webext && npm run test && npm run build"
+    "verify": "npm run check:generated && npm run validate:manifest && npm run lint && npm run lint:webext && npm run test && npm run audit:deps && npm run build && npm run audit:package"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "eslint": "^8.57.1",
     "prettier": "^3.3.3",
     "web-ext": "^10.4.0"

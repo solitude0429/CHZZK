@@ -3,7 +3,10 @@ name: CI
 on:
   pull_request:
   push:
-    branches: ["main", "feat/**"]
+    branches: ["feat/**", "main"]
+
+permissions:
+  contents: read
 
 jobs:
   verify:
@@ -15,12 +18,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run check:generated
-      - run: npm run validate:manifest
-      - run: npm run lint
-      - run: npm run lint:webext
-      - run: npm test
-      - run: npm run build
+      - run: npm run verify
       - uses: actions/upload-artifact@v4
         with:
           name: chzzk-extension

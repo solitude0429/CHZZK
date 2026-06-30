@@ -1,33 +1,35 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
-import { buildQualityRegexFilter } from "../src/shared/quality.js";
+import { buildScopedSessionRule } from "../src/shared/session-rules.js";
 
 const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
 const policy = JSON.parse(await readFile(new URL("../policy/quality-policy.json", import.meta.url), "utf8"));
-const rules = JSON.parse(await readFile(new URL("../rules.json", import.meta.url), "utf8"));
 
 assert.equal(manifest.manifest_version, 3, "manifest_version must be 3");
 assert.equal(manifest.name, "CHZZK", "extension name must be CHZZK");
+assert.equal(manifest.version, "0.5.0", "manifest version must match the v0.5 enterprise runtime");
 assert.ok(
   manifest.permissions.includes("declarativeNetRequest"),
-  "DNR permission is required for the CHZZK highest-quality redirect",
+  "DNR permission is required for CHZZK session redirect rules",
 );
 assert.ok(manifest.permissions.includes("storage"), "storage permission is required for local diagnostics");
 assert.ok(
   manifest.permissions.includes("webRequest"),
-  "webRequest permission is required for local diagnostics",
+  "webRequest permission is required for local diagnostics and session-rule bootstrap",
 );
 assert.ok(!manifest.permissions.includes("scripting"), "scripting permission must not be needed");
 assert.equal(manifest.content_scripts, undefined, "content scripts must not be needed");
+assert.equal(
+  manifest.declarative_net_request,
+  undefined,
+  "global static DNR rulesets are forbidden; use tab-scoped session rules instead",
+);
+assert.equal(existsSync(new URL("../rules.json", import.meta.url)), false, "rules.json must not exist");
 assert.ok(
   manifest.host_permissions.includes("*://chzzk.naver.com/live/*"),
   "CHZZK live host permission is required",
-);
-assert.deepEqual(
-  manifest.declarative_net_request?.rule_resources,
-  [{ id: "ruleset_1", enabled: true, path: "rules.json" }],
-  "rules.json must be registered as the static DNR ruleset",
 );
 assert.deepEqual(
   manifest.browser_specific_settings?.gecko?.data_collection_permissions?.required,
@@ -38,17 +40,10 @@ assert.equal(manifest.icons?.["32"], "icon.png", "official CHZZK favicon must be
 assert.equal(manifest.action?.default_icon?.["32"], "icon.png", "action icon must use the CHZZK favicon");
 assert.equal(manifest.action?.default_popup, "diagnostics.html", "diagnostics popup must be registered");
 
-assert.equal(rules.length, 1, "exactly one DNR rule is expected");
-assert.equal(rules[0].action?.type, "redirect", "DNR rule must redirect matching media requests");
-assert.equal(rules[0].action?.redirect?.regexSubstitution, `\\1${policy.targetQuality}\\3`);
-assert.equal(
-  rules[0].condition?.regexFilter,
-  buildQualityRegexFilter({
-    minRedirectQuality: policy.minRedirectQuality,
-    targetQuality: policy.targetQuality,
-  }),
-);
-assert.equal(rules[0].condition.regexFilter.includes("360p|480p|720p"), false);
-assert.deepEqual([...rules[0].condition.resourceTypes].sort(), ["media", "xmlhttprequest"]);
+const sampleRule = buildScopedSessionRule({ policy, tabId: 1 });
+assert.deepEqual(sampleRule.condition.tabIds, [1], "session rule must be scoped to one tab");
+assert.deepEqual(sampleRule.condition.initiatorDomains, ["chzzk.naver.com"]);
+assert.deepEqual(sampleRule.condition.requestDomains, ["akamaized.net", "navercdn.com", "pstatic.net"]);
+assert.equal(sampleRule.condition.regexFilter.includes("360p|480p|720p"), false);
 
-console.log("manifest, diagnostics, and generated highest-quality DNR rules are valid");
+console.log("manifest and session-scoped CHZZK redirect policy are valid");
