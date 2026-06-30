@@ -36,6 +36,12 @@ describe("session-scoped CHZZK redirect rules", () => {
     assert.equal(rule.action.redirect.regexSubstitution, `\\1${policy.targetQuality}\\3`);
   });
 
+  it("keeps session rule IDs inside the owned cleanup range", () => {
+    assert.equal(sessionRuleIdForTab(99_999), 199_999);
+    assert.throws(() => sessionRuleIdForTab(100_000), /invalid tabId/);
+    assert.throws(() => buildScopedSessionRule({ policy, tabId: 100_000 }), /invalid tabId/);
+  });
+
   it("fails closed unless a lower-quality HLS request comes from a CHZZK live tab", () => {
     const eligible = {
       documentUrl: "https://chzzk.naver.com/live/example-channel",
@@ -64,6 +70,7 @@ describe("session-scoped CHZZK redirect rules", () => {
       false,
     );
     assert.equal(shouldBootstrapSessionRule({ ...eligible, tabId: -1 }, policy).ok, false);
+    assert.equal(shouldBootstrapSessionRule({ ...eligible, tabId: 100_000 }, policy).ok, false);
     assert.equal(
       shouldBootstrapSessionRule(
         { ...eligible, url: "https://example.pstatic.net/live/chunklist_1080p.m3u8" },

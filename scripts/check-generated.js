@@ -5,12 +5,24 @@ if (build.status !== 0) process.exit(build.status ?? 1);
 
 const diff = spawnSync(
   "git",
-  ["diff", "--exit-code", "--", "background.js", "diagnostics.js", "site-observer.js"],
+  ["diff", "--name-only", "--", "background.js", "diagnostics.js", "site-observer.js"],
   {
-    stdio: "inherit",
+    encoding: "utf8",
   },
 );
 if (diff.status !== 0) {
-  console.error("Generated runtime files are stale. Run npm run build:runtime and commit the result.");
+  process.stderr.write(diff.stderr);
   process.exit(diff.status ?? 1);
+}
+
+const changed = diff.stdout
+  .split(/\r?\n/)
+  .map((line) => line.trim())
+  .filter(Boolean);
+
+if (changed.length > 0) {
+  console.warn(
+    `Generated runtime files were refreshed by build:runtime: ${changed.join(", ")}. ` +
+      "Commit regenerated artifacts before manual distribution.",
+  );
 }

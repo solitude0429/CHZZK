@@ -1,9 +1,9 @@
 # CHZZK telemetry auto-update loop
 
-This repository uses a private, CHZZK-only maintenance loop:
+This repository uses a private, CHZZK-only maintenance loop. The loop receives data only when the extension popup has explicitly enabled collector transmission for the relevant telemetry category.
 
 ```text
-Firefox extension telemetry
+Firefox extension telemetry, opt-in only
 → VPS collector
 → telemetry summary
 → Hermes scheduled operator
@@ -28,7 +28,18 @@ sudo /usr/local/sbin/chzzk-telemetry-summary --since=-24h
   - `~/.hermes/scripts/chzzk-telemetry-context.py`
   - emits `NO_ACTION` when no new telemetry summary exists
 
-## What is collected
+## Extension-side telemetry settings
+
+Default state is local-only:
+
+- `collectorEnabled: false`
+- `sendDiagnostics: false`
+- `sendStructure: false`
+- `sendErrors: false`
+
+The popup can enable collector transmission and then choose categories independently. Forced error reports still respect the collector opt-in gate; `force` only bypasses local rate/dedupe throttling after opt-in.
+
+## What is collected after opt-in
 
 Only CHZZK live scope reports are accepted:
 
@@ -37,11 +48,11 @@ Only CHZZK live scope reports are accepted:
 - add-on ID `chzzk@solitude0429.local`
 - extension version
 - event type
-- redacted HLS quality/decision aggregates
-- session-rule error summary
-- route shape `/live/[redacted]`
-- tag/feature/class-token counts
-- structure hash
+- redacted HLS quality/decision aggregates, when diagnostics reports are enabled
+- session-rule error summary, when error reports are enabled
+- route shape `/live/[redacted]`, when structure reports are enabled
+- tag/feature/class-token counts, when structure reports are enabled
+- structure hash, when structure reports are enabled
 
 The extension and collector reject signed CDN query values and token/auth/session-like query strings.
 

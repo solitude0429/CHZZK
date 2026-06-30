@@ -15,6 +15,15 @@
       button {
         margin: 4px 4px 8px 0;
       }
+      fieldset {
+        border: 1px solid #d0d0d0;
+        margin: 10px 0;
+        padding: 8px;
+      }
+      label {
+        display: block;
+        margin: 4px 0;
+      }
       pre,
       textarea {
         box-sizing: border-box;
@@ -40,6 +49,21 @@
       이 popup은 네이버 공식 승인 상태를 의미하지 않습니다. Firefox 설치용 서명과 서비스 제공자 승인은
       별개입니다.
     </p>
+
+    <fieldset>
+      <legend>Telemetry collector</legend>
+      <p>
+        외부 collector 전송은 기본값이 local-only입니다. 필요한 항목만 명시적으로 켠 경우에만 private
+        collector로 전송합니다.
+      </p>
+      <label><input id="telemetry-enabled" type="checkbox" /> collector 전송 사용</label>
+      <label><input id="telemetry-diagnostics" type="checkbox" /> redacted HLS diagnostics 전송</label>
+      <label><input id="telemetry-structure" type="checkbox" /> live page 구조 요약 전송</label>
+      <label><input id="telemetry-errors" type="checkbox" /> page/runtime 오류 요약 전송</label>
+      <button id="save-settings">설정 저장</button>
+      <pre id="settings-summary"></pre>
+    </fieldset>
+
     <button id="refresh">새로고침</button>
     <button id="copy">JSON 복사</button>
     <button id="clear">로그 삭제</button>

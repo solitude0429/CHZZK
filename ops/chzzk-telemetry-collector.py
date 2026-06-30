@@ -14,7 +14,8 @@ import json
 import os
 import re
 import sys
-import tempfile
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,8 +25,13 @@ DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 18181
 DEFAULT_STATE_DIR = Path("/var/lib/chzzk-telemetry")
 MAX_BODY_BYTES = 64_000
+RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("CHZZK_TELEMETRY_RATE_WINDOW_SECONDS", "60"))
+RATE_LIMIT_MAX_REPORTS = int(os.environ.get("CHZZK_TELEMETRY_RATE_MAX_REPORTS", "120"))
 SENSITIVE_RE = re.compile(r"[?&](Policy|Signature|Key-Pair-Id|Expires|token|auth|session)=", re.I)
 HOST_RE = re.compile(r"^[a-z0-9_.:@-]+$", re.I)
+WRITE_LOCK = threading.Lock()
+RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_STATE: dict[str, list[float]] = {}
 
 
 def utc_now() -> str:
@@ -34,9 +40,37 @@ def utc_now() -> str:
 
 def atomic_append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.write("\n")
+    with WRITE_LOCK:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{line}\n")
+
+
+def is_rate_limited(
+    client: str,
+    *,
+    now: float | None = None,
+    window_seconds: int = RATE_LIMIT_WINDOW_SECONDS,
+    max_reports: int = RATE_LIMIT_MAX_REPORTS,
+) -> bool:
+    current = time.time() if now is None else now
+    cutoff = current - window_seconds
+    key = client or "unknown"
+    with RATE_LIMIT_LOCK:
+        recent = [timestamp for timestamp in RATE_LIMIT_STATE.get(key, []) if timestamp >= cutoff]
+        if len(recent) >= max_reports:
+            RATE_LIMIT_STATE[key] = recent
+            return True
+        recent.append(current)
+        RATE_LIMIT_STATE[key] = recent
+        return False
+
+
+def client_key(handler: BaseHTTPRequestHandler) -> str:
+    forwarded = handler.headers.get("x-forwarded-for") or ""
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()[:120]
+    host, _port = handler.client_address
+    return str(host)[:120]
 
 
 def sanitize_numeric_map(value: Any, *, max_entries: int = 120) -> dict[str, int]:
@@ -64,7 +98,14 @@ def sanitize_text(value: Any, *, max_len: int = 500) -> str | None:
     return text
 
 
+def assert_no_sensitive_material(value: Any) -> None:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if len(serialized.encode("utf-8")) > MAX_BODY_BYTES or SENSITIVE_RE.search(serialized):
+        raise ValueError("report contains disallowed sensitive material")
+
+
 def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
+    assert_no_sensitive_material(report)
     if report.get("schemaVersion") != 1:
         raise ValueError("unsupported schemaVersion")
     if report.get("scope") != "chzzk-live":
@@ -133,9 +174,7 @@ def sanitize_report(report: dict[str, Any]) -> dict[str, Any]:
             "tagCounts": sanitize_numeric_map(structure.get("tagCounts")),
         }
 
-    serialized = json.dumps(clean, ensure_ascii=False, sort_keys=True)
-    if len(serialized.encode("utf-8")) > MAX_BODY_BYTES or SENSITIVE_RE.search(serialized):
-        raise ValueError("report contains disallowed sensitive material")
+    assert_no_sensitive_material(clean)
     return clean
 
 
@@ -163,6 +202,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/report":
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
+            return
+        if is_rate_limited(client_key(self)):
+            self._json(HTTPStatus.TOO_MANY_REQUESTS, {"ok": False, "error": "rate_limited"})
             return
         try:
             length = int(self.headers.get("content-length") or "0")

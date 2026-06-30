@@ -1,3 +1,4 @@
+import { isTelemetryEventEnabled, SETTINGS_KEY } from "../shared/settings.js";
 import {
   isChzzkLivePageUrl,
   makeTelemetryReport,
@@ -39,6 +40,12 @@ const FEATURE_SELECTORS = {
 let lastStructureHash = null;
 let lastMutationReportAt = 0;
 let pendingTimer = null;
+let observer = null;
+
+async function telemetryEnabled(eventType) {
+  const stored = await api.storage.local.get(SETTINGS_KEY);
+  return isTelemetryEventEnabled(stored?.[SETTINGS_KEY], eventType);
+}
 
 function countSelector(selector) {
   try {
@@ -77,7 +84,11 @@ function collectStructure() {
 }
 
 async function sendStructureReport(reason) {
+  const eventType = `site-${reason}`;
   if (!isChzzkLivePageUrl(globalThis.location.href)) return;
+  if (reason === "mutation" && document.visibilityState === "hidden") return;
+  if (!(await telemetryEnabled(eventType))) return;
+
   const structure = collectStructure();
   if (!structure) return;
 
@@ -89,13 +100,14 @@ async function sendStructureReport(reason) {
   if (reason === "mutation") lastMutationReportAt = now;
 
   await api.runtime.sendMessage({
-    report: makeTelemetryReport({ eventType: `site-${reason}`, structure }),
+    report: makeTelemetryReport({ eventType, structure }),
     scope: TELEMETRY_SCOPE,
     type: "chzzk.telemetry.report",
   });
 }
 
 function scheduleStructureReport(reason = "mutation") {
+  if (document.visibilityState === "hidden") return;
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingTimer = setTimeout(() => {
     pendingTimer = null;
@@ -103,8 +115,11 @@ function scheduleStructureReport(reason = "mutation") {
   }, REPORT_DEBOUNCE_MS);
 }
 
-function reportPageError(eventType, errorLike) {
+async function reportPageError(eventType, errorLike) {
+  const reportEventType = `site-${eventType}`;
   if (!isChzzkLivePageUrl(globalThis.location.href)) return;
+  if (!(await telemetryEnabled(reportEventType))) return;
+
   const structure = collectStructure();
   const diagnostics = {
     decisions: [
@@ -126,27 +141,50 @@ function reportPageError(eventType, errorLike) {
     },
     totalHlsRequests: 0,
   };
-  api.runtime
-    .sendMessage({
-      report: makeTelemetryReport({ diagnostics, eventType: `site-${eventType}`, structure }),
-      scope: TELEMETRY_SCOPE,
-      type: "chzzk.telemetry.report",
-    })
-    .catch(() => {});
+  await api.runtime.sendMessage({
+    report: makeTelemetryReport({ diagnostics, eventType: reportEventType, structure }),
+    scope: TELEMETRY_SCOPE,
+    type: "chzzk.telemetry.report",
+  });
+}
+
+function observeBody() {
+  if (observer || !document.body || document.visibilityState === "hidden") return;
+  observer = new MutationObserver(() => scheduleStructureReport("mutation"));
+  observer.observe(document.body, {
+    attributes: true,
+    attributeFilter: ["class"],
+    childList: true,
+    subtree: true,
+  });
+}
+
+function disconnectObserver() {
+  if (!observer) return;
+  observer.disconnect();
+  observer = null;
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = null;
+    disconnectObserver();
+    return;
+  }
+  observeBody();
+  scheduleStructureReport("mutation");
 }
 
 if (isChzzkLivePageUrl(globalThis.location.href)) {
   sendStructureReport("load").catch(() => {});
+  observeBody();
 
-  const observer = new MutationObserver(() => scheduleStructureReport("mutation"));
-  if (document.body) {
-    observer.observe(document.body, { attributes: true, childList: true, subtree: true });
-  }
-
+  globalThis.addEventListener("visibilitychange", handleVisibilityChange);
   globalThis.addEventListener("error", (event) => {
-    reportPageError("error", event.error ?? event.message);
+    reportPageError("error", event.error ?? event.message).catch(() => {});
   });
   globalThis.addEventListener("unhandledrejection", (event) => {
-    reportPageError("unhandledrejection", event.reason);
+    reportPageError("unhandledrejection", event.reason).catch(() => {});
   });
 }
