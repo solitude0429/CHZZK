@@ -27,8 +27,10 @@ npm run sign:unlisted
 1. repository Settings → Secrets and variables → Actions에 다음 secrets를 추가합니다.
    - `AMO_JWT_ISSUER`
    - `AMO_JWT_SECRET`
-2. Actions → `Sign Firefox add-on` → Run workflow
-3. artifact `chzzk-signed-xpi`를 내려받아 Firefox에 설치합니다.
+2. Actions → `Sign and publish Firefox add-on` → Run workflow
+3. workflow artifact `chzzk-signed-xpi`를 내려받아 Firefox에 설치합니다.
+4. `publish_release`가 켜져 있으면 해당 버전의 GitHub Release가 생성/갱신됩니다.
+5. `deploy_updates`가 켜져 있으면 GitHub Pages의 `updates.json`이 갱신됩니다.
 
 ## 주의
 

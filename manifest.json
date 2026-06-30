@@ -6,7 +6,8 @@
       "data_collection_permissions": {
         "required": ["none"]
       },
-      "strict_min_version": "140.0"
+      "strict_min_version": "140.0",
+      "update_url": "https://solitude0429.github.io/CHZZK/updates.json"
     },
     "gecko_android": {
       "strict_min_version": "142.0"
@@ -14,7 +15,7 @@
   },
   "name": "CHZZK",
   "description": "Personal Firefox extension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "permissions": ["declarativeNetRequest", "storage", "webRequest"],
   "host_permissions": [
     "*://*.akamaized.net/*",

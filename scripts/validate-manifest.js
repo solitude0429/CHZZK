@@ -37,6 +37,11 @@ assert.deepEqual(
   ["none"],
   "manifest must declare no remote data collection",
 );
+assert.equal(
+  manifest.browser_specific_settings?.gecko?.update_url,
+  "https://solitude0429.github.io/CHZZK/updates.json",
+  "Firefox auto-update manifest URL must remain stable",
+);
 assert.equal(manifest.icons?.["32"], "icon.png", "CHZZK favicon must be registered");
 assert.equal(manifest.action?.default_icon?.["32"], "icon.png", "action icon must use the CHZZK favicon");
 assert.equal(manifest.action?.default_popup, "diagnostics.html", "diagnostics popup must be registered");

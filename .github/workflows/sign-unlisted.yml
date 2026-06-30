@@ -1,14 +1,30 @@
-name: Sign Firefox add-on
+name: Sign and publish Firefox add-on
 
 on:
   workflow_dispatch:
+    inputs:
+      deploy_updates:
+        description: Deploy updates.json to GitHub Pages
+        required: true
+        type: boolean
+        default: true
+      publish_release:
+        description: Create or update the GitHub release for this package version
+        required: true
+        type: boolean
+        default: true
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+  pages: write
 
 jobs:
   sign-unlisted:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,7 +37,77 @@ jobs:
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+      - name: Normalize signed XPI name
+        id: package
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          signed_count=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | wc -l | tr -d ' ')
+          test "$signed_count" = "1"
+          signed_xpi=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | head -n 1)
+          release_xpi="dist/chzzk-${version}-signed.xpi"
+          cp "$signed_xpi" "$release_xpi"
+          sha256=$(sha256sum "$release_xpi" | cut -d' ' -f1)
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "release_xpi=$release_xpi"
+            echo "sha256=$sha256"
+          } >> "$GITHUB_OUTPUT"
+      - run: npm run build:update-manifest
+      - run: npm run validate:update-manifest
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          zip_sha=$(sha256sum "dist/chzzk-${{ steps.package.outputs.version }}.zip" | cut -d' ' -f1)
+          cat > release-notes.md <<EOF
+          ## Summary
+          - AMO unlisted signed Firefox install package.
+          - Firefox automatic-update manifest is published to GitHub Pages.
+
+          ## Update manifest
+          - https://solitude0429.github.io/CHZZK/updates.json
+
+          ## Assets
+          - \`chzzk-${{ steps.package.outputs.version }}-signed.xpi\` — signed install/update package.
+          - \`chzzk-${{ steps.package.outputs.version }}.zip\` — unsigned source/runtime package from \`web-ext build\`.
+
+          ## Checksums
+          - \`chzzk-${{ steps.package.outputs.version }}-signed.xpi\` SHA-256: \`${{ steps.package.outputs.sha256 }}\`
+          - \`chzzk-${{ steps.package.outputs.version }}.zip\` SHA-256: \`${zip_sha}\`
+          EOF
+      - name: Create or update release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.package.outputs.tag }}"
+          version="${{ steps.package.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "dist/chzzk-${version}.zip" "dist/chzzk-${version}-signed.xpi" --clobber
+            gh release edit "$tag" --title "CHZZK ${version}" --notes-file release-notes.md --latest
+          else
+            gh release create "$tag" "dist/chzzk-${version}.zip" "dist/chzzk-${version}-signed.xpi" \
+              --target "$GITHUB_SHA" \
+              --title "CHZZK ${version}" \
+              --notes-file release-notes.md \
+              --latest
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: chzzk-signed-xpi
-          path: dist/signed/*
+          path: dist/chzzk-${{ steps.package.outputs.version }}-signed.xpi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chzzk-update-site
+          path: dist/update-site
+      - uses: actions/configure-pages@v5
+        if: ${{ inputs.deploy_updates }}
+      - uses: actions/upload-pages-artifact@v3
+        if: ${{ inputs.deploy_updates }}
+        with:
+          path: dist/update-site
+      - uses: actions/deploy-pages@v4
+        if: ${{ inputs.deploy_updates }}
+        id: deployment
