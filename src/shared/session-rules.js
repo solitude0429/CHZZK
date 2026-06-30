@@ -1,6 +1,7 @@
 import { buildQualityRegexFilter, parseQualityFromUrl, qualityNumber } from "./quality.js";
 
 const DEFAULT_SESSION_RULE_BASE_ID = 100_000;
+export const SESSION_RULE_ID_RANGE = 100_000;
 const DEFAULT_RESOURCE_TYPES = ["media", "xmlhttprequest"];
 const DEFAULT_REQUEST_METHODS = ["get"];
 
@@ -42,7 +43,7 @@ function requestMethods(policy) {
 }
 
 export function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
-  if (!Number.isSafeInteger(tabId) || tabId < 0) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
     throw new Error(`invalid tabId for session DNR rule: ${tabId}`);
   }
   return baseId + tabId;
@@ -70,34 +71,38 @@ export function isChzzkLiveUrl(url, policy) {
 }
 
 export function isTrustedChzzkContext(details, policy) {
-  if (!details || details.tabId == null || details.tabId < 0) return false;
+  if (!details || details.tabId == null || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
+    return false;
+  }
   if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
   if (isChzzkLiveUrl(details.originUrl, policy)) return true;
 
   const initiatorDomain = canonicalDomainFromUrl(details.initiator);
   const hasTrustedInitiator = Boolean(
     initiatorDomain &&
-    trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
+      trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
   );
 
   // An origin-only initiator is useful as a supporting signal, but it is not enough by itself: require
   // at least one page-level URL to point at a CHZZK live route so unrelated NAVER pages cannot bootstrap.
   return Boolean(
     hasTrustedInitiator &&
-    [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
+      [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
   );
 }
 
 export function shouldRecordDiagnostics(details, policy) {
   if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
-  if (!Number.isSafeInteger(details.tabId) || details.tabId < 0) return false;
+  if (!Number.isSafeInteger(details.tabId) || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
+    return false;
+  }
   if (!isTrustedRequestDomain(details.url, policy)) return false;
   return isTrustedChzzkContext(details, policy);
 }
 
 export function shouldBootstrapSessionRule(details, policy) {
   const tabId = details?.tabId;
-  if (!Number.isSafeInteger(tabId) || tabId < 0) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
     return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
   }
 
