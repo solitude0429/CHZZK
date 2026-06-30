@@ -13,10 +13,24 @@
     }
   },
   "name": "CHZZK",
-  "description": "Personal Firefox extension for CHZZK high-quality playback selection.",
-  "version": "0.1.0",
-  "permissions": ["scripting"],
-  "host_permissions": ["*://chzzk.naver.com/live/*"],
+  "description": "Personal Firefox extension for watching CHZZK high quality without NAVER Live Streaming Connector.",
+  "version": "0.2.0",
+  "permissions": ["declarativeNetRequest", "scripting"],
+  "host_permissions": [
+    "*://*.akamaized.net/*",
+    "*://*.navercdn.com/*",
+    "*://*.pstatic.net/*",
+    "*://chzzk.naver.com/live/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
   "background": {
     "scripts": ["background.js"]
   },
