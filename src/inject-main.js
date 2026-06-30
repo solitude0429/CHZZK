@@ -1,32 +1,29 @@
+import { SOURCE_QUALITY, TARGET_QUALITY, parseQualityFromUrl, redactMediaUrl } from "./shared/quality.js";
 import {
-  chooseHighestQuality,
-  choosePreferredVisibleQuality,
-  normalizeQualityLabel,
-  parseQualityFromUrl,
-  qualityRank,
-  redactMediaUrl,
-} from "./shared/quality.js";
-import {
+  GRID_BYPASS_STORAGE_VALUE,
   QUALITY_LIST_SELECTOR,
+  canonicalStoredQualityForItem,
   findCheckedQualityItem,
-  findQualityItem,
-  getVisibleQualityLabels,
+  findQualityItemByStoredValue,
+  findSourceQualityItem,
+  renderGridBypassQualityLabel,
   safeText,
-  setQualityItemDisplay,
-  updateCurrentQualityText,
+  updateCurrentGridBypassQualityText,
 } from "./shared/player-dom.js";
 
 const LOG_PREFIX = "[CHZZK]";
-const STORAGE_KEY = "chzzk.selectedQualityText";
-const BADGE_TEXT = "CHZZK";
+const STORAGE_KEY = "chzzk.gridBypass.selectedQuality";
 const LIVE_URL_RE = /^https:\/\/chzzk\.naver\.com\/live\/[0-9a-z]+/i;
 const MEDIA_PLAYLIST_RE = /\.m3u8(?:[?#]|$)/i;
+const DEFAULT_STORED_QUALITY = "360p";
+const RESTORE_THROTTLE_MS = 1000;
 
 let qualityListElement = null;
 let observerTick = 0;
 let performanceScanCursor = 0;
-let lastQualityDiagnostic = "";
-const observedQualities = new Set();
+let previousIntroQualityText = "";
+let previousRestoreAttempt = 0;
+let lastObservedRedirectPair = "";
 
 function log(...args) {
   console.log(LOG_PREFIX, ...args);
@@ -46,15 +43,13 @@ function recordMediaUrl(url) {
   const quality = parseQualityFromUrl(url);
   if (!quality) return;
 
-  observedQualities.add(quality);
-  const highestQuality = chooseHighestQuality([...observedQualities]);
-  const diagnosticKey = `${highestQuality}:${[...observedQualities].sort().join(",")}`;
-  if (diagnosticKey === lastQualityDiagnostic) return;
+  const pairKey = `${quality}:${redactMediaUrl(url)}`;
+  if (quality !== SOURCE_QUALITY && quality !== TARGET_QUALITY) return;
+  if (pairKey === lastObservedRedirectPair) return;
 
-  lastQualityDiagnostic = diagnosticKey;
-  log("observed HLS qualities", {
-    highestQuality,
-    qualities: [...observedQualities].sort((a, b) => qualityRank(a) - qualityRank(b)),
+  lastObservedRedirectPair = pairKey;
+  log("observed HLS playlist", {
+    quality,
     sampleUrl: redactMediaUrl(url),
   });
 }
@@ -83,22 +78,27 @@ function startMediaDiagnostics() {
   }
 }
 
-function updateQualityText() {
-  const targetQuality = choosePreferredVisibleQuality(
-    getVisibleQualityLabels(document),
-    localStorage.getItem(STORAGE_KEY),
+function renderGridBypassOption() {
+  const sourceQualityItem = findSourceQualityItem(document);
+  if (!sourceQualityItem) return false;
+
+  return renderGridBypassQualityLabel(sourceQualityItem, { document });
+}
+
+function syncIntroQualityText() {
+  if (updateCurrentGridBypassQualityText(document)) return;
+
+  const currentQualityTextElement = document.querySelector(
+    "div.pzp-setting-intro-quality > div > div:last-child > span.pzp-ui-setting-home-item__value",
   );
-  if (!targetQuality) return false;
+  const selectedQualityText = safeText(findCheckedQualityItem(document));
+  if (!currentQualityTextElement || !selectedQualityText) return;
 
-  const targetQualityItem = findQualityItem(document, targetQuality);
-  if (!targetQualityItem) return false;
-
-  const changed = setQualityItemDisplay(targetQualityItem, targetQuality, {
-    badgeText: BADGE_TEXT,
-    document,
-  });
-  updateCurrentQualityText(document, targetQuality, { badgeText: BADGE_TEXT });
-  return changed;
+  const introText = safeText(currentQualityTextElement);
+  if (previousIntroQualityText !== introText) {
+    currentQualityTextElement.textContent = selectedQualityText;
+    previousIntroQualityText = selectedQualityText;
+  }
 }
 
 function openQualityMenu() {
@@ -111,8 +111,8 @@ function openQualityMenu() {
   qualityIntro?.click();
 }
 
-function selectQuality(label) {
-  const item = findQualityItem(document, label);
+function selectStoredQuality(storedQuality) {
+  const item = findQualityItemByStoredValue(document, storedQuality);
   if (!item) return false;
 
   item.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
@@ -121,31 +121,35 @@ function selectQuality(label) {
 }
 
 function restoreQuality() {
-  const targetQuality = choosePreferredVisibleQuality(
-    getVisibleQualityLabels(document),
-    localStorage.getItem(STORAGE_KEY),
-  );
-  if (!targetQuality) return;
+  const now = Date.now();
+  if (now - previousRestoreAttempt < RESTORE_THROTTLE_MS) return;
+  previousRestoreAttempt = now;
 
-  const currentQuality = normalizeQualityLabel(safeText(findCheckedQualityItem(document)));
-  if (currentQuality === targetQuality) return;
+  const qualityList = document.querySelector(QUALITY_LIST_SELECTOR);
+  if (!qualityList) return;
+
+  const storedQuality = localStorage.getItem(STORAGE_KEY) ?? DEFAULT_STORED_QUALITY;
+  const currentQuality = canonicalStoredQualityForItem(findCheckedQualityItem(document));
+  if (currentQuality === storedQuality) return;
 
   const videoElement = document.querySelector("video.webplayer-internal-video");
-  if (!videoElement || videoElement.readyState < 2) return;
+  if (!videoElement || videoElement.readyState < 3) return;
 
   openQualityMenu();
-  if (selectQuality(targetQuality)) {
-    updateQualityText();
-    log("requested quality", targetQuality);
+  renderGridBypassOption();
+  if (selectStoredQuality(storedQuality)) {
+    renderGridBypassOption();
+    syncIntroQualityText();
+    log("requested quality", storedQuality === GRID_BYPASS_STORAGE_VALUE ? TARGET_QUALITY : storedQuality);
   }
 }
 
 function saveQuality() {
   window.setTimeout(() => {
-    const selectedQuality = normalizeQualityLabel(safeText(findCheckedQualityItem(document)));
-    if (!selectedQuality) return;
+    const storedQuality = canonicalStoredQualityForItem(findCheckedQualityItem(document));
+    if (!storedQuality) return;
 
-    localStorage.setItem(STORAGE_KEY, selectedQuality);
+    localStorage.setItem(STORAGE_KEY, storedQuality);
   }, 0);
 }
 
@@ -165,11 +169,12 @@ function tick() {
 
   try {
     scanPerformanceEntries();
-    updateQualityText();
+    renderGridBypassOption();
+    syncIntroQualityText();
     bindQualityListEvents();
     restoreQuality();
   } catch (error) {
-    warn("quality controller failed", error);
+    warn("grid bypass controller failed", error);
   }
 }
 
@@ -178,10 +183,10 @@ function scheduleTick() {
   observerTick = window.setTimeout(tick, 250);
 }
 
-if (!globalThis.__CHZZK_EXTENSION_INJECTED__) {
-  globalThis.__CHZZK_EXTENSION_INJECTED__ = true;
+if (!globalThis.__CHZZK_GRID_BYPASS_INJECTED__) {
+  globalThis.__CHZZK_GRID_BYPASS_INJECTED__ = true;
 
-  log("page script injected");
+  log("grid bypass page script injected");
   startMediaDiagnostics();
   const observer = new MutationObserver(scheduleTick);
   observer.observe(document.body, {

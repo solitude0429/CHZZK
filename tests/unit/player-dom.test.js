@@ -4,10 +4,13 @@ import { describe, it } from "node:test";
 import { Window } from "happy-dom";
 
 import {
-  findQualityItem,
-  getVisibleQualityLabels,
-  setQualityItemDisplay,
-  updateCurrentQualityText,
+  GRID_BYPASS_BADGE_TEXT,
+  GRID_BYPASS_DISPLAY_QUALITY,
+  SOURCE_QUALITY,
+  findCheckedQualityItem,
+  findSourceQualityItem,
+  renderGridBypassQualityLabel,
+  updateCurrentGridBypassQualityText,
 } from "../../src/shared/player-dom.js";
 
 function createDocument(html) {
@@ -17,46 +20,53 @@ function createDocument(html) {
 }
 
 describe("player DOM helpers", () => {
-  it("finds visible quality labels across current CHZZK selector shapes", () => {
+  it("finds the 480p player menu item that triggers the grid-bypass redirect", () => {
+    const document = createDocument(`
+      <ul class="pzp-setting-quality-pane__list-container">
+        <li class="pzp-ui-setting-quality-item"><span>360p</span></li>
+        <li class="pzp-ui-setting-quality-item"><span>${SOURCE_QUALITY}</span></li>
+        <li class="pzp-ui-setting-quality-item"><span>720p</span></li>
+      </ul>
+    `);
+
+    assert.equal(findSourceQualityItem(document)?.textContent.trim(), SOURCE_QUALITY);
+  });
+
+  it("relabels only the 480p item as the 1080p grid-bypass option", () => {
     const document = createDocument(`
       <ul class="pzp-setting-quality-pane__list-container">
         <li class="pzp-ui-setting-quality-item"><span>480p</span></li>
         <li class="pzp-ui-setting-quality-item"><span>720p</span></li>
-        <li class="pzp-ui-setting-quality-item"><span>1080p</span></li>
       </ul>
-      <div class="other-setting-quality"><ul><li>audio only</li></ul></div>
     `);
+    const sourceItem = findSourceQualityItem(document);
 
-    assert.deepEqual(getVisibleQualityLabels(document), ["480p", "720p", "1080p"]);
-    assert.equal(findQualityItem(document, "1080p")?.textContent.trim(), "1080p");
+    assert.equal(renderGridBypassQualityLabel(sourceItem, { document }), true);
+
+    assert.equal(sourceItem.querySelector(".pzp-ui-track-badge__badge")?.textContent, GRID_BYPASS_BADGE_TEXT);
+    assert.equal(
+      sourceItem.textContent.replace(/\s+/g, " ").trim(),
+      `${GRID_BYPASS_DISPLAY_QUALITY} ${GRID_BYPASS_BADGE_TEXT}`,
+    );
+    assert.equal(document.querySelectorAll("li")[1].textContent.trim(), "720p");
   });
 
-  it("marks the selected target quality with a CHZZK badge without using HTML strings", () => {
+  it("updates the intro quality text when the relabeled 480p item is selected", () => {
     const document = createDocument(`
       <ul class="pzp-setting-quality-pane__list-container">
-        <li class="pzp-ui-setting-quality-item"><span>1080p</span></li>
+        <li class="pzp-ui-setting-quality-item pzp-ui-setting-pane-item--checked"><span>${GRID_BYPASS_DISPLAY_QUALITY} ${GRID_BYPASS_BADGE_TEXT}</span></li>
       </ul>
-    `);
-    const item = findQualityItem(document, "1080p");
-
-    assert.equal(setQualityItemDisplay(item, "1080p", { document, badgeText: "CHZZK" }), true);
-
-    assert.equal(item.querySelector(".pzp-ui-track-badge__badge")?.textContent, "CHZZK");
-    assert.equal(item.textContent.replace(/\s+/g, " ").trim(), "1080p CHZZK");
-  });
-
-  it("updates the current quality label only when the checked item matches the target quality", () => {
-    const document = createDocument(`
-      <ul class="pzp-setting-quality-pane__list-container">
-        <li aria-selected="true"><span>1080p</span></li>
-      </ul>
-      <div class="pzp-setting-intro-quality"><div><div></div><div><span class="pzp-ui-setting-home-item__value">720p</span></div></div></div>
+      <div class="pzp-setting-intro-quality"><div><div></div><div><span class="pzp-ui-setting-home-item__value">480p</span></div></div></div>
     `);
 
-    assert.equal(updateCurrentQualityText(document, "1080p", { badgeText: "CHZZK" }), true);
+    assert.equal(
+      findCheckedQualityItem(document)?.textContent.trim(),
+      `${GRID_BYPASS_DISPLAY_QUALITY} ${GRID_BYPASS_BADGE_TEXT}`,
+    );
+    assert.equal(updateCurrentGridBypassQualityText(document), true);
     assert.equal(
       document.querySelector(".pzp-ui-setting-home-item__value")?.textContent.replace(/\s+/g, " ").trim(),
-      "1080p CHZZK",
+      `${GRID_BYPASS_DISPLAY_QUALITY} ${GRID_BYPASS_BADGE_TEXT}`,
     );
   });
 });

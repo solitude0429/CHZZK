@@ -4,8 +4,9 @@ CHZZK
 This project is a personal fork/rework of the MIT-licensed upstream project:
 
 - Upstream: bass9030/FUCK-CHZZK-GRID
-- Upstream purpose: browser extension for CHZZK high-quality playback behavior
+- Upstream purpose: browser extension that bypasses CHZZK's NAVER Live Streaming Connector/grid-program requirement for high-quality playback
 - Upstream license: MIT
 
-The upstream MIT license text is preserved in LICENSE. Local changes rename the project to CHZZK and add
-project-specific validation, testing, documentation, and safer diagnostics.
+The Chrome MV3 port by refracta/FUCK-CHZZK-GRID-CHROME was also used as a reference for Manifest V3 DNR behavior.
+
+The upstream MIT license text is preserved in LICENSE. Local changes rename the project to CHZZK and add project-specific validation, testing, documentation, and build/CI packaging.

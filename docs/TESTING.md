@@ -7,7 +7,7 @@ npm ci
 npm run verify
 ```
 
-`verify` runs manifest validation, ESLint, unit tests, and extension packaging.
+`verify` runs bundle generation, manifest/DNR validation, ESLint, web-ext lint, unit tests, and extension packaging.
 
 ## Manual Firefox test
 
@@ -19,9 +19,11 @@ npx web-ext run --source-dir . --firefox-profile /tmp/chzzk-firefox-profile
 
 Manual checklist:
 
-1. Open a CHZZK live page.
-2. Open the quality menu.
-3. Confirm the extension injects without console errors.
-4. Confirm the highest visible quality is marked with a `CHZZK` badge, then select it if it is not already selected.
-5. Confirm the actual HLS request quality in DevTools Network.
-6. Confirm no cookies, signed URL queries, or tokens are copied into logs or issue reports.
+1. Remove or disable NAVER Live Streaming Connector/NLiveConnector on the test PC.
+2. Open a CHZZK live page.
+3. Open the quality menu.
+4. Confirm the extension injects without console errors.
+5. Confirm the `480p` item is displayed as `1080p with CHZZK GRID™`.
+6. Select that item.
+7. Confirm DevTools Network shows repeated `chunklist_1080p.m3u8` or `/1080p/...m3u8` requests.
+8. Confirm no cookies, signed URL queries, or tokens are copied into logs or issue reports.
