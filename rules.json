@@ -5,11 +5,11 @@
     "action": {
       "type": "redirect",
       "redirect": {
-        "regexSubstitution": "\\11080p\\2"
+        "regexSubstitution": "\\11080p\\3"
       }
     },
     "condition": {
-      "regexFilter": "(.*)480p(.*\\.m3u8.*)",
+      "regexFilter": "(.*)(144p|240p|270p|360p|480p|720p)(.*\\.m3u8.*)",
       "resourceTypes": ["media", "xmlhttprequest"]
     }
   }

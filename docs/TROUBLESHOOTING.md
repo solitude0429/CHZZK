@@ -9,27 +9,30 @@ npm run validate:manifest
 npx web-ext lint --source-dir .
 ```
 
-## `1080p with CHZZK GRID™` is not shown
+## Quality menu text did not change
 
-CHZZK may have changed player DOM class names. Capture a minimal redacted DOM fixture around the quality menu and add a
-regression test under `tests/fixtures/dom/` before changing selectors.
-
-The label is only UI text. If the label intermittently fails to render, selecting the raw `480p` item should still trigger
-the same DNR redirect and play through the 1080p playlist.
+That is expected. This extension intentionally does **not** relabel the `480p` item as `1080p with CHZZK GRID™`.
+The core behavior is network-level DNR redirect, so it does not depend on CHZZK player DOM selectors.
 
 ## Network request is not 1080p
 
-This project intentionally follows the original grid-bypass concept:
+This extension redirects lower CHZZK HLS playlist quality segments to the highest target quality:
 
-- player menu `480p` item → displayed as `1080p with CHZZK GRID™`
-- HLS playlist URL containing `480p` → static DNR redirect to `1080p`
+- `144p`, `240p`, `270p`, `360p`, `480p`, `720p` → `1080p`
+- `1080p` requests are left unchanged
 
-Check DevTools Network for `chunklist_1080p.m3u8` or `/1080p/...m3u8` requests. If requests still show `480p`:
+Check DevTools Network for `chunklist_1080p.m3u8` or `/1080p/...m3u8` requests. If requests still show a lower quality:
 
-1. Confirm Firefox is running on Windows; the extension disables the redirect ruleset on non-Windows platforms.
-2. Confirm the page URL is `https://chzzk.naver.com/live/...`.
-3. Confirm `npm run validate:manifest` passes and `rules.json` is packaged.
-4. Confirm the tested media URL contains a `480p` segment matching `(.*)480p(.*\.m3u8.*)`.
+1. Confirm the page URL is `https://chzzk.naver.com/live/...`.
+2. Confirm `npm run validate:manifest` passes and `rules.json` is packaged.
+3. Confirm the tested media URL contains one of the lower quality segments matching
+   `(.*)(144p|240p|270p|360p|480p|720p)(.*\.m3u8.*)`.
+4. If CHZZK introduces a new lower quality label, add it to `LOWER_QUALITIES`, `rules.json`, and the regression tests.
+
+## DOM changed
+
+DOM changes should not break the core redirect because no content script or DOM selector is used. If playback still fails after a
+CHZZK update, inspect the HLS playlist URL shape rather than the player menu HTML.
 
 ## NAVER Live Streaming Connector popup keeps appearing
 
