@@ -3,8 +3,6 @@
 
   const LOG_PREFIX = "[CHZZK]";
   const STORAGE_KEY = "chzzk.selectedQualityText";
-  const SOURCE_LABEL = "480p";
-  const DISPLAY_LABEL = "1080p";
   const BADGE_TEXT = "CHZZK";
   const LIVE_URL_RE = /^https:\/\/chzzk\.naver\.com\/live\/[0-9a-z]+/i;
   const MEDIA_PLAYLIST_RE = /\.m3u8(?:[?#]|$)/i;
@@ -36,7 +34,7 @@
   }
 
   function safeText(element) {
-    return element?.innerText?.trim() ?? "";
+    return element?.innerText?.trim() ?? element?.textContent?.trim() ?? "";
   }
 
   function normalizeQualityLabel(value) {
@@ -62,6 +60,19 @@
     if (normalizedLabels.length === 0) return null;
 
     return normalizedLabels.sort((a, b) => qualityRank(b) - qualityRank(a))[0];
+  }
+
+  function choosePreferredVisibleQuality(visibleLabels, storedPreference = null) {
+    const normalizedVisibleLabels = [
+      ...new Set((visibleLabels ?? []).map(normalizeQualityLabel).filter(Boolean)),
+    ];
+    if (normalizedVisibleLabels.length === 0) return null;
+
+    const normalizedPreference = normalizeQualityLabel(storedPreference);
+    if (normalizedPreference && normalizedVisibleLabels.includes(normalizedPreference))
+      return normalizedPreference;
+
+    return chooseHighestQuality(normalizedVisibleLabels);
   }
 
   function parseQualityFromUrl(url) {
@@ -142,15 +153,26 @@
       for (const element of document.querySelectorAll(selector)) {
         if (seen.has(element)) continue;
         seen.add(element);
-        if (safeText(element)) items.push(element);
+        if (normalizeQualityLabel(safeText(element))) items.push(element);
       }
     }
 
     return items;
   }
 
+  function getVisibleQualityLabels() {
+    return getQualityItems()
+      .map((element) => normalizeQualityLabel(safeText(element)))
+      .filter(Boolean);
+  }
+
   function findQualityItem(label) {
-    return getQualityItems().find((element) => safeText(element).includes(label)) ?? null;
+    const normalized = normalizeQualityLabel(label);
+    if (!normalized) return null;
+
+    return (
+      getQualityItems().find((element) => normalizeQualityLabel(safeText(element)) === normalized) ?? null
+    );
   }
 
   function findCheckedQualityItem() {
@@ -174,37 +196,41 @@
     return badgeWrap;
   }
 
-  function setQualityItemDisplay(element) {
-    if (!element) return false;
+  function setQualityItemDisplay(element, label) {
+    if (!element || !label) return false;
 
     const target =
       element.querySelector("li > div:nth-child(2) > span > div") ?? element.querySelector("span") ?? element;
 
     const prefix = document.createElement("span");
     prefix.className = "pzp-pc-ui-setting-quality-item__prefix";
-    prefix.append(document.createTextNode(`${DISPLAY_LABEL}\u00a0`), createBadge());
+    prefix.append(document.createTextNode(`${label}\u00a0`), createBadge());
     target.replaceChildren(prefix);
     return true;
   }
 
-  function updateCurrentQualityText() {
+  function updateCurrentQualityText(targetQuality) {
     const currentQualityTextElement = document.querySelector(
       "div.pzp-setting-intro-quality > div > div:last-child > span.pzp-ui-setting-home-item__value",
     );
-    const checkedQuality = findCheckedQualityItem();
-    if (!currentQualityTextElement || !checkedQuality) return;
+    const checkedQuality = normalizeQualityLabel(safeText(findCheckedQualityItem()));
+    if (!currentQualityTextElement || checkedQuality !== targetQuality) return;
 
-    if (safeText(checkedQuality).includes(BADGE_TEXT) || safeText(checkedQuality).includes(SOURCE_LABEL)) {
-      currentQualityTextElement.replaceChildren(document.createTextNode(`${DISPLAY_LABEL} `), createBadge());
-    }
+    currentQualityTextElement.replaceChildren(document.createTextNode(`${targetQuality} `), createBadge());
   }
 
   function updateQualityText() {
-    const sourceQualityItem = findQualityItem(SOURCE_LABEL);
-    if (!sourceQualityItem) return false;
+    const targetQuality = choosePreferredVisibleQuality(
+      getVisibleQualityLabels(),
+      localStorage.getItem(STORAGE_KEY),
+    );
+    if (!targetQuality) return false;
 
-    const changed = setQualityItemDisplay(sourceQualityItem);
-    updateCurrentQualityText();
+    const targetQualityItem = findQualityItem(targetQuality);
+    if (!targetQualityItem) return false;
+
+    const changed = setQualityItemDisplay(targetQualityItem, targetQuality);
+    updateCurrentQualityText(targetQuality);
     return changed;
   }
 
@@ -228,30 +254,32 @@
   }
 
   function restoreQuality() {
-    const qualityItems = getQualityItems();
-    if (qualityItems.length === 0) return;
+    const targetQuality = choosePreferredVisibleQuality(
+      getVisibleQualityLabels(),
+      localStorage.getItem(STORAGE_KEY),
+    );
+    if (!targetQuality) return;
 
-    const selectedQuality = localStorage.getItem(STORAGE_KEY) || SOURCE_LABEL;
-    const currentQuality = findCheckedQualityItem();
-    if (safeText(currentQuality).includes(selectedQuality) || safeText(currentQuality).includes(BADGE_TEXT))
-      return;
+    const currentQuality = normalizeQualityLabel(safeText(findCheckedQualityItem()));
+    if (currentQuality === targetQuality) return;
 
     const videoElement = document.querySelector("video.webplayer-internal-video");
     if (!videoElement || videoElement.readyState < 2) return;
 
     openQualityMenu();
-    if (selectQuality(selectedQuality)) {
+    if (selectQuality(targetQuality)) {
       updateQualityText();
-      log("requested quality", selectedQuality === SOURCE_LABEL ? DISPLAY_LABEL : selectedQuality);
+      log("requested quality", targetQuality);
     }
   }
 
   function saveQuality() {
-    const checkedQuality = findCheckedQualityItem();
-    const text = safeText(checkedQuality);
-    if (!text) return;
+    window.setTimeout(() => {
+      const selectedQuality = normalizeQualityLabel(safeText(findCheckedQualityItem()));
+      if (!selectedQuality) return;
 
-    localStorage.setItem(STORAGE_KEY, text.includes(BADGE_TEXT) ? SOURCE_LABEL : text);
+      localStorage.setItem(STORAGE_KEY, selectedQuality);
+    }, 0);
   }
 
   function bindQualityListEvents() {

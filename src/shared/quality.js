@@ -28,6 +28,19 @@ export function chooseHighestQuality(labels) {
   return normalizedLabels.sort((a, b) => qualityRank(b) - qualityRank(a))[0];
 }
 
+export function choosePreferredVisibleQuality(visibleLabels, storedPreference = null) {
+  const normalizedVisibleLabels = [
+    ...new Set((visibleLabels ?? []).map(normalizeQualityLabel).filter(Boolean)),
+  ];
+  if (normalizedVisibleLabels.length === 0) return null;
+
+  const normalizedPreference = normalizeQualityLabel(storedPreference);
+  if (normalizedPreference && normalizedVisibleLabels.includes(normalizedPreference))
+    return normalizedPreference;
+
+  return chooseHighestQuality(normalizedVisibleLabels);
+}
+
 export function parseQualityFromUrl(url) {
   if (typeof url !== "string") return null;
   let pathname = url;

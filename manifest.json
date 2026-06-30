@@ -15,22 +15,8 @@
   "name": "CHZZK",
   "description": "Personal Firefox extension for CHZZK high-quality playback selection.",
   "version": "0.1.0",
-  "permissions": ["activeTab", "scripting", "declarativeNetRequest"],
-  "host_permissions": [
-    "*://chzzk.naver.com/live/*",
-    "*://*.akamaized.net/*",
-    "*://*.navercdn.com/*",
-    "*://*.pstatic.net/*"
-  ],
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "ruleset_1",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
+  "permissions": ["scripting"],
+  "host_permissions": ["*://chzzk.naver.com/live/*"],
   "background": {
     "scripts": ["background.js"]
   },

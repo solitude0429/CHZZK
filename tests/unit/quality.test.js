@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   chooseHighestQuality,
+  choosePreferredVisibleQuality,
   normalizeQualityLabel,
   parseQualitiesFromPlaylist,
   parseQualityFromUrl,
@@ -23,6 +24,13 @@ describe("quality helpers", () => {
     assert.equal(chooseHighestQuality(["360p", "1080p", "720p"]), "1080p");
     assert.equal(chooseHighestQuality(["480p", "720p"]), "720p");
     assert.equal(chooseHighestQuality([]), null);
+  });
+
+  it("prefers an available stored visible quality and otherwise falls back to the highest visible quality", () => {
+    assert.equal(choosePreferredVisibleQuality(["480p", "720p", "1080p"], null), "1080p");
+    assert.equal(choosePreferredVisibleQuality(["480p", "720p", "1080p"], "720p"), "720p");
+    assert.equal(choosePreferredVisibleQuality(["480p", "720p"], "1080p CHZZK"), "720p");
+    assert.equal(choosePreferredVisibleQuality([], "1080p"), null);
   });
 
   it("parses quality labels from known HLS URL shapes", () => {

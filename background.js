@@ -18,29 +18,6 @@
     return typeof url === "string" && LIVE_URL_RE.test(url);
   }
 
-  async function setRulesetEnabled(enabled) {
-    if (!extensionApi?.declarativeNetRequest?.updateEnabledRulesets) return;
-
-    try {
-      await extensionApi.declarativeNetRequest.updateEnabledRulesets({
-        disableRulesetIds: enabled ? [] : ["ruleset_1"],
-        enableRulesetIds: enabled ? ["ruleset_1"] : [],
-      });
-    } catch (error) {
-      warn("failed to update DNR ruleset", error);
-    }
-  }
-
-  async function isWindows() {
-    try {
-      const platformInfo = await extensionApi.runtime.getPlatformInfo();
-      return platformInfo.os === "win";
-    } catch (error) {
-      warn("failed to read platform info", error);
-      return false;
-    }
-  }
-
   async function injectScript(tabId, url) {
     const previousUrl = injectedByTab.get(tabId);
     if (previousUrl === url) return;
@@ -70,12 +47,6 @@
   extensionApi.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     const url = changeInfo.url ?? tab.url;
     if (!isChzzkLiveUrl(url)) return;
-
-    const rulesetEnabled = await isWindows();
-    await setRulesetEnabled(rulesetEnabled);
-    if (!rulesetEnabled) {
-      log("DNR ruleset disabled on non-Windows platform");
-    }
 
     if (changeInfo.status === "complete" || changeInfo.url) {
       await injectScript(tabId, url);
