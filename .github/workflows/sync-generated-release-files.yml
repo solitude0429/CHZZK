@@ -38,5 +38,5 @@ jobs:
       - run: npm run build:runtime
       - uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: chore: sync generated release files
+          commit_message: sync generated release files
           file_pattern: package-lock.json background.js diagnostics.js site-observer.js
