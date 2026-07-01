@@ -241,10 +241,30 @@ api.runtime.onMessage?.addListener((message, sender) => {
   return undefined;
 });
 
+function liveTabQueryUrls() {
+  return (policy.trustedInitiatorDomains?.length ? policy.trustedInitiatorDomains : ["chzzk.naver.com"])
+    .map((domain) => `https://*.${domain}/live/*`)
+    .sort();
+}
+
+async function prewarmExistingLiveTabs() {
+  if (typeof api.tabs?.query !== "function") return;
+  const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
+  await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id)));
+}
+
+async function resetAndPrewarmRuntimeState() {
+  await clearRuntimeRedirectState();
+  await prewarmExistingLiveTabs();
+}
+
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
-  if (changeInfo?.url && !isChzzkLiveUrl(changeInfo.url, policy)) {
-    removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to clear tab target", error));
+  if (!changeInfo?.url) return;
+  if (isChzzkLiveUrl(changeInfo.url, policy)) {
+    prewarmLiveTab(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm live tab from URL update", error));
+    return;
   }
+  removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to clear tab target", error));
 });
 
 api.tabs?.onRemoved?.addListener((tabId) => {
@@ -252,9 +272,9 @@ api.tabs?.onRemoved?.addListener((tabId) => {
 });
 
 api.runtime.onInstalled?.addListener(() => {
-  clearRuntimeRedirectState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
 });
 
 api.runtime.onStartup?.addListener(() => {
-  clearRuntimeRedirectState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
 });
