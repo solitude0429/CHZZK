@@ -16,7 +16,7 @@ The core behavior is network/webRequest level, so it does not depend on CHZZK pl
 
 ## Popup shows no active redirect target
 
-The extension does not ship a global static ruleset. A startup redirect target should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab. Prewarm sender URL fields are not required because Firefox can omit them; the MV2 content-script match constrains the sender origin.
+The extension does not ship a global static ruleset. CHZZK live tab identity may be prewarmed as soon as a live page starts, but the first redirect must still work from the numeric HLS playlist request itself when Firefox omits page metadata. Prewarm sender URL fields are not required because Firefox can omit them; the MV2 content-script match constrains the sender origin.
 
 Check:
 
@@ -24,14 +24,14 @@ Check:
 2. The page was opened after the current extension version loaded. If not, close and reopen the live tab once.
 3. Playback has started and a numeric HLS playlist request occurred.
 4. Popup `lastDecision` is one of:
-   - `eligible-chzzk-hls-quality` — a per-tab target should be resolved and a rule installed.
+   - `eligible-chzzk-hls-quality` — the runtime should resolve a per-tab target and redirect lower numeric playlist requests through blocking `webRequest`.
    - `unknown-quality-shape` — CHZZK changed URL shape; add a redacted fixture and update parser.
    - `untrusted-initiator` — request was not tied to a CHZZK live tab.
    - `untrusted-request-domain` — CDN/domain policy needs review before widening.
 
 ## Network request is not the maximum supported quality
 
-The runtime prewarms a safe startup redirect target before the first HLS playlist request, then probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and upgrades the per-tab target for later lower numeric playlists in that tab.
+The runtime treats prewarm as a supporting signal only. On each eligible numeric HLS playlist request, it probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and caches the per-tab target for later lower numeric playlists in that tab.
 
 Check:
 
