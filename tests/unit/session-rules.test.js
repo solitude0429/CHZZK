@@ -69,6 +69,18 @@ describe("session-scoped CHZZK redirect rules", () => {
       shouldBootstrapSessionRule({ ...eligible, documentUrl: "", initiator: "" }, policy).ok,
       false,
     );
+    assert.equal(
+      shouldBootstrapSessionRule(
+        {
+          ...eligible,
+          documentUrl: "http://chzzk.naver.com/live/example-channel",
+          initiator: "http://chzzk.naver.com",
+        },
+        policy,
+      ).ok,
+      false,
+      "HTTP CHZZK contexts must not bootstrap session redirects",
+    );
     assert.equal(shouldBootstrapSessionRule({ ...eligible, tabId: -1 }, policy).ok, false);
     assert.equal(shouldBootstrapSessionRule({ ...eligible, tabId: 100_000 }, policy).ok, false);
     assert.equal(

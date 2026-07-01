@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function normalizeCredential(name) {
   const value = process.env[name];
@@ -44,6 +46,7 @@ const ignoreFiles = [
   ".github",
   ".git",
   ".hermes",
+  "codex-security-scans",
   "docs",
   "node_modules",
   "package-lock.json",
@@ -55,16 +58,37 @@ const ignoreFiles = [
   "tests",
 ];
 
+const tempDir = mkdtempSync(join(tmpdir(), "chzzk-web-ext-sign-"));
+const configPath = join(tempDir, "web-ext-config.cjs");
+writeFileSync(configPath, `module.exports = ${JSON.stringify({ sign: { apiKey, apiSecret } }, null, 2)};\n`, {
+  mode: 0o600,
+});
+chmodSync(configPath, 0o600);
+
 const args = [
   "sign",
   "--channel=unlisted",
+  `--config=${configPath}`,
+  "--no-config-discovery",
   "--source-dir=.",
   "--artifacts-dir=dist/signed",
-  `--api-key=${apiKey}`,
-  `--api-secret=${apiSecret}`,
   "--ignore-files",
   ...ignoreFiles,
 ];
 
-const result = spawnSync("web-ext", args, { stdio: "inherit" });
-process.exit(result.status ?? 1);
+let exitCode = 1;
+try {
+  const result = spawnSync("web-ext", args, {
+    env: {
+      ...process.env,
+      WEB_EXT_API_KEY: "",
+      WEB_EXT_API_SECRET: "",
+    },
+    stdio: "inherit",
+  });
+  if (result.error) console.error(result.error.message);
+  exitCode = result.status ?? 1;
+} finally {
+  rmSync(tempDir, { force: true, recursive: true });
+}
+process.exit(exitCode);

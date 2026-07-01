@@ -9,7 +9,7 @@
 - `updates.json`과 signed XPI는 VPS nginx의 `/var/www/chzzk-updates/`에서 제공됩니다.
 - GitHub Release는 서명 산출물의 원본 보관소입니다.
 - `Sign and publish Firefox add-on` workflow가 signed XPI, source zip, update-site artifact를 생성하고 GitHub Release를 생성/갱신합니다.
-- VPS 배포 스크립트가 private GitHub Release에서 signed XPI/source zip을 내려받고 내부 update host에 복사합니다.
+- VPS 배포 스크립트가 private GitHub Release에서 signed XPI/source ZIP을 내려받고, GitHub artifact attestation이 예상 source commit과 signing workflow에 묶여 있는지 검증한 뒤 내부 update host에 복사합니다.
 - `updates.json`에는 signed XPI의 `sha256` 해시가 함께 들어갑니다.
 
 ## Telemetry collector
@@ -26,7 +26,7 @@
 sudo /usr/local/sbin/chzzk-telemetry-summary --since=-24h
 ```
 
-Collector는 CHZZK live scope, schema version, add-on ID/version, event type을 검증하고 저장 전후 payload를 sanitize합니다. signed CDN query string, token/auth/session-like query, page text, chat text, cookie/header/authentication data는 저장하지 않습니다.
+Collector는 HMAC-SHA256 report signature, CHZZK live scope, schema version, add-on ID/version, event type을 검증하고 저장 전 payload를 다시 sanitize합니다. signed CDN query string, token/auth/session-like material, raw URL path, raw page error text, page text, chat text, cookie/header/authentication data는 저장하지 않습니다.
 
 ## 첫 설치 주의
 
@@ -48,11 +48,15 @@ npm version patch --no-git-tag-version
 3. `main`에 `manifest.json`, `package.json`, `package-lock.json`, 또는 `.github/workflows/sign-unlisted.yml` 변경이 push되면 `Sign and publish Firefox add-on` workflow가 실행됩니다. 수동 실행이 필요하면 Actions → `Sign and publish Firefox add-on` → Run workflow를 사용합니다.
 4. workflow가 다음을 수행합니다.
    - `npm run verify`
+   - protected ref / `firefox-signing` environment gate 확인
    - AMO unlisted signing
    - signed XPI 파일명 정규화
+   - GitHub artifact attestation 생성
    - GitHub Release 생성/갱신
    - update-site artifact 생성
 5. VPS에서 내부 update host를 배포합니다.
+
+배포 host의 GitHub CLI는 `gh attestation verify`를 지원해야 합니다. 배포 시 기본값은 현재 checkout commit을 source digest로 사용하며, 필요하면 `CHZZK_SOURCE_COMMIT`, `CHZZK_SOURCE_REPOSITORY`, `CHZZK_SIGNING_WORKFLOW_REF`로 명시합니다.
 
 ```bash
 npm run deploy:updates:internal

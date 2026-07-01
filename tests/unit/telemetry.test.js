@@ -36,7 +36,7 @@ describe("CHZZK telemetry sanitization", () => {
     assert.ok(summary.classSummary.some((entry) => entry.token === "quality_button"));
   });
 
-  it("summarizes diagnostics without signed CDN query values", () => {
+  it("summarizes diagnostics without signed CDN query values or path identifiers", () => {
     const summary = summarizeDiagnosticsForTelemetry({
       decisions: [{ reason: "unknown-quality-shape" }, { reason: "unknown-quality-shape" }],
       generatedAt: "2026-01-01T00:00:00.000Z",
@@ -46,7 +46,7 @@ describe("CHZZK telemetry sanitization", () => {
           quality: "720p",
           seenAt: "2026-01-01T00:00:00.000Z",
           type: "media",
-          url: "https://cdn.example/live/chunklist_720p.m3u8?Policy=secret&Signature=secret",
+          url: "https://cdn.example/live/channel-123/session-456/chunklist_720p.m3u8?Policy=secret&Signature=secret",
         },
       ],
       sessionRules: { activeRuleIds: [100001], activeTabIds: [1], lastError: "boom" },
@@ -55,24 +55,47 @@ describe("CHZZK telemetry sanitization", () => {
 
     assert.deepEqual(summary.decisionsByReason, { "unknown-quality-shape": 2 });
     assert.equal(summary.samples[0].url.includes("Policy=secret"), false);
+    assert.equal(summary.samples[0].url.includes("channel-123"), false);
+    assert.equal(summary.samples[0].url.includes("session-456"), false);
+    assert.match(summary.samples[0].url, /\[redacted-path\]/);
     assert.equal(summary.sessionRules.activeRuleCount, 1);
   });
 
-  it("rejects unsafe reports and sanitizes error URLs", () => {
+  it("rejects unsafe reports and reduces error text to bounded categories", () => {
     const safe = makeTelemetryReport({
       addonId: "chzzk@solitude0429.local",
       eventType: "diagnostics-summary",
       extensionVersion: "0.0.5",
       structure: summarizeDomStructure({ url: "https://chzzk.naver.com/live/a" }),
     });
-    assert.equal(isTelemetryReportSafe(safe), true);
+    const authenticatedSafe = { ...safe, auth: { scheme: "hmac-sha256-v1" }, installId: "install-1" };
+    assert.equal(isTelemetryReportSafe(authenticatedSafe), true);
     assert.equal(
-      sanitizeErrorText("failed https://example.test/path?token=secret"),
-      "failed https://example.test/path?[redacted]",
+      sanitizeErrorText("failed https://example.test/private/channel-123?token=secret AUTH_TOKEN=secret"),
+      "error:url-with-sensitive-material",
     );
+    assert.equal(sanitizeErrorText("ReferenceError: player is not defined"), "error:script-reference");
     assert.equal(
-      isTelemetryReportSafe({ ...safe, diagnostics: { samples: [{ url: "https://x/?Policy=secret" }] } }),
+      isTelemetryReportSafe({
+        ...authenticatedSafe,
+        diagnostics: { samples: [{ url: "https://x/?Policy=secret" }] },
+      }),
       false,
+    );
+  });
+
+  it("requires authenticated telemetry metadata before a report is safe", () => {
+    const report = makeTelemetryReport({
+      addonId: "chzzk@solitude0429.local",
+      eventType: "diagnostics-summary",
+      extensionVersion: "0.0.5",
+      structure: summarizeDomStructure({ url: "https://chzzk.naver.com/live/a" }),
+    });
+
+    assert.equal(isTelemetryReportSafe(report), false);
+    assert.equal(
+      isTelemetryReportSafe({ ...report, auth: { scheme: "hmac-sha256-v1" }, installId: "install-1" }),
+      true,
     );
   });
 });

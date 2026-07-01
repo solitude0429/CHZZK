@@ -1,28 +1,23 @@
 import { spawnSync } from "node:child_process";
 
-const build = spawnSync("npm", ["run", "build:runtime"], { stdio: "inherit" });
-if (build.status !== 0) process.exit(build.status ?? 1);
+const generatedFiles = ["background.js", "diagnostics.js", "site-observer.js"];
 
-const diff = spawnSync(
-  "git",
-  ["diff", "--name-only", "--", "background.js", "diagnostics.js", "site-observer.js"],
-  {
-    encoding: "utf8",
-  },
-);
-if (diff.status !== 0) {
-  process.stderr.write(diff.stderr);
-  process.exit(diff.status ?? 1);
+function generatedDiff() {
+  const result = spawnSync("git", ["diff", "--", ...generatedFiles], { encoding: "utf8" });
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr);
+    process.exit(result.status ?? 1);
+  }
+  return result.stdout;
 }
 
-const changed = diff.stdout
-  .split(/\r?\n/)
-  .map((line) => line.trim())
-  .filter(Boolean);
+const before = generatedDiff();
+const build = spawnSync("npm", ["run", "build:runtime"], { stdio: "inherit" });
+if (build.status !== 0) process.exit(build.status ?? 1);
+const after = generatedDiff();
 
-if (changed.length > 0) {
-  console.warn(
-    `Generated runtime files were refreshed by build:runtime: ${changed.join(", ")}. ` +
-      "Commit regenerated artifacts before manual distribution.",
-  );
+if (before !== after) {
+  process.stdout.write(after);
+  console.error("Generated runtime files are stale. Run npm run build:runtime and commit the result.");
+  process.exit(1);
 }

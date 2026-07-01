@@ -17,13 +17,31 @@ on:
       - ".github/workflows/sign-unlisted.yml"
 
 permissions:
+  attestations: write
   contents: write
+  id-token: write
 
 jobs:
   sign-unlisted:
     runs-on: ubuntu-latest
+    environment: firefox-signing
     steps:
       - uses: actions/checkout@v4
+      - name: Enforce protected signing ref
+        run: |
+          set -euo pipefail
+          default_ref="refs/heads/${{ github.event.repository.default_branch }}"
+          case "${{ github.ref }}" in
+            "$default_ref"|refs/tags/v*) ;;
+            *)
+              echo "Signing is allowed only from the default branch or v* release tags." >&2
+              exit 1
+              ;;
+          esac
+          if [ "${{ github.ref_protected }}" != "true" ]; then
+            echo "Signing ref must be protected before AMO credentials are used." >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -40,22 +58,7 @@ jobs:
             echo "tag=v$version"
             echo "release_xpi=dist/chzzk-${version}-signed.xpi"
           } >> "$GITHUB_OUTPUT"
-      - name: Reuse existing release XPI when available
-        id: existing_xpi
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.package.outputs.tag }}"
-          version="${{ steps.package.outputs.version }}"
-          asset="chzzk-${version}-signed.xpi"
-          if gh release view "$tag" >/dev/null 2>&1 && gh release download "$tag" -p "$asset" -D dist >/dev/null 2>&1; then
-            echo "reused=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "reused=false" >> "$GITHUB_OUTPUT"
-          fi
       - name: Sign with AMO unlisted channel
-        if: ${{ steps.existing_xpi.outputs.reused != 'true' }}
         run: npm run sign:unlisted
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
@@ -66,17 +69,21 @@ jobs:
           set -euo pipefail
           version="${{ steps.package.outputs.version }}"
           release_xpi="${{ steps.package.outputs.release_xpi }}"
-          if [ "${{ steps.existing_xpi.outputs.reused }}" != "true" ]; then
-            signed_count=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | wc -l | tr -d ' ')
-            test "$signed_count" = "1"
-            signed_xpi=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | head -n 1)
-            cp "$signed_xpi" "$release_xpi"
-          fi
+          signed_count=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | wc -l | tr -d ' ')
+          test "$signed_count" = "1"
+          signed_xpi=$(find dist/signed -maxdepth 1 -type f -name '*.xpi' | head -n 1)
+          cp "$signed_xpi" "$release_xpi"
           test -f "$release_xpi"
           sha256=$(sha256sum "$release_xpi" | cut -d' ' -f1)
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
       - run: npm run build:update-manifest
       - run: npm run validate:update-manifest
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/chzzk-${{ steps.package.outputs.version }}.zip
+            dist/chzzk-${{ steps.package.outputs.version }}-signed.xpi
       - name: Write release notes
         run: |
           set -euo pipefail
@@ -85,6 +92,12 @@ jobs:
           ## Summary
           - AMO unlisted signed Firefox install package.
           - Firefox automatic-update manifest targets the private internal HTTPS update host.
+          - GitHub artifact attestations bind release assets to this signing workflow and source commit.
+
+          ## Source provenance
+          - Repository: ${{ github.repository }}
+          - Commit: ${{ github.sha }}
+          - Workflow: .github/workflows/sign-unlisted.yml
 
           ## Update manifest
           - https://chzzk-updates.alpha-apple.dedyn.io/updates.json

@@ -27,9 +27,11 @@ This extension observes CHZZK live-page HLS playlist requests, page structure si
 - Session rule IDs are bounded to the owned cleanup range.
 - Session rules are removed on tab close and, when Firefox exposes tab URL changes to the extension, when the tab navigates away from a CHZZK live page.
 - HLS diagnostics strip query strings and fragments before local storage, export, or telemetry transmission.
+- Telemetry URL samples redact path identifiers and keep only host family plus normalized quality/file-type hints.
+- Page error telemetry is reduced to bounded error categories; raw stack/message text is not forwarded to collector summaries.
 - Telemetry is sent only to `https://chzzk-report.alpha-apple.dedyn.io/report` and only from CHZZK live pages / trusted HLS diagnostics after explicit opt-in.
-- The collector validates schema, scope, add-on ID/version, event type, size, and sensitive-query patterns before writing newline-delimited JSON.
-- The collector serializes file appends and applies a per-client request rate limit.
+- The collector validates HMAC-SHA256 report authentication, schema, scope, add-on ID/version, event type, size, quotas, retention/file-size limits, and sensitive-material patterns before writing newline-delimited JSON.
+- The signing workflow uses a protected `firefox-signing` environment, protected ref checks, temporary non-argv AMO credential delivery, and GitHub artifact attestations for release provenance.
 - `npm run verify` includes formatting, generated-runtime refresh, manifest validation, project cleanliness validation, lint, web-ext lint, unit tests, Python ops tests, dependency audit, build, and package-content audit.
 
 ## Data collection declaration
@@ -64,6 +66,8 @@ The auto-update loop may use collected telemetry to create patches, PRs, and rel
 - avoid committing raw telemetry files;
 - avoid printing or preserving secrets;
 - leave complex/uncertain CHZZK structural changes as a PR or issue instead of blindly publishing.
+- treat telemetry summary values as untrusted data only; telemetry may suggest review, but it may not directly issue code-change instructions.
+- deploy update artifacts only after provenance attestation verifies the expected source commit and signing workflow.
 
 ## Reporting issues
 
