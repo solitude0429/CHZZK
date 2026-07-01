@@ -107,6 +107,26 @@ async function amoFetch(url, options = {}) {
   });
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableJson(value[key])]),
+    );
+  }
+  return value;
+}
+
+function buffersMatchSource(file, actual, expected) {
+  if (file !== "manifest.json") return actual.equals(expected);
+  return (
+    JSON.stringify(stableJson(JSON.parse(actual.toString("utf8")))) ===
+    JSON.stringify(stableJson(JSON.parse(expected.toString("utf8"))))
+  );
+}
+
 async function verifySignedXpiMatchesSource(xpiPath) {
   const zip = await JSZip.loadAsync(await readFile(xpiPath));
   const entries = Object.values(zip.files)
@@ -130,7 +150,7 @@ async function verifySignedXpiMatchesSource(xpiPath) {
     const zipEntry = zip.file(file);
     if (!zipEntry) throw new Error(`Signed XPI is missing ${file}.`);
     const [actual, expected] = await Promise.all([zipEntry.async("nodebuffer"), readFile(file)]);
-    if (!actual.equals(expected)) {
+    if (!buffersMatchSource(file, actual, expected)) {
       throw new Error(`Signed XPI ${file} does not match the current source file.`);
     }
   }
