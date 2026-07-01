@@ -267,16 +267,19 @@ def sanitize_report(report: dict[str, Any], *, install_id: str, secret: bytes) -
     }
 
     if diagnostics:
-        session_rules = diagnostics.get("sessionRules") if isinstance(diagnostics.get("sessionRules"), dict) else {}
+        redirect_state = diagnostics.get("runtimeRedirects") if isinstance(diagnostics.get("runtimeRedirects"), dict) else {}
+        legacy_session_rules = diagnostics.get("sessionRules") if isinstance(diagnostics.get("sessionRules"), dict) else {}
+        if not redirect_state and legacy_session_rules:
+            redirect_state = legacy_session_rules
         clean["diagnostics"] = {
             "decisionsByReason": sanitize_numeric_map(diagnostics.get("decisionsByReason")),
             "generatedAt": sanitize_text(diagnostics.get("generatedAt"), max_len=80),
             "qualities": sanitize_numeric_map(diagnostics.get("qualities")),
-            "sessionRules": {
-                "activeRuleCount": int(session_rules.get("activeRuleCount") or 0),
-                "activeTabCount": int(session_rules.get("activeTabCount") or 0),
-                "lastError": sanitize_error_text(session_rules.get("lastError")),
-                "updatedAt": sanitize_text(session_rules.get("updatedAt"), max_len=80),
+            "runtimeRedirects": {
+                "activeTabCount": len(redirect_state.get("activeTabIds") or []),
+                "lastError": sanitize_error_text(redirect_state.get("lastError")),
+                "targetCount": len(redirect_state.get("targetsByTab") or {}),
+                "updatedAt": sanitize_text(redirect_state.get("updatedAt"), max_len=80),
             },
             "totalHlsRequests": min(max(int(diagnostics.get("totalHlsRequests") or 0), 0), 1_000_000),
         }

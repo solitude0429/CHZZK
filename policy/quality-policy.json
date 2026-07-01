@@ -28,8 +28,6 @@
   "requestMethods": [
     "get"
   ],
-  "sessionRuleBaseId": 100000,
-  "redirectRulePriority": 1,
   "urlQualityPrefixes": [
     "chunklist_",
     "/"
@@ -40,11 +38,11 @@
   "maxDiagnosticsSamples": 200,
   "probeTimeoutMs": 1500,
   "notes": [
-    "A CHZZK live page prewarms a tab-scoped session DNR rule to startupTargetQuality before the first HLS playlist request so playback does not require a manual refresh.",
-    "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and upgrades the tab rule to the highest candidate that returns a valid HLS playlist.",
-    "The generated session regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
+    "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
+    "The persistent background page uses blocking webRequest to redirect each trusted numeric HLS playlist request; no DNR session or static ruleset is shipped.",
+    "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
+    "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-    "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects."
-  ],
-  "startupTargetQuality": "1080p"
+    "Request URL, initiator, method, resource type, trusted domain, and tab context all constrain redirects."
+  ]
 }

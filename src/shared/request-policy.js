@@ -1,14 +1,7 @@
-import {
-  buildQualityRegexFilter,
-  highestQualityCandidate,
-  normalizeQualityCandidates,
-  parseQualityFromUrl,
-  qualityNumber,
-} from "./quality.js";
+import { highestQualityCandidate, parseQualityFromUrl, qualityNumber } from "./quality.js";
 
-const DEFAULT_SESSION_RULE_BASE_ID = 100_000;
-export const SESSION_RULE_ID_RANGE = 100_000;
-const DEFAULT_RESOURCE_TYPES = ["media", "xmlhttprequest"];
+export const REDIRECT_TAB_ID_RANGE = 100_000;
+const DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
 const DEFAULT_REQUEST_METHODS = ["get"];
 
 function asArray(value) {
@@ -48,29 +41,14 @@ function requestMethods(policy) {
   return asArray(policy.requestMethods).length > 0 ? asArray(policy.requestMethods) : DEFAULT_REQUEST_METHODS;
 }
 
-export function defaultSessionTargetQuality(policy) {
+export function defaultRedirectTargetQuality(policy) {
   return highestQualityCandidate(policy.qualityCandidates, {
     minRedirectQuality: policy.minRedirectQuality,
   });
 }
 
-export function prewarmSessionTargetQuality(policy) {
-  const [targetQuality] = normalizeQualityCandidates([policy.startupTargetQuality], {
-    minRedirectQuality: policy.minRedirectQuality,
-  });
-  if (!targetQuality) return null;
-
-  const configuredCandidates = normalizeQualityCandidates(policy.qualityCandidates, {
-    minRedirectQuality: policy.minRedirectQuality,
-  });
-  return configuredCandidates.includes(targetQuality) ? targetQuality : null;
-}
-
-export function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
-  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
-    throw new Error(`invalid tabId for session DNR rule: ${tabId}`);
-  }
-  return baseId + tabId;
+export function isValidRedirectTabId(tabId) {
+  return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
 }
 
 export function isTrustedRequestDomain(url, policy) {
@@ -96,9 +74,7 @@ export function isChzzkLiveUrl(url, policy) {
 }
 
 export function isTrustedChzzkContext(details, policy) {
-  if (!details || details.tabId == null || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
-    return false;
-  }
+  if (!details || !isValidRedirectTabId(details.tabId)) return false;
   if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
   if (isChzzkLiveUrl(details.originUrl, policy)) return true;
 
@@ -109,7 +85,7 @@ export function isTrustedChzzkContext(details, policy) {
   );
 
   // An origin-only initiator is useful as a supporting signal, but it is not enough by itself: require
-  // at least one page-level URL to point at a CHZZK live route so unrelated NAVER pages cannot bootstrap.
+  // at least one page-level URL to point at a CHZZK live route so unrelated NAVER pages cannot redirect.
   return Boolean(
     hasTrustedInitiator &&
       [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
@@ -118,16 +94,14 @@ export function isTrustedChzzkContext(details, policy) {
 
 export function shouldRecordDiagnostics(details, policy) {
   if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
-  if (!Number.isSafeInteger(details.tabId) || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
-    return false;
-  }
+  if (!isValidRedirectTabId(details.tabId)) return false;
   if (!isTrustedRequestDomain(details.url, policy)) return false;
   return isTrustedChzzkContext(details, policy);
 }
 
-export function shouldBootstrapSessionRule(details, policy) {
+export function shouldRedirectRequest(details, policy) {
   const tabId = details?.tabId;
-  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
+  if (!isValidRedirectTabId(tabId)) {
     return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
   }
 
@@ -163,30 +137,21 @@ export function shouldBootstrapSessionRule(details, policy) {
   return { ok: true, quality, reason: "eligible-chzzk-hls-quality", tabId };
 }
 
-export function buildScopedSessionRule({ policy, tabId, targetQuality = defaultSessionTargetQuality(policy) }) {
-  const normalizedTarget = targetQuality ?? defaultSessionTargetQuality(policy);
-  if (!normalizedTarget) throw new Error("session rule target quality is required");
+export function configuredRequiredOrigins(policy) {
+  return [
+    ...trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`),
+    ...trustedInitiatorDomains(policy).map((domain) => `https://${domain}/live/*`),
+  ];
+}
 
-  return {
-    id: sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? DEFAULT_SESSION_RULE_BASE_ID }),
-    priority: policy.redirectRulePriority ?? 1,
-    action: {
-      type: "redirect",
-      redirect: {
-        regexSubstitution: `\\1${normalizedTarget}\\3`,
-      },
-    },
-    condition: {
-      regexFilter: buildQualityRegexFilter({
-        minRedirectQuality: policy.minRedirectQuality,
-        targetQuality: normalizedTarget,
-      }),
-      initiatorDomains: trustedInitiatorDomains(policy),
-      isUrlFilterCaseSensitive: false,
-      requestDomains: trustedRequestDomains(policy),
-      requestMethods: requestMethods(policy),
-      resourceTypes: resourceTypes(policy),
-      tabIds: [tabId],
-    },
-  };
+export function configuredWebRequestUrls(policy) {
+  return trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`);
+}
+
+export function configuredResourceTypes(policy) {
+  return resourceTypes(policy);
+}
+
+export function configuredRequestMethods(policy) {
+  return requestMethods(policy);
 }

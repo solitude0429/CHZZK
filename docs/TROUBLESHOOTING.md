@@ -12,9 +12,9 @@ npx web-ext lint --source-dir .
 ## Quality menu text did not change
 
 That is expected. This extension does not relabel quality menu items such as `480p -> 1080p with CHZZK GRID™`.
-The core behavior is network/session-DNR level, so it does not depend on CHZZK player DOM selectors.
+The core behavior is network/webRequest level, so it does not depend on CHZZK player DOM selectors.
 
-## Popup shows no active session rule
+## Popup shows no active redirect target
 
 The extension does not ship a global static ruleset. A startup redirect rule should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab.
 
@@ -41,7 +41,7 @@ Check:
    - `chunklist_<quality>.m3u8`
    - `/<quality>/...m3u8`
 4. Confirm the candidate quality is listed in `policy/quality-policy.json`.
-5. If CHZZK introduces a new URL shape, add a fixture/test and update `src/shared/quality.js` / `src/shared/session-rules.js`.
+5. If CHZZK introduces a new URL shape, add a fixture/test and update `src/shared/quality.js` / `src/shared/request-policy.js`.
 
 ## A higher quality appears later
 

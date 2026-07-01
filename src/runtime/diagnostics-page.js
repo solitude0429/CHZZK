@@ -8,13 +8,13 @@ function emptyDiagnostics() {
     decisions: [],
     generatedAt: new Date(0).toISOString(),
     qualities: {},
-    samples: [],
-    sessionRules: {
-      activeRuleIds: [],
+    runtimeRedirects: {
       activeTabIds: [],
       lastError: null,
+      targetsByTab: {},
       updatedAt: new Date(0).toISOString(),
     },
+    samples: [],
     totalHlsRequests: 0,
   };
 }
@@ -31,18 +31,25 @@ function renderQualitySummary(diagnostics) {
     .join("\n");
 }
 
+function renderTargetSummary(runtimeRedirects) {
+  const targets = Object.entries(runtimeRedirects.targetsByTab ?? {})
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([tabId, target]) => `${tabId}:${target}`);
+  return targets.join(", ") || "none";
+}
+
 function render(diagnostics) {
-  const sessionRules = diagnostics.sessionRules ?? emptyDiagnostics().sessionRules;
+  const runtimeRedirects = diagnostics.runtimeRedirects ?? emptyDiagnostics().runtimeRedirects;
   const decisions = diagnostics.decisions ?? [];
   const lastDecision = decisions.at(-1);
   const qualities = renderQualitySummary(diagnostics);
   summary.textContent = [
     `generatedAt: ${diagnostics.generatedAt}`,
     `totalHlsRequests: ${diagnostics.totalHlsRequests ?? 0}`,
-    `activeTabIds: ${(sessionRules.activeTabIds ?? []).join(", ") || "none"}`,
-    `activeRuleIds: ${(sessionRules.activeRuleIds ?? []).join(", ") || "none"}`,
-    `sessionRulesUpdatedAt: ${sessionRules.updatedAt}`,
-    `lastSessionRuleError: ${sessionRules.lastError ?? "none"}`,
+    `activeTabIds: ${(runtimeRedirects.activeTabIds ?? []).join(", ") || "none"}`,
+    `targetsByTab: ${renderTargetSummary(runtimeRedirects)}`,
+    `runtimeRedirectsUpdatedAt: ${runtimeRedirects.updatedAt}`,
+    `lastRuntimeRedirectError: ${runtimeRedirects.lastError ?? "none"}`,
     lastDecision
       ? `lastDecision: ${lastDecision.ok ? "ok" : "blocked"} / ${lastDecision.reason} / tab ${lastDecision.tabId ?? "n/a"}`
       : "lastDecision: none",

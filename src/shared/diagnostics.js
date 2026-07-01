@@ -6,13 +6,13 @@ export function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
     generatedAt: new Date(0).toISOString(),
     maxSamples,
     qualities: {},
-    samples: [],
-    sessionRules: {
-      activeRuleIds: [],
+    runtimeRedirects: {
       activeTabIds: [],
       lastError: null,
+      targetsByTab: {},
       updatedAt: new Date(0).toISOString(),
     },
+    samples: [],
     totalHlsRequests: 0,
   };
 }
@@ -53,6 +53,7 @@ export function recordDecision(diagnostics, decision, details = {}, { now = new 
     ok: Boolean(decision.ok),
     quality: decision.quality ?? null,
     reason: decision.reason ?? "unknown",
+    redirectedCurrentRequest: Boolean(decision.redirectedCurrentRequest),
     seenAt: now.toISOString(),
     tabId: decision.tabId ?? details.tabId ?? null,
     targetQuality: decision.targetQuality ?? null,
@@ -64,15 +65,17 @@ export function recordDecision(diagnostics, decision, details = {}, { now = new 
   return true;
 }
 
-export function updateSessionRuleDiagnostics(
+export function updateRuntimeRedirectDiagnostics(
   diagnostics,
-  { activeRuleIds = [], activeTabIds = [], lastError = null, now = new Date() } = {},
+  { activeTabIds = [], lastError = null, now = new Date(), targetsByTab = {} } = {},
 ) {
   if (!diagnostics) return false;
-  diagnostics.sessionRules = {
-    activeRuleIds: [...activeRuleIds].sort((a, b) => a - b),
+  diagnostics.runtimeRedirects = {
     activeTabIds: [...activeTabIds].sort((a, b) => a - b),
     lastError,
+    targetsByTab: Object.fromEntries(
+      Object.entries(targetsByTab).sort(([left], [right]) => Number(left) - Number(right)),
+    ),
     updatedAt: now.toISOString(),
   };
   diagnostics.generatedAt = now.toISOString();
@@ -84,13 +87,13 @@ export function createDiagnosticsSnapshot(diagnostics) {
     decisions: [...(diagnostics.decisions ?? [])],
     generatedAt: diagnostics.generatedAt,
     qualities: { ...(diagnostics.qualities ?? {}) },
-    samples: [...(diagnostics.samples ?? [])],
-    sessionRules: {
-      activeRuleIds: [...(diagnostics.sessionRules?.activeRuleIds ?? [])],
-      activeTabIds: [...(diagnostics.sessionRules?.activeTabIds ?? [])],
-      lastError: diagnostics.sessionRules?.lastError ?? null,
-      updatedAt: diagnostics.sessionRules?.updatedAt ?? new Date(0).toISOString(),
+    runtimeRedirects: {
+      activeTabIds: [...(diagnostics.runtimeRedirects?.activeTabIds ?? [])],
+      lastError: diagnostics.runtimeRedirects?.lastError ?? null,
+      targetsByTab: { ...(diagnostics.runtimeRedirects?.targetsByTab ?? {}) },
+      updatedAt: diagnostics.runtimeRedirects?.updatedAt ?? new Date(0).toISOString(),
     },
+    samples: [...(diagnostics.samples ?? [])],
     totalHlsRequests: diagnostics.totalHlsRequests ?? 0,
   };
 }

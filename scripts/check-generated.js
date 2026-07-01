@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-const generatedFiles = ["background.js", "diagnostics.js", "site-observer.js"];
+const generatedFiles = ["background.js", "diagnostics.js"];
 
 function generatedDiff() {
   const result = spawnSync("git", ["diff", "--", ...generatedFiles], { encoding: "utf8" });

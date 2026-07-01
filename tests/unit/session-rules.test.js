@@ -2,71 +2,45 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { buildQualityRegexFilter } from "../../src/shared/quality.js";
 import {
-  buildScopedSessionRule,
-  defaultSessionTargetQuality,
-  prewarmSessionTargetQuality,
+  configuredRequiredOrigins,
+  configuredResourceTypes,
+  configuredWebRequestUrls,
+  defaultRedirectTargetQuality,
   isTrustedChzzkContext,
-  sessionRuleIdForTab,
-  shouldBootstrapSessionRule,
   shouldRecordDiagnostics,
-} from "../../src/shared/session-rules.js";
+  shouldRedirectRequest,
+} from "../../src/shared/request-policy.js";
 
 const policy = JSON.parse(readFileSync(new URL("../../policy/quality-policy.json", import.meta.url), "utf8"));
 
-describe("session-scoped CHZZK redirect rules", () => {
-  it("builds least-privilege DNR rules scoped to a single CHZZK tab and resolved target", () => {
-    const targetQuality = "1440p";
-    const rule = buildScopedSessionRule({ policy, tabId: 42, targetQuality });
-
-    assert.equal(rule.id, sessionRuleIdForTab(42));
-    assert.equal(rule.priority, 1);
-    assert.deepEqual(rule.condition.tabIds, [42]);
-    assert.deepEqual(rule.condition.initiatorDomains, ["chzzk.naver.com"]);
-    assert.deepEqual(rule.condition.requestDomains, ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"]);
-    assert.deepEqual(rule.condition.requestMethods, ["get"]);
-    assert.deepEqual([...rule.condition.resourceTypes].sort(), ["media", "other", "xmlhttprequest"]);
-    assert.equal(rule.condition.isUrlFilterCaseSensitive, false);
-    assert.equal(
-      rule.condition.regexFilter,
-      buildQualityRegexFilter({
-        minRedirectQuality: policy.minRedirectQuality,
-        targetQuality,
-      }),
-    );
-    assert.equal(rule.action.type, "redirect");
-    assert.equal(rule.action.redirect.regexSubstitution, `\\1${targetQuality}\\3`);
+describe("MV2 required-permission CHZZK redirect request policy", () => {
+  it("derives required install permissions from CHZZK and trusted HLS domains", () => {
+    assert.deepEqual(configuredRequiredOrigins(policy), [
+      "https://*.akamaized.net/*",
+      "https://*.gscdn.net/*",
+      "https://*.navercdn.com/*",
+      "https://*.pstatic.net/*",
+      "https://chzzk.naver.com/live/*",
+    ]);
+    assert.deepEqual(configuredWebRequestUrls(policy), [
+      "https://*.akamaized.net/*",
+      "https://*.gscdn.net/*",
+      "https://*.navercdn.com/*",
+      "https://*.pstatic.net/*",
+    ]);
+    assert.deepEqual([...configuredResourceTypes(policy)].sort(), ["media", "other", "xmlhttprequest"]);
   });
 
   it("defaults to the highest configured quality candidate", () => {
-    assert.equal(defaultSessionTargetQuality(policy), "2160p");
-    const rule = buildScopedSessionRule({ policy, tabId: 1 });
-    assert.equal(rule.action.redirect.regexSubstitution, "\\12160p\\3");
-  });
-
-
-  it("uses an explicit startup target for first-load prewarm instead of the highest speculative candidate", () => {
-    assert.equal(
-      prewarmSessionTargetQuality({
-        minRedirectQuality: "100p",
-        qualityCandidates: ["2160p", "1440p", "1080p", "720p"],
-        startupTargetQuality: "1080p",
-      }),
-      "1080p",
-    );
-  });
-
-  it("keeps session rule IDs inside the owned cleanup range", () => {
-    assert.equal(sessionRuleIdForTab(99_999), 199_999);
-    assert.throws(() => sessionRuleIdForTab(100_000), /invalid tabId/);
-    assert.throws(() => buildScopedSessionRule({ policy, tabId: 100_000 }), /invalid tabId/);
+    assert.equal(defaultRedirectTargetQuality(policy), "2160p");
   });
 
   it("fails closed unless a numeric HLS request comes from a CHZZK live tab", () => {
     const eligible = {
       documentUrl: "https://chzzk.naver.com/live/example-channel",
       initiator: "https://chzzk.naver.com",
+      method: "GET",
       requestId: "1",
       tabId: 7,
       type: "media",
@@ -74,17 +48,14 @@ describe("session-scoped CHZZK redirect rules", () => {
     };
 
     assert.equal(isTrustedChzzkContext(eligible, policy), true);
-    assert.deepEqual(shouldBootstrapSessionRule(eligible, policy), {
+    assert.deepEqual(shouldRedirectRequest(eligible, policy), {
       ok: true,
       quality: "720p",
       reason: "eligible-chzzk-hls-quality",
       tabId: 7,
     });
     assert.deepEqual(
-      shouldBootstrapSessionRule(
-        { ...eligible, url: "https://example.pstatic.net/live/chunklist_1440p.m3u8" },
-        policy,
-      ),
+      shouldRedirectRequest({ ...eligible, url: "https://example.pstatic.net/live/chunklist_1440p.m3u8" }, policy),
       {
         ok: true,
         quality: "1440p",
@@ -98,12 +69,9 @@ describe("session-scoped CHZZK redirect rules", () => {
       false,
       "blank initiator/page context must not be treated as trusted",
     );
+    assert.equal(shouldRedirectRequest({ ...eligible, documentUrl: "", initiator: "" }, policy).ok, false);
     assert.equal(
-      shouldBootstrapSessionRule({ ...eligible, documentUrl: "", initiator: "" }, policy).ok,
-      false,
-    );
-    assert.equal(
-      shouldBootstrapSessionRule(
+      shouldRedirectRequest(
         {
           ...eligible,
           documentUrl: "http://chzzk.naver.com/live/example-channel",
@@ -112,17 +80,15 @@ describe("session-scoped CHZZK redirect rules", () => {
         policy,
       ).ok,
       false,
-      "HTTP CHZZK contexts must not bootstrap session redirects",
+      "HTTP CHZZK contexts must not bootstrap redirects",
     );
-    assert.equal(shouldBootstrapSessionRule({ ...eligible, tabId: -1 }, policy).ok, false);
-    assert.equal(shouldBootstrapSessionRule({ ...eligible, tabId: 100_000 }, policy).ok, false);
+    assert.equal(shouldRedirectRequest({ ...eligible, tabId: -1 }, policy).ok, false);
+    assert.equal(shouldRedirectRequest({ ...eligible, tabId: 100_000 }, policy).ok, false);
     assert.equal(
-      shouldBootstrapSessionRule({ ...eligible, url: "https://example.pstatic.net/live/master.m3u8" }, policy)
-        .ok,
+      shouldRedirectRequest({ ...eligible, url: "https://example.pstatic.net/live/master.m3u8" }, policy).ok,
       false,
     );
   });
-
 
   it("covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests", () => {
     const eligible = {
@@ -135,16 +101,12 @@ describe("session-scoped CHZZK redirect rules", () => {
     };
 
     assert.equal(shouldRecordDiagnostics(eligible, policy), true);
-    assert.deepEqual(shouldBootstrapSessionRule(eligible, policy), {
+    assert.deepEqual(shouldRedirectRequest(eligible, policy), {
       ok: true,
       quality: "720p",
       reason: "eligible-chzzk-hls-quality",
       tabId: 8,
     });
-
-    const rule = buildScopedSessionRule({ policy, tabId: 8, targetQuality: "1080p" });
-    assert.ok(rule.condition.requestDomains.includes("gscdn.net"));
-    assert.ok(rule.condition.resourceTypes.includes("other"));
   });
 
   it("does not record diagnostics for unrelated CDN HLS traffic", () => {

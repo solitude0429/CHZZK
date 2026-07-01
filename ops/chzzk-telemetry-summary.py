@@ -82,9 +82,9 @@ def summarize(reports: list[dict[str, Any]]) -> dict[str, Any]:
         diagnostics: dict[str, Any] = raw_diagnostics if isinstance(raw_diagnostics, dict) else {}
         qualities.update({str(k)[:40]: int(v) for k, v in (diagnostics.get("qualities") or {}).items()})
         decisions.update({str(k)[:80]: int(v) for k, v in (diagnostics.get("decisionsByReason") or {}).items()})
-        raw_session_rules = diagnostics.get("sessionRules")
-        session_rules: dict[str, Any] = raw_session_rules if isinstance(raw_session_rules, dict) else {}
-        last_error = str(session_rules.get("lastError") or "")[:80]
+        raw_redirects = diagnostics.get("runtimeRedirects") or diagnostics.get("sessionRules")
+        redirect_state: dict[str, Any] = raw_redirects if isinstance(raw_redirects, dict) else {}
+        last_error = str(redirect_state.get("lastError") or "")[:80]
         if ERROR_CATEGORY_RE.fullmatch(last_error):
             error_categories[last_error] += 1
         elif last_error:

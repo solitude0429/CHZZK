@@ -58,7 +58,6 @@ const requiredSignedRuntimeFiles = [
   "icon-96.png",
   "icon.png",
   "manifest.json",
-  "site-observer.js",
 ];
 const allowedRuntimeFiles = [...optionalSignedPackageFiles, ...requiredSignedRuntimeFiles];
 
