@@ -8,6 +8,11 @@ on:
         required: true
         type: boolean
         default: true
+      diagnostics_only:
+        description: Run AMO JWT authentication diagnostics without uploading an extension
+        required: false
+        type: boolean
+        default: false
   push:
     branches: ["main"]
     paths:
@@ -22,7 +27,103 @@ permissions:
   id-token: write
 
 jobs:
+  amo-auth-diagnostics:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostics_only }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Probe AMO JWT authentication without upload
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          node <<'NODE'
+          const crypto = require("node:crypto");
+
+          async function main() {
+
+          function b64url(value) {
+            return Buffer.from(value).toString("base64url");
+          }
+
+          function normalize(value) {
+            const raw = value || "";
+            let trimmed = raw.trim();
+            if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+              trimmed = trimmed.slice(1, -1).trim();
+            }
+            return { raw, value: trimmed };
+          }
+
+          function signJwt(payload, secret) {
+            const header = { alg: "HS256", typ: "JWT" };
+            const encoded = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
+            const sig = crypto.createHmac("sha256", Buffer.from(secret, "utf8")).update(encoded).digest("base64url");
+            return `${encoded}.${sig}`;
+          }
+
+          async function probe(name, payload, prefix) {
+            const jwt = signJwt(payload, apiSecret);
+            const form = new FormData();
+            form.append("channel", "unlisted");
+            let authHeader = jwt;
+            if (prefix.length > 0) {
+              authHeader = `${prefix} ${jwt}`;
+            }
+            const response = await fetch("https://addons.mozilla.org/api/v5/addons/upload/", {
+              method: "POST",
+              headers: {
+                Authorization: authHeader,
+                "User-Agent": "chzzk-amo-auth-diagnostics",
+              },
+              body: form,
+            });
+            let detail = null;
+            try {
+              const parsed = await response.clone().json();
+              detail = parsed.detail || parsed.error || parsed.errors || parsed.non_field_errors || null;
+            } catch {
+              detail = (await response.text()).slice(0, 160);
+            }
+            console.log(JSON.stringify({ name, status: response.status, ok: response.ok, detail }, null, 2));
+          }
+
+          const issuerInfo = normalize(process.env.WEB_EXT_API_KEY);
+          const secretInfo = normalize(process.env.WEB_EXT_API_SECRET);
+          const apiKey = issuerInfo.value;
+          const apiSecret = secretInfo.value;
+          const now = Math.floor(Date.now() / 1000);
+          const diagnostics = {
+            issuer_present: apiKey.length > 0,
+            secret_present: apiSecret.length > 0,
+            issuer_shape_ok: /^user:\d+:\d+$/.test(apiKey),
+            issuer_had_outer_quotes: issuerInfo.raw.trim() !== apiKey && /^['"].*['"]$/.test(issuerInfo.raw.trim()),
+            issuer_had_leading_or_trailing_whitespace: issuerInfo.raw !== issuerInfo.raw.trim(),
+            issuer_has_line_break: /[\r\n]/.test(issuerInfo.raw),
+            issuer_has_invisible_unicode: /[\u200B-\u200D\uFEFF]/.test(issuerInfo.raw),
+            secret_had_leading_or_trailing_whitespace: secretInfo.raw !== secretInfo.raw.trim(),
+            secret_has_line_break: /[\r\n]/.test(secretInfo.raw),
+            secret_has_invisible_unicode: /[\u200B-\u200D\uFEFF]/.test(secretInfo.raw),
+          };
+          console.log(JSON.stringify({ local_sanity: diagnostics }, null, 2));
+          if (!apiKey || !apiSecret) process.exit(0);
+
+          await probe("web-ext-style-jwt-prefix", { iss: apiKey, iat: now, exp: now + 300 }, "JWT");
+          await probe("docs-style-jti-jwt-prefix", { iss: apiKey, jti: crypto.randomUUID(), iat: now, exp: now + 60 }, "JWT");
+          await probe("docs-style-jti-no-prefix", { iss: apiKey, jti: crypto.randomUUID(), iat: now, exp: now + 60 }, "");
+          }
+
+          main().catch((error) => {
+            console.error(error && error.message ? error.message : error);
+            process.exit(1);
+          });
+          NODE
+
   sign-unlisted:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.diagnostics_only }}
     runs-on: ubuntu-latest
     environment: firefox-signing
     steps:
