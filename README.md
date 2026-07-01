@@ -6,7 +6,7 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 
 - Watches trusted CHZZK live HLS playlist requests only.
 - Probes configured quality candidates from highest to lowest.
-- Prewarms CHZZK live tabs at `document_start`, then redirects trusted numeric playlist requests through MV2 required-permission `webRequestBlocking` handling and caches the resolved maximum quality per tab while the tab is open.
+- Prewarms CHZZK live tabs at `document_start` without choosing a quality, then resolves the highest actually available playlist quality from the first trusted numeric HLS request and caches that resolved maximum per tab while the tab is open.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
 - Keeps signed CDN query strings out of local diagnostics.
 
@@ -31,7 +31,7 @@ Current candidate order:
 2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p
 ```
 
-Runtime redirects are constrained by tab, CHZZK live context or prewarmed live-tab state, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset; a minimal MV2 content script only sends a live-page-ready prewarm message, and the persistent MV2 background redirects eligible playlist requests through `webRequestBlocking`.
+Runtime redirects are constrained by tab, CHZZK live context or prewarmed live-tab state, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset and no fixed startup target quality; a minimal MV2 content script only sends a live-page-ready prewarm message, and the persistent MV2 background resolves and redirects eligible playlist requests through `webRequestBlocking`.
 
 ## Build and verify
 

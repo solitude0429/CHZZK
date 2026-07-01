@@ -34,13 +34,13 @@ Manual checklist:
 
 1. Remove or disable NAVER Live Streaming Connector/NLiveConnector on the test PC.
 2. Open a CHZZK live page.
-3. Open the extension popup and confirm `activeTabIds` and `targetsByTab` initially show `none`.
+3. Open the extension popup and confirm the CHZZK tab can appear in `activeTabIds` while `targetsByTab` remains empty before the first numeric HLS request. Prewarm must not seed `1080p` or any other fixed target.
 4. Start playback and select any numeric quality, such as 360p, 480p, 720p, or 1080p.
 5. Reopen the popup and confirm:
    - `lastDecision: ok / eligible-chzzk-hls-quality / tab <id>` appears, or
    - a clear blocked reason appears if the request is not eligible.
 6. Confirm the quality menu is not relabeled; there should be no fake `1080p with CHZZK GRID™` item.
-7. Confirm DevTools Network shows subsequent same-tab lower playlist requests redirected to the resolved maximum supported quality, for example `chunklist_1440p.m3u8` when 1440p is available or `chunklist_1080p.m3u8` when 1080p is the maximum.
+7. Confirm DevTools Network shows the first trusted numeric playlist request and subsequent same-tab lower playlist requests redirected to the resolved maximum supported quality, for example `chunklist_1440p.m3u8` when 1440p is available or `chunklist_1080p.m3u8` only when 1080p is the maximum actually served.
 8. Confirm synthetic/future qualities such as `540p`, `900p`, and `1439p` are covered by unit tests, not by hand-added redirect alternatives.
 9. Confirm diagnostics show only redacted HLS URLs and quality counters.
 10. Confirm no cookies, signed URL queries, or tokens are copied into logs or issue reports.

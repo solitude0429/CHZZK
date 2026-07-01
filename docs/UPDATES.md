@@ -66,4 +66,4 @@ npm run build:update-manifest
 npm run validate:update-manifest
 ```
 
-Firefox는 기본적으로 주기적으로 확장 업데이트를 확인합니다. 수동 확인은 `about:addons` → 톱니바퀴 메뉴 → 업데이트 확인에서 할 수 있습니다.
+Firefox는 기본적으로 주기적으로 확장 업데이트를 확인합니다. 수동 확인은 실행 중인 Firefox를 종료하지 않고 `about:addons` → 톱니바퀴 메뉴 → 업데이트 확인에서 해야 합니다. 검증 목적으로 profile의 XPI를 직접 덮어쓰거나 Firefox를 재시작하지 마세요. 그러면 self-hosted update manifest 경로가 실제로 동작하는지 검증되지 않습니다.
