@@ -4,7 +4,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 
 ## Runtime behavior
 
-- A minimal MV2 `site-observer.js` content script runs at `document_start` on CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and prewarms the per-tab startup redirect target before the first playlist request.
+- A minimal MV2 `site-observer.js` content script runs at `document_start` on CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and prewarms only the CHZZK live tab identity before the first playlist request; the first redirect must not depend solely on content-script timing.
 - Trusted numeric HLS playlist requests synchronously redirect through blocking `webRequest`; after observing the signed URL shape, the runtime probes configured quality candidates and caches the highest supported candidate per tab.
 - Redirect handling runs before local diagnostics recording.
 - Local diagnostics storage writes are serialized to reduce read-modify-write races.
@@ -39,6 +39,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 ## Release invariants
 
 - `package.json`, `manifest.json`, and release notes must describe the same extension version.
+- Version bumps follow the project `a.b.c` SemVer rule: MAJOR for incompatible changes, MINOR for backward-compatible features, PATCH for backward-compatible bug fixes.
 - `policy/quality-policy.json` is the source of truth for quality candidates and trusted domains.
 - README must describe MV2 required permissions, first-request prewarm, and dynamic highest-supported target redirects.
 - Signed XPI/update-site artifacts must be generated only from a verified build.

@@ -25,12 +25,24 @@
 
 이전에 더 높은 번호의 실험 버전을 설치했다면 Firefox 업데이트 경로로 `0.0.x`가 들어가지 않습니다. 그 경우 기존 확장을 제거한 뒤 최신 signed XPI를 설치하세요.
 
+## 버전 규칙
+
+이 프로젝트는 Semantic Versioning 기반 `a.b.c` 규칙을 사용합니다.
+
+- `a` / MAJOR: 저장 파일/데이터 형식, 함수/API 사용법, 설정 구조 등 기존 사용자가 그대로 쓸 수 없는 비호환 변경.
+- `b` / MINOR: 기존 방식과 호환되는 새 기능 추가.
+- `c` / PATCH: 기존 방식과 호환되는 버그 수정만 포함.
+
+새 프로젝트는 `0.0.1`에서 시작하고, `0.y.z`는 초기 개발 단계로 취급합니다. 첫 안정 공개 시점에 `1.0.0`으로 전환합니다.
+
 ## 릴리즈 절차
 
-1. 버전을 올립니다.
+1. 변경 사항이 MAJOR/MINOR/PATCH 중 어디에 해당하는지 먼저 판단한 뒤 버전을 올립니다.
 
 ```bash
-npm version patch --no-git-tag-version
+npm version patch --no-git-tag-version  # bug fix
+npm version minor --no-git-tag-version  # backward-compatible feature
+npm version major --no-git-tag-version  # incompatible change
 ```
 
 2. 변경 사항을 PR로 병합합니다.

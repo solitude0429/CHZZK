@@ -32,7 +32,7 @@ Safe automated actions are based on local diagnostics exported by the user or on
 - update `policy/quality-policy.json` when a higher quality is clearly observed;
 - add redacted fixtures/tests for new URL shapes;
 - patch parser/request-policy logic with tests;
-- bump the patch version;
+- classify the change as MAJOR/MINOR/PATCH under the project `a.b.c` SemVer rule, then bump the matching version segment;
 - run `npm run format:check` and `npm run verify`;
 - open a PR;
 - merge only if CI passes and the change is low-risk;
