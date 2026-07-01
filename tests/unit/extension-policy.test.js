@@ -22,7 +22,7 @@ describe("personal CHZZK extension policy", () => {
       [
         {
           js: ["site-observer.js"],
-          matches: ["https://chzzk.naver.com/live/*"],
+          matches: ["https://*.chzzk.naver.com/live/*"],
           run_at: "document_start",
         },
       ],

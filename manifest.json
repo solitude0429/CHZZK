@@ -16,7 +16,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "permissions": [
     "https://*.akamaized.net/*",
     "https://*.chzzk.naver.com/*",
@@ -55,7 +55,7 @@
         "site-observer.js"
       ],
       "matches": [
-        "https://chzzk.naver.com/live/*"
+        "https://*.chzzk.naver.com/live/*"
       ],
       "run_at": "document_start"
     }
