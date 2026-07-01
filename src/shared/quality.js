@@ -13,7 +13,6 @@ export const DEFAULT_QUALITY_CANDIDATES = [
 const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
 const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
-const URL_QUALITY_RE = /(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i;
 const SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
 const HIGH_ENTROPY_PATH_SEGMENT_RE = /(?:[a-z0-9_-]{24,}|[a-f0-9]{16,})/i;
 
@@ -167,11 +166,19 @@ export function buildQualityRegexFilter({ targetQuality, minRedirectQuality = "1
 
 export function replaceQualityInUrl(url, targetQuality) {
   const normalizedTarget = normalizeQualityLabel(targetQuality);
+  const target = qualityNumber(normalizedTarget);
   const currentQuality = parseQualityFromUrl(url);
-  if (typeof url !== "string" || !normalizedTarget || !currentQuality) return null;
-  const replaced = url.replace(URL_QUALITY_RE, `$1${normalizedTarget}$3`);
-  if (replaced === url && normalizedTarget !== currentQuality) return null;
-  return replaced;
+  if (typeof url !== "string" || !normalizedTarget || !target || !currentQuality) return null;
+
+  let replacedAny = false;
+  const replaced = url.replace(/(chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/gi, (match, prefix, quality) => {
+    const current = qualityNumber(quality);
+    if (!current || current >= target) return match;
+    replacedAny = true;
+    return `${prefix}${normalizedTarget}`;
+  });
+
+  return replacedAny ? replaced : null;
 }
 
 export function buildHighestQualityRedirectUrl(
