@@ -81,6 +81,15 @@ describe("Codex Security remediation guardrails", () => {
     }
   });
 
+
+  it("requires every size-matched runtime icon in signed XPI verification", () => {
+    const script = read("scripts/sign-unlisted.js");
+
+    for (const icon of ["icon-32.png", "icon-48.png", "icon-96.png", "icon.png"]) {
+      assert.match(script, new RegExp(`"${icon.replace(".", "\\.")}"`));
+    }
+  });
+
   it("redacts URL userinfo before collector storage", () => {
     const code = String.raw`
 import importlib.util
