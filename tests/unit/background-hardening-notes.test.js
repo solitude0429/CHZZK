@@ -9,8 +9,17 @@ describe("background hardening invariants", () => {
     assert.equal(source.includes("declarativeNetRequest"), false);
     assert.equal(source.includes("updateSessionRules"), false);
     assert.equal(source.includes("getSessionRules"), false);
-    assert.equal(source.includes("chzzk.live-page-ready"), false);
+    assert.equal(source.includes("chzzk.live-page-ready"), true);
+    assert.match(source, /startupRedirectTargetQuality/);
     assert.match(source, /activeTargetsByTab/);
+  });
+
+  it("prewarms CHZZK live tabs before the first playlist request is observed", () => {
+    const observer = readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8");
+    assert.match(observer, /chzzk\.live-page-ready/);
+    assert.match(observer, /sendMessage/);
+    assert.equal(observer.includes("querySelector"), false);
+    assert.equal(observer.includes("MutationObserver"), false);
   });
 
   it("uses blocking webRequest redirect so the first playlist request is not missed", () => {

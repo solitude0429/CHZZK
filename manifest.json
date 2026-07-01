@@ -16,16 +16,16 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "permissions": [
-    "storage",
-    "webRequest",
-    "webRequestBlocking",
     "https://*.akamaized.net/*",
+    "https://chzzk.naver.com/live/*",
     "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
     "https://*.pstatic.net/*",
-    "https://chzzk.naver.com/live/*"
+    "storage",
+    "webRequest",
+    "webRequestBlocking"
   ],
   "background": {
     "scripts": [
@@ -48,5 +48,16 @@
     },
     "default_popup": "diagnostics.html",
     "default_title": "CHZZK"
-  }
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "site-observer.js"
+      ],
+      "matches": [
+        "https://chzzk.naver.com/live/*"
+      ],
+      "run_at": "document_start"
+    }
+  ]
 }

@@ -47,6 +47,10 @@ export function defaultRedirectTargetQuality(policy) {
   });
 }
 
+export function startupRedirectTargetQuality(policy) {
+  return policy.startupTargetQuality ?? "1080p";
+}
+
 export function isValidRedirectTabId(tabId) {
   return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
 }
@@ -73,8 +77,9 @@ export function isChzzkLiveUrl(url, policy) {
   }
 }
 
-export function isTrustedChzzkContext(details, policy) {
+export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
+  if (trustedLiveTabIds?.has?.(details.tabId)) return true;
   if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
   if (isChzzkLiveUrl(details.originUrl, policy)) return true;
 
@@ -92,14 +97,14 @@ export function isTrustedChzzkContext(details, policy) {
   );
 }
 
-export function shouldRecordDiagnostics(details, policy) {
+export function shouldRecordDiagnostics(details, policy, options = {}) {
   if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
   if (!isValidRedirectTabId(details.tabId)) return false;
   if (!isTrustedRequestDomain(details.url, policy)) return false;
-  return isTrustedChzzkContext(details, policy);
+  return isTrustedChzzkContext(details, policy, options);
 }
 
-export function shouldRedirectRequest(details, policy) {
+export function shouldRedirectRequest(details, policy, options = {}) {
   const tabId = details?.tabId;
   if (!isValidRedirectTabId(tabId)) {
     return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
@@ -120,7 +125,7 @@ export function shouldRedirectRequest(details, policy) {
     return { ok: false, reason: "untrusted-request-domain", tabId };
   }
 
-  if (!isTrustedChzzkContext(details, policy)) {
+  if (!isTrustedChzzkContext(details, policy, options)) {
     return { ok: false, reason: "untrusted-initiator", tabId };
   }
 
@@ -141,7 +146,11 @@ export function configuredRequiredOrigins(policy) {
   return [
     ...trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`),
     ...trustedInitiatorDomains(policy).map((domain) => `https://${domain}/live/*`),
-  ];
+  ].sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
+}
+
+function displayPermissionKey(permission) {
+  return permission.replace(/^https:\/\/\*\./, "").replace(/^https:\/\//, "");
 }
 
 export function configuredWebRequestUrls(policy) {

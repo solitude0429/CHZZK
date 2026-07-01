@@ -39,10 +39,12 @@
   "probeTimeoutMs": 1500,
   "notes": [
     "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
-    "The persistent background page uses blocking webRequest to redirect each trusted numeric HLS playlist request; no DNR session or static ruleset is shipped.",
+    "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
+    "The persistent background page prewarms a safe per-tab startup redirect target before the first HLS playlist request, then uses blocking webRequest to redirect trusted numeric playlist requests.",
     "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
     "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-    "Request URL, initiator, method, resource type, trusted domain, and tab context all constrain redirects."
-  ]
+    "Request URL, initiator, method, resource type, trusted domain, and tab context or prewarmed live-tab state all constrain redirects."
+  ],
+  "startupTargetQuality": "1080p"
 }

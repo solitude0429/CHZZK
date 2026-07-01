@@ -16,7 +16,7 @@ The core behavior is network/webRequest level, so it does not depend on CHZZK pl
 
 ## Popup shows no active redirect target
 
-The extension does not ship a global static ruleset. A startup redirect rule should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab.
+The extension does not ship a global static ruleset. A startup redirect target should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab.
 
 Check:
 
@@ -31,7 +31,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime prewarms a safe startup redirect before the first HLS playlist request, then probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects the current lower numeric playlist request, and upgrades the tab rule for later lower numeric playlists in that tab.
+The runtime prewarms a safe startup redirect target before the first HLS playlist request, then probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and upgrades the per-tab target for later lower numeric playlists in that tab.
 
 Check:
 
