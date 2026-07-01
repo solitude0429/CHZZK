@@ -14,7 +14,7 @@ assert.deepEqual(
   manifest.permissions,
   [
     "https://*.akamaized.net/*",
-    "https://*.chzzk.naver.com/*",
+    "https://*.chzzk.naver.com/live/*",
     "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
     "https://*.pstatic.net/*",

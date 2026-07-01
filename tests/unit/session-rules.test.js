@@ -18,7 +18,7 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
   it("derives required install permissions from CHZZK and trusted HLS domains", () => {
     assert.deepEqual(configuredRequiredOrigins(policy), [
       "https://*.akamaized.net/*",
-      "https://*.chzzk.naver.com/*",
+      "https://*.chzzk.naver.com/live/*",
       "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
