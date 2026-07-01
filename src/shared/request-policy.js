@@ -1,4 +1,4 @@
-import { highestQualityCandidate, parseQualityFromUrl, qualityNumber } from "./quality.js";
+import { parseQualityFromUrl, qualityNumber } from "./quality.js";
 
 export const REDIRECT_TAB_ID_RANGE = 100_000;
 const DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
@@ -39,16 +39,6 @@ function resourceTypes(policy) {
 
 function requestMethods(policy) {
   return asArray(policy.requestMethods).length > 0 ? asArray(policy.requestMethods) : DEFAULT_REQUEST_METHODS;
-}
-
-export function defaultRedirectTargetQuality(policy) {
-  return highestQualityCandidate(policy.qualityCandidates, {
-    minRedirectQuality: policy.minRedirectQuality,
-  });
-}
-
-export function startupRedirectTargetQuality(policy) {
-  return policy.startupTargetQuality ?? "1080p";
 }
 
 export function isValidRedirectTabId(tabId) {

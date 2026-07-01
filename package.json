@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",

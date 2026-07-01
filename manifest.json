@@ -16,7 +16,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "permissions": [
     "https://*.akamaized.net/*",
     "https://*.chzzk.naver.com/live/*",

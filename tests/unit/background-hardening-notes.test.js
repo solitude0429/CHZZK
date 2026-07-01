@@ -10,7 +10,9 @@ describe("background hardening invariants", () => {
     assert.equal(source.includes("updateSessionRules"), false);
     assert.equal(source.includes("getSessionRules"), false);
     assert.equal(source.includes("chzzk.live-page-ready"), true);
-    assert.match(source, /startupRedirectTargetQuality/);
+    assert.equal(source.includes("startupRedirectTargetQuality"), false);
+    assert.equal(source.includes("startupTargetQuality"), false);
+    assert.match(source, /activeLiveTabIds/);
     assert.match(source, /activeTargetsByTab/);
   });
 

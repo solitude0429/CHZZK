@@ -12,7 +12,6 @@ import {
   isValidRedirectTabId,
   shouldRecordDiagnostics,
   shouldRedirectRequest,
-  startupRedirectTargetQuality,
 } from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
@@ -25,6 +24,7 @@ import {
 const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
 const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
+const activeLiveTabIds = new Set();
 const activeTargetsByTab = new Map();
 const resolvedTargetsByTab = new Set();
 let diagnosticsMutationQueue = Promise.resolve();
@@ -55,7 +55,7 @@ async function enqueueDiagnosticsMutation(mutator) {
 
 function currentRedirectState(lastError = null) {
   return {
-    activeTabIds: [...activeTargetsByTab.keys()],
+    activeTabIds: [...activeLiveTabIds],
     lastError,
     targetsByTab: Object.fromEntries(
       [...activeTargetsByTab.entries()].map(([tabId, targetQuality]) => [String(tabId), targetQuality]),
@@ -134,8 +134,11 @@ async function reportRedirectError(error) {
   await updateRedirectDiagnostics(String(error?.message ?? error));
 }
 
-async function prewarmTabTarget(tabId) {
-  await setTabTarget(tabId, startupRedirectTargetQuality(policy));
+async function prewarmLiveTab(tabId) {
+  if (!isValidRedirectTabId(tabId)) return;
+  const previousSize = activeLiveTabIds.size;
+  activeLiveTabIds.add(tabId);
+  if (activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
 }
 
 async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
@@ -149,11 +152,13 @@ async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
 async function removeTabTarget(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   const hadTarget = activeTargetsByTab.delete(tabId);
+  const hadLiveTab = activeLiveTabIds.delete(tabId);
   resolvedTargetsByTab.delete(tabId);
-  if (hadTarget) await updateRedirectDiagnostics();
+  if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
 }
 
 async function clearRuntimeRedirectState() {
+  activeLiveTabIds.clear();
   activeTargetsByTab.clear();
   resolvedTargetsByTab.clear();
   await updateRedirectDiagnostics();
@@ -173,7 +178,7 @@ async function resolveAndStoreHighestTarget(details, decision) {
 }
 
 async function handleRequest(details) {
-  const redirectOptions = { trustedLiveTabIds: activeTargetsByTab };
+  const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
   const shouldRecord = shouldRecordDiagnostics(details, policy, redirectOptions);
   let decision = shouldRedirectRequest(details, policy, redirectOptions);
   let redirectUrl = null;
@@ -229,9 +234,10 @@ api.runtime.onMessage?.addListener((message, sender) => {
   const tabId = sender?.tab?.id;
   if (!isValidRedirectTabId(tabId)) return undefined;
   // The sender is the packaged MV2 content script, whose manifest match is limited to
-  // https://chzzk.naver.com/live/*. Firefox can omit sender URL fields, so requiring
-  // them here would drop the prewarm before the first HLS playlist request.
-  prewarmTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm tab target", error));
+  // https://*.chzzk.naver.com/live/*. Firefox can omit sender URL fields, so requiring
+  // them here would drop the prewarm before the first HLS playlist request. Prewarm only
+  // trusts the tab context; it must not seed a fixed target quality.
+  prewarmLiveTab(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm live tab", error));
   return undefined;
 });
 

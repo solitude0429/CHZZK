@@ -6,7 +6,6 @@ import {
   configuredRequiredOrigins,
   configuredResourceTypes,
   configuredWebRequestUrls,
-  defaultRedirectTargetQuality,
   isTrustedChzzkContext,
   shouldRecordDiagnostics,
   shouldRedirectRequest,
@@ -29,10 +28,6 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       "webRequest must observe every required origin so real CHZZK/livecloud playlist hosts are not missed",
     );
     assert.deepEqual([...configuredResourceTypes(policy)].sort(), ["media", "other", "xmlhttprequest"]);
-  });
-
-  it("defaults to the highest configured quality candidate", () => {
-    assert.equal(defaultRedirectTargetQuality(policy), "2160p");
   });
 
   it("fails closed unless a numeric HLS request comes from a CHZZK live tab", () => {

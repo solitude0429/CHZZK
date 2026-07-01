@@ -10,6 +10,7 @@
 6. Open a GitHub PR and wait for CI.
 7. Merge, then let the signing workflow publish the release.
 8. Deploy the internal update host with `npm run deploy:updates:internal`.
+9. Verify the already-running Firefox instance updates through `about:addons` / AddonManager update checking. Do not stop Firefox and do not overwrite the installed profile XPI for release verification.
 
 ## Patch response
 
@@ -60,6 +61,8 @@ When CHZZK/NAVER changes break playback:
 
 - Do not reintroduce DOM-selector fake menu labels.
 - Do not reintroduce a global static DNR ruleset.
+- Do not seed a fixed startup target quality such as `1080p`; resolve the highest actually available HLS playlist quality per tab.
+- Do not validate releases by closing Firefox or overwriting the profile XPI; validate through Firefox's add-on update path while Firefox stays running.
 - Do not store unrelated page/CDN traffic.
 - Do not store signed media URL query/hash values.
 - Do not reintroduce external collector uploads unless the user explicitly accepts the additional Firefox data-consent UI.

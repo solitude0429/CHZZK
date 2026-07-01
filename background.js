@@ -20,8 +20,8 @@
       "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, and tab context or prewarmed live-tab state all constrain redirects; CHZZK-hosted numeric playlist URLs are covered as trusted request domains.",
+      "Prewarm marks the CHZZK live tab only; the runtime must resolve the highest actually available HLS quality from the first trusted playlist request instead of seeding a fixed startup quality.",
     ],
-    startupTargetQuality: "1080p",
   };
 
   // src/shared/quality.js
@@ -232,9 +232,6 @@
       ? asArray(policy.requestMethods)
       : DEFAULT_REQUEST_METHODS;
   }
-  function startupRedirectTargetQuality(policy) {
-    return policy.startupTargetQuality ?? "1080p";
-  }
   function isValidRedirectTabId(tabId) {
     return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
   }
@@ -335,6 +332,7 @@
   var api = globalThis.browser ?? globalThis.chrome;
   var STORAGE_KEY = "chzzkDiagnostics";
   var WEB_REQUEST_URLS = configuredWebRequestUrls(quality_policy_default);
+  var activeLiveTabIds = /* @__PURE__ */ new Set();
   var activeTargetsByTab = /* @__PURE__ */ new Map();
   var resolvedTargetsByTab = /* @__PURE__ */ new Set();
   var diagnosticsMutationQueue = Promise.resolve();
@@ -363,7 +361,7 @@
   }
   function currentRedirectState(lastError = null) {
     return {
-      activeTabIds: [...activeTargetsByTab.keys()],
+      activeTabIds: [...activeLiveTabIds],
       lastError,
       targetsByTab: Object.fromEntries(
         [...activeTargetsByTab.entries()].map(([tabId, targetQuality]) => [String(tabId), targetQuality]),
@@ -429,8 +427,11 @@
   async function reportRedirectError(error) {
     await updateRedirectDiagnostics(String(error?.message ?? error));
   }
-  async function prewarmTabTarget(tabId) {
-    await setTabTarget(tabId, startupRedirectTargetQuality(quality_policy_default));
+  async function prewarmLiveTab(tabId) {
+    if (!isValidRedirectTabId(tabId)) return;
+    const previousSize = activeLiveTabIds.size;
+    activeLiveTabIds.add(tabId);
+    if (activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
   }
   async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
     if (!isValidRedirectTabId(tabId) || !targetQuality) return;
@@ -442,10 +443,12 @@
   async function removeTabTarget(tabId) {
     if (!isValidRedirectTabId(tabId)) return;
     const hadTarget = activeTargetsByTab.delete(tabId);
+    const hadLiveTab = activeLiveTabIds.delete(tabId);
     resolvedTargetsByTab.delete(tabId);
-    if (hadTarget) await updateRedirectDiagnostics();
+    if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
   }
   async function clearRuntimeRedirectState() {
+    activeLiveTabIds.clear();
     activeTargetsByTab.clear();
     resolvedTargetsByTab.clear();
     await updateRedirectDiagnostics();
@@ -462,7 +465,7 @@
     return targetQuality;
   }
   async function handleRequest(details) {
-    const redirectOptions = { trustedLiveTabIds: activeTargetsByTab };
+    const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default, redirectOptions);
     let decision = shouldRedirectRequest(details, quality_policy_default, redirectOptions);
     let redirectUrl = null;
@@ -512,7 +515,7 @@
     if (message?.type !== "chzzk.live-page-ready") return void 0;
     const tabId = sender?.tab?.id;
     if (!isValidRedirectTabId(tabId)) return void 0;
-    prewarmTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm tab target", error));
+    prewarmLiveTab(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm live tab", error));
     return void 0;
   });
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
