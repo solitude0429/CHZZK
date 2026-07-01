@@ -4,7 +4,7 @@
 
 ## 현재 버전
 
-- `0.0.6`
+- `0.0.7`
 - telemetry/session-rule hardening을 릴리즈 산출물에 반영한 패치입니다.
 - collector 전송은 기본 local-only이며, popup에서 명시적으로 켠 category만 외부 collector로 전송합니다.
 - telemetry 인증/프라이버시와 AMO signing/update provenance를 보강한 보안 패치입니다.
