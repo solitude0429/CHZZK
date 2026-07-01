@@ -30,7 +30,6 @@
   var PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
-  var URL_QUALITY_RE = /(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i;
   var SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
   var HIGH_ENTROPY_PATH_SEGMENT_RE = /(?:[a-z0-9_-]{24,}|[a-f0-9]{16,})/i;
   function normalizeQualityLabel(value) {
@@ -98,11 +97,20 @@
   }
   function replaceQualityInUrl(url, targetQuality) {
     const normalizedTarget = normalizeQualityLabel(targetQuality);
+    const target = qualityNumber(normalizedTarget);
     const currentQuality = parseQualityFromUrl(url);
-    if (typeof url !== "string" || !normalizedTarget || !currentQuality) return null;
-    const replaced = url.replace(URL_QUALITY_RE, `$1${normalizedTarget}$3`);
-    if (replaced === url && normalizedTarget !== currentQuality) return null;
-    return replaced;
+    if (typeof url !== "string" || !normalizedTarget || !target || !currentQuality) return null;
+    let replacedAny = false;
+    const replaced = url.replace(
+      /(chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/gi,
+      (match, prefix, quality) => {
+        const current = qualityNumber(quality);
+        if (!current || current >= target) return match;
+        replacedAny = true;
+        return `${prefix}${normalizedTarget}`;
+      },
+    );
+    return replacedAny ? replaced : null;
   }
   function buildHighestQualityRedirectUrl(url, { targetQuality, minRedirectQuality = "100p" } = {}) {
     const currentQuality = qualityNumber(parseQualityFromUrl(url));

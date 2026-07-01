@@ -68,6 +68,17 @@ describe("highest-supported-quality helpers", () => {
     assert.doesNotMatch("https://cdn.test/live/chunklist_2160p.m3u8", new RegExp(filter));
   });
 
+
+  it("rewrites every lower quality marker in observed CHZZK multi-quality HLS paths", () => {
+    const url =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/cflexnmss2u0003/360p/segment/chunklist_480p.m3u8?Policy=redacted";
+
+    assert.equal(
+      buildHighestQualityRedirectUrl(url, { targetQuality: "1080p" }),
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/cflexnmss2u0003/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
+    );
+  });
+
   it("rewrites any lower numeric HLS quality to the resolved maximum while preserving signed tails", () => {
     for (const quality of ["144p", "270p", "360p", "480p", "540p", "720p", "900p", "1000p", "1080p"]) {
       assert.equal(
