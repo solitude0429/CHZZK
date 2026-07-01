@@ -17,6 +17,16 @@ function canonicalDomainFromUrl(value) {
   }
 }
 
+function canonicalHttpsDomainFromUrl(value) {
+  if (typeof value !== "string" || value === "") return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" ? parsed.hostname.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 function domainMatches(hostname, canonicalDomain) {
   return hostname === canonicalDomain || hostname.endsWith(`.${canonicalDomain}`);
 }
@@ -67,24 +77,45 @@ export function isChzzkLiveUrl(url, policy) {
   }
 }
 
+function isNumericHlsPlaylistUrl(url) {
+  return typeof url === "string" && /\.m3u8(?:[?#]|$)/i.test(url) && Boolean(parseQualityFromUrl(url));
+}
+
+function isKnownChzzkHlsUrl(url, policy) {
+  if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+
+    if (trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain))) return true;
+    if (hostname.includes("chzzk")) return true;
+    if (pathname === "/chzzk" || pathname.startsWith("/chzzk/") || pathname.includes("/chzzk/")) return true;
+    if (hostname.includes("livecloud")) return true;
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
 export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
   if (trustedLiveTabIds?.has?.(details.tabId)) return true;
   if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
   if (isChzzkLiveUrl(details.originUrl, policy)) return true;
 
-  const initiatorDomain = canonicalDomainFromUrl(details.initiator);
+  const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
   const hasTrustedInitiator = Boolean(
     initiatorDomain &&
       trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
   );
 
-  // An origin-only initiator is useful as a supporting signal, but it is not enough by itself: require
-  // at least one page-level URL to point at a CHZZK live route so unrelated NAVER pages cannot redirect.
-  return Boolean(
-    hasTrustedInitiator &&
-      [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
-  );
+  if (hasTrustedInitiator && isNumericHlsPlaylistUrl(details.url)) return true;
+  return isKnownChzzkHlsUrl(details.url, policy);
 }
 
 export function shouldRecordDiagnostics(details, policy, options = {}) {

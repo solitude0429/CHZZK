@@ -15,12 +15,12 @@
     notes: [
       "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
-      "The persistent background page prewarms a safe per-tab startup redirect target before the first HLS playlist request, then uses blocking webRequest to redirect trusted numeric playlist requests.",
-      "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
+      "The persistent background page uses blocking webRequest so eligible numeric HLS playlist requests can be redirected even if content-script prewarm is late or unavailable.",
+      "For each eligible numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
       "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted request domain, and tab context or prewarmed live-tab state all constrain redirects; CHZZK-hosted numeric playlist URLs are covered as trusted request domains.",
-      "Prewarm marks the CHZZK live tab only; the runtime must resolve the highest actually available HLS quality from the first trusted playlist request instead of seeding a fixed startup quality.",
+      "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
+      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the highest actually available HLS quality from the first eligible playlist request instead of seeding a fixed startup quality.",
     ],
   };
 
@@ -211,6 +211,15 @@
       return null;
     }
   }
+  function canonicalHttpsDomainFromUrl(value) {
+    if (typeof value !== "string" || value === "") return null;
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "https:" ? parsed.hostname.toLowerCase() : null;
+    } catch {
+      return null;
+    }
+  }
   function domainMatches(hostname, canonicalDomain) {
     return hostname === canonicalDomain || hostname.endsWith(`.${canonicalDomain}`);
   }
@@ -257,20 +266,38 @@
       return false;
     }
   }
+  function isNumericHlsPlaylistUrl(url) {
+    return typeof url === "string" && /\.m3u8(?:[?#]|$)/i.test(url) && Boolean(parseQualityFromUrl(url));
+  }
+  function isKnownChzzkHlsUrl(url, policy) {
+    if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:") return false;
+      const hostname = parsed.hostname.toLowerCase();
+      const pathname = parsed.pathname.toLowerCase();
+      if (trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain))) return true;
+      if (hostname.includes("chzzk")) return true;
+      if (pathname === "/chzzk" || pathname.startsWith("/chzzk/") || pathname.includes("/chzzk/"))
+        return true;
+      if (hostname.includes("livecloud")) return true;
+    } catch {
+      return false;
+    }
+    return false;
+  }
   function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
     if (trustedLiveTabIds?.has?.(details.tabId)) return true;
     if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
     if (isChzzkLiveUrl(details.originUrl, policy)) return true;
-    const initiatorDomain = canonicalDomainFromUrl(details.initiator);
+    const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
     const hasTrustedInitiator = Boolean(
       initiatorDomain &&
       trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
     );
-    return Boolean(
-      hasTrustedInitiator &&
-      [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
-    );
+    if (hasTrustedInitiator && isNumericHlsPlaylistUrl(details.url)) return true;
+    return isKnownChzzkHlsUrl(details.url, policy);
   }
   function shouldRecordDiagnostics(details, policy, options = {}) {
     if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;

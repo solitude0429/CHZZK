@@ -30,7 +30,7 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     assert.deepEqual([...configuredResourceTypes(policy)].sort(), ["media", "other", "xmlhttprequest"]);
   });
 
-  it("fails closed unless a numeric HLS request comes from a CHZZK live tab", () => {
+  it("trusts CHZZK live context, CHZZK initiator, or known CHZZK/livecloud HLS URL shapes", () => {
     const eligible = {
       documentUrl: "https://chzzk.naver.com/live/example-channel",
       initiator: "https://chzzk.naver.com",
@@ -61,9 +61,46 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     assert.equal(
       isTrustedChzzkContext({ ...eligible, documentUrl: "", initiator: "" }, policy),
       false,
-      "blank initiator/page context must not be treated as trusted",
+      "blank initiator/page context must not trust a generic CDN playlist shape",
     );
     assert.equal(shouldRedirectRequest({ ...eligible, documentUrl: "", initiator: "" }, policy).ok, false);
+    assert.deepEqual(
+      shouldRedirectRequest(
+        {
+          ...eligible,
+          documentUrl: undefined,
+          originUrl: undefined,
+          initiator: "https://chzzk.naver.com",
+        },
+        policy,
+      ),
+      {
+        ok: true,
+        quality: "720p",
+        reason: "eligible-chzzk-hls-quality",
+        tabId: 7,
+      },
+      "CHZZK initiator alone must be enough for the first HLS request when Firefox omits page URLs",
+    );
+    assert.deepEqual(
+      shouldRedirectRequest(
+        {
+          ...eligible,
+          documentUrl: undefined,
+          initiator: undefined,
+          originUrl: undefined,
+          url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/360p/segment/chunklist_480p.m3u8?Policy=redacted",
+        },
+        policy,
+      ),
+      {
+        ok: true,
+        quality: "360p",
+        reason: "eligible-chzzk-hls-quality",
+        tabId: 7,
+      },
+      "CHZZK-marked HLS URLs must redirect without content-script prewarm or page request metadata",
+    );
     assert.equal(
       shouldRedirectRequest(
         {
@@ -87,12 +124,12 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
   it("trusts a prewarmed CHZZK live tab even when Firefox omits documentUrl on the first HLS request", () => {
     const eligible = {
       documentUrl: undefined,
-      initiator: "https://chzzk.naver.com",
+      initiator: undefined,
       method: "GET",
       originUrl: undefined,
       tabId: 9,
       type: "xmlhttprequest",
-      url: "https://livecloud.pstatic.net.live.gscdn.net/live/chunklist_480p.m3u8?Policy=redacted",
+      url: "https://example.pstatic.net/live/chunklist_480p.m3u8?Policy=redacted",
     };
 
     assert.deepEqual(shouldRedirectRequest(eligible, policy, { trustedLiveTabIds: new Set([9]) }), {
@@ -143,6 +180,24 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       reason: "eligible-chzzk-hls-quality",
       tabId: 8,
     });
+    assert.deepEqual(
+      shouldRedirectRequest(
+        {
+          ...eligible,
+          documentUrl: undefined,
+          initiator: undefined,
+          originUrl: undefined,
+        },
+        policy,
+      ),
+      {
+        ok: true,
+        quality: "720p",
+        reason: "eligible-chzzk-hls-quality",
+        tabId: 8,
+      },
+      "known CHZZK livecloud playlist host must not depend on content-script or tab prewarm timing",
+    );
   });
 
   it("does not record diagnostics for unrelated CDN HLS traffic", () => {
