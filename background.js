@@ -5,8 +5,8 @@
     qualityCandidates: ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"],
     minRedirectQuality: "100p",
     trustedInitiatorDomains: ["chzzk.naver.com"],
-    trustedRequestDomains: ["akamaized.net", "navercdn.com", "pstatic.net"],
-    resourceTypes: ["media", "xmlhttprequest"],
+    trustedRequestDomains: ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"],
+    resourceTypes: ["media", "other", "xmlhttprequest"],
     requestMethods: ["get"],
     sessionRuleBaseId: 1e5,
     redirectRulePriority: 1,
@@ -18,6 +18,7 @@
       "A CHZZK live page prewarms a tab-scoped session DNR rule to startupTargetQuality before the first HLS playlist request so playback does not require a manual refresh.",
       "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and upgrades the tab rule to the highest candidate that returns a valid HLS playlist.",
       "The generated session regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
+      "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects.",
     ],
     startupTargetQuality: "1080p",
@@ -271,7 +272,7 @@
   function trustedRequestDomains(policy) {
     return asArray(policy.trustedRequestDomains).length > 0
       ? asArray(policy.trustedRequestDomains)
-      : ["akamaized.net", "navercdn.com", "pstatic.net"];
+      : ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"];
   }
   function resourceTypes(policy) {
     return asArray(policy.resourceTypes).length > 0 ? asArray(policy.resourceTypes) : DEFAULT_RESOURCE_TYPES;
@@ -410,6 +411,9 @@
   var api = globalThis.browser ?? globalThis.chrome;
   var STORAGE_KEY = "chzzkDiagnostics";
   var SESSION_RULE_ID_RANGE2 = 1e5;
+  var WEB_REQUEST_URLS = quality_policy_default.trustedRequestDomains.map(
+    (domain) => `https://*.${domain}/*`,
+  );
   var activeRulesByTab = /* @__PURE__ */ new Map();
   var activeTargetsByTab = /* @__PURE__ */ new Map();
   var resolvedTargetsByTab = /* @__PURE__ */ new Set();
@@ -611,7 +615,7 @@
         return void 0;
       }),
     {
-      urls: ["https://*.akamaized.net/*", "https://*.navercdn.com/*", "https://*.pstatic.net/*"],
+      urls: WEB_REQUEST_URLS,
       types: quality_policy_default.resourceTypes,
     },
     ["blocking"],

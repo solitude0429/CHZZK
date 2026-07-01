@@ -16,7 +16,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "permissions": [
     "declarativeNetRequest",
     "storage",
@@ -25,6 +25,7 @@
   ],
   "host_permissions": [
     "https://*.akamaized.net/*",
+    "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
     "https://*.pstatic.net/*"
   ],

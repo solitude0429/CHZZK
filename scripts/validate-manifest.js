@@ -45,7 +45,7 @@ assert.equal(
 assert.equal(existsSync(new URL("../rules.json", import.meta.url)), false, "rules.json must not exist");
 assert.deepEqual(
   manifest.host_permissions,
-  ["https://*.akamaized.net/*", "https://*.navercdn.com/*", "https://*.pstatic.net/*"],
+  ["https://*.akamaized.net/*", "https://*.gscdn.net/*", "https://*.navercdn.com/*", "https://*.pstatic.net/*"],
   "host permissions must be limited to the trusted HLS CDN origins that webRequest/DNR need",
 );
 assert.equal(
@@ -83,7 +83,7 @@ assert.equal(manifest.action?.default_popup, "diagnostics.html", "diagnostics po
 const sampleRule = buildScopedSessionRule({ policy, tabId: 1 });
 assert.deepEqual(sampleRule.condition.tabIds, [1], "session rule must be scoped to one tab");
 assert.deepEqual(sampleRule.condition.initiatorDomains, ["chzzk.naver.com"]);
-assert.deepEqual(sampleRule.condition.requestDomains, ["akamaized.net", "navercdn.com", "pstatic.net"]);
+assert.deepEqual(sampleRule.condition.requestDomains, ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"]);
 assert.equal(sampleRule.condition.regexFilter.includes("360p|480p|720p"), false);
 
 console.log("manifest and session-scoped CHZZK redirect policy are valid");

@@ -24,9 +24,9 @@ describe("session-scoped CHZZK redirect rules", () => {
     assert.equal(rule.priority, 1);
     assert.deepEqual(rule.condition.tabIds, [42]);
     assert.deepEqual(rule.condition.initiatorDomains, ["chzzk.naver.com"]);
-    assert.deepEqual(rule.condition.requestDomains, ["akamaized.net", "navercdn.com", "pstatic.net"]);
+    assert.deepEqual(rule.condition.requestDomains, ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"]);
     assert.deepEqual(rule.condition.requestMethods, ["get"]);
-    assert.deepEqual([...rule.condition.resourceTypes].sort(), ["media", "xmlhttprequest"]);
+    assert.deepEqual([...rule.condition.resourceTypes].sort(), ["media", "other", "xmlhttprequest"]);
     assert.equal(rule.condition.isUrlFilterCaseSensitive, false);
     assert.equal(
       rule.condition.regexFilter,
@@ -121,6 +121,30 @@ describe("session-scoped CHZZK redirect rules", () => {
         .ok,
       false,
     );
+  });
+
+
+  it("covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests", () => {
+    const eligible = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      tabId: 8,
+      type: "other",
+      url: "https://livecloud.pstatic.net.live.gscdn.net/live/chunklist_720p.m3u8?Policy=redacted",
+    };
+
+    assert.equal(shouldRecordDiagnostics(eligible, policy), true);
+    assert.deepEqual(shouldBootstrapSessionRule(eligible, policy), {
+      ok: true,
+      quality: "720p",
+      reason: "eligible-chzzk-hls-quality",
+      tabId: 8,
+    });
+
+    const rule = buildScopedSessionRule({ policy, tabId: 8, targetQuality: "1080p" });
+    assert.ok(rule.condition.requestDomains.includes("gscdn.net"));
+    assert.ok(rule.condition.resourceTypes.includes("other"));
   });
 
   it("does not record diagnostics for unrelated CDN HLS traffic", () => {

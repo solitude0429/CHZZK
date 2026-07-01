@@ -68,6 +68,7 @@ describe("personal CHZZK extension policy", () => {
   it("does not duplicate CHZZK page access or request data-collection consent", () => {
     assert.deepEqual(manifest.host_permissions, [
       "https://*.akamaized.net/*",
+      "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
     ]);
