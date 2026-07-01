@@ -4,7 +4,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 
 ## Runtime behavior
 
-- A minimal MV2 `site-observer.js` content script runs at `document_start` on CHZZK live pages and prewarms the per-tab startup redirect target before the first playlist request.
+- A minimal MV2 `site-observer.js` content script runs at `document_start` on CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and prewarms the per-tab startup redirect target before the first playlist request.
 - Trusted numeric HLS playlist requests synchronously redirect through blocking `webRequest`; after observing the signed URL shape, the runtime probes configured quality candidates and caches the highest supported candidate per tab.
 - Redirect handling runs before local diagnostics recording.
 - Local diagnostics storage writes are serialized to reduce read-modify-write races.
