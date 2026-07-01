@@ -1,5 +1,6 @@
 {
-  "targetQuality": "1080p",
+  "mode": "highest-supported-grid-quality",
+  "qualityCandidates": ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"],
   "minRedirectQuality": "100p",
   "trustedInitiatorDomains": ["chzzk.naver.com"],
   "trustedRequestDomains": ["akamaized.net", "navercdn.com", "pstatic.net"],
@@ -10,10 +11,11 @@
   "urlQualityPrefixes": ["chunklist_", "/"],
   "mediaExtensions": ["m3u8"],
   "maxDiagnosticsSamples": 200,
+  "probeTimeoutMs": 1500,
   "notes": [
-    "targetQuality is the configured CHZZK HLS redirect target, not a guarantee that NAVER currently provides that quality for every live stream.",
     "Runtime redirects are installed as tab-scoped session DNR rules only after a trusted CHZZK live HLS request is observed.",
-    "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values.",
+    "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and redirects to the highest candidate that returns a valid HLS playlist.",
+    "The generated session regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects."
   ]
 }

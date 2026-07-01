@@ -5,17 +5,19 @@ import {
   buildHighestQualityRedirectUrl,
   buildQualityRegexFilter,
   lowerQualityNumberRegex,
+  normalizeQualityCandidates,
   normalizeQualityLabel,
   parseQualityFromUrl,
   qualityNumber,
   redactMediaUrl,
+  replaceQualityInUrl,
 } from "../../src/shared/quality.js";
 
-describe("highest-quality redirect helpers", () => {
+describe("highest-supported-quality helpers", () => {
   it("normalizes common CHZZK quality labels", () => {
     assert.equal(normalizeQualityLabel("1080p"), "1080p");
     assert.equal(normalizeQualityLabel("1080P with badge"), "1080p");
-    assert.equal(normalizeQualityLabel("1920x1080"), "1080p");
+    assert.equal(normalizeQualityLabel("2560x1440"), "1440p");
     assert.equal(normalizeQualityLabel("source"), null);
     assert.equal(qualityNumber("1080p"), 1080);
   });
@@ -36,49 +38,66 @@ describe("highest-quality redirect helpers", () => {
     );
   });
 
-  it("generates a range regex instead of enumerating current CHZZK qualities", () => {
-    const lowerRange = lowerQualityNumberRegex("1080p", "100p");
-    assert.equal(lowerRange.includes("360p|480p|720p"), false);
-    assert.match("360", new RegExp(`^${lowerRange}$`));
-    assert.match("540", new RegExp(`^${lowerRange}$`));
-    assert.match("900", new RegExp(`^${lowerRange}$`));
-    assert.match("1079", new RegExp(`^${lowerRange}$`));
-    assert.doesNotMatch("1080", new RegExp(`^${lowerRange}$`));
-    assert.doesNotMatch("1440", new RegExp(`^${lowerRange}$`));
-
-    const filter = buildQualityRegexFilter({ targetQuality: "1080p", minRedirectQuality: "100p" });
-    assert.equal(filter.includes("360p|480p|720p"), false);
-    assert.match("https://cdn.test/live/chunklist_540p.m3u8", new RegExp(filter));
-    assert.match("https://cdn.test/live/900p/chunklist.m3u8", new RegExp(filter));
-    assert.doesNotMatch("https://cdn.test/live/chunklist_1080p.m3u8", new RegExp(filter));
-    assert.doesNotMatch("https://cdn.test/live/chunklist_1440p.m3u8", new RegExp(filter));
+  it("orders configured quality candidates by numeric quality", () => {
+    assert.deepEqual(
+      normalizeQualityCandidates(["480p", "1440p", "1080p", "1440P"], { include: ["2160p"] }),
+      ["2160p", "1440p", "1080p", "480p"],
+    );
   });
 
-  it("redirects current and future lower numeric HLS qualities while preserving signed URL tails", () => {
-    for (const quality of ["144p", "270p", "360p", "480p", "540p", "720p", "900p", "1000p", "1079p"]) {
+  it("generates a range regex instead of enumerating current CHZZK qualities", () => {
+    const lowerRange = lowerQualityNumberRegex("1440p", "100p");
+    assert.equal(lowerRange.includes("360p|480p|720p"), false);
+    for (const quality of ["360", "540", "900", "1079", "1080", "1439"]) {
+      assert.match(quality, new RegExp(`^${lowerRange}$`));
+    }
+    assert.doesNotMatch("1440", new RegExp(`^${lowerRange}$`));
+    assert.doesNotMatch("2160", new RegExp(`^${lowerRange}$`));
+
+    const filter = buildQualityRegexFilter({ targetQuality: "1440p", minRedirectQuality: "100p" });
+    assert.equal(filter.includes("360p|480p|720p"), false);
+    assert.match("https://cdn.test/live/chunklist_540p.m3u8", new RegExp(filter));
+    assert.match("https://cdn.test/live/1080p/chunklist.m3u8", new RegExp(filter));
+    assert.doesNotMatch("https://cdn.test/live/chunklist_1440p.m3u8", new RegExp(filter));
+    assert.doesNotMatch("https://cdn.test/live/chunklist_2160p.m3u8", new RegExp(filter));
+  });
+
+  it("rewrites any lower numeric HLS quality to the resolved maximum while preserving signed tails", () => {
+    for (const quality of ["144p", "270p", "360p", "480p", "540p", "720p", "900p", "1000p", "1080p"]) {
       assert.equal(
-        buildHighestQualityRedirectUrl(`https://cdn.test/live/chunklist_${quality}.m3u8?Policy=example#frag`),
-        "https://cdn.test/live/chunklist_1080p.m3u8?Policy=example#frag",
+        buildHighestQualityRedirectUrl(`https://cdn.test/live/chunklist_${quality}.m3u8?Policy=example#frag`, {
+          targetQuality: "1440p",
+        }),
+        "https://cdn.test/live/chunklist_1440p.m3u8?Policy=example#frag",
       );
       assert.equal(
-        buildHighestQualityRedirectUrl(`https://cdn.test/live/${quality}/chunklist.m3u8?Policy=example`),
-        "https://cdn.test/live/1080p/chunklist.m3u8?Policy=example",
+        buildHighestQualityRedirectUrl(`https://cdn.test/live/${quality}/chunklist.m3u8?Policy=example`, {
+          targetQuality: "1440p",
+        }),
+        "https://cdn.test/live/1440p/chunklist.m3u8?Policy=example",
       );
     }
   });
 
-  it("does not rewrite target-or-higher playlist requests", () => {
+  it("does not rewrite the resolved maximum or higher playlist requests", () => {
     assert.equal(
-      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1080p.m3u8?Policy=example"),
+      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1440p.m3u8?Policy=example", {
+        targetQuality: "1440p",
+      }),
       null,
     );
     assert.equal(
-      buildHighestQualityRedirectUrl("https://cdn.test/live/1080p/chunklist.m3u8?Policy=example"),
+      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_2160p.m3u8?Policy=example", {
+        targetQuality: "1440p",
+      }),
       null,
     );
+  });
+
+  it("can replace the URL quality directly for availability probes", () => {
     assert.equal(
-      buildHighestQualityRedirectUrl("https://cdn.test/live/chunklist_1440p.m3u8?Policy=example"),
-      null,
+      replaceQualityInUrl("https://cdn.test/live/chunklist_720p.m3u8?Policy=example", "2160p"),
+      "https://cdn.test/live/chunklist_2160p.m3u8?Policy=example",
     );
   });
 });

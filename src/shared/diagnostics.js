@@ -1,4 +1,4 @@
-import { parseQualityFromUrl, qualityNumber, redactMediaUrl } from "./quality.js";
+import { highestQualityCandidate, normalizeQualityCandidates, parseQualityFromUrl, qualityNumber, redactMediaUrl } from "./quality.js";
 
 export function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
   return {
@@ -55,6 +55,7 @@ export function recordDecision(diagnostics, decision, details = {}, { now = new 
     reason: decision.reason ?? "unknown",
     seenAt: now.toISOString(),
     tabId: decision.tabId ?? details.tabId ?? null,
+    targetQuality: decision.targetQuality ?? null,
     type: details.type ?? null,
     url: redactMediaUrl(details.url ?? ""),
   });
@@ -94,25 +95,34 @@ export function createDiagnosticsSnapshot(diagnostics) {
   };
 }
 
-export function analyzeDiagnostics(snapshot, { targetQuality = "1080p" } = {}) {
+export function analyzeDiagnostics(snapshot, { qualityCandidates = [] } = {}) {
   const qualities = Object.keys(snapshot?.qualities ?? {});
+  const observedQualities = qualities.sort((a, b) => (qualityNumber(a) ?? 0) - (qualityNumber(b) ?? 0));
   const highestObservedQuality =
-    qualities
+    observedQualities
       .map((quality) => ({ label: quality, value: qualityNumber(quality) }))
       .filter((entry) => entry.value != null)
       .sort((a, b) => b.value - a.value)[0]?.label ?? null;
 
+  const configuredCandidates = normalizeQualityCandidates(qualityCandidates, {
+    include: highestObservedQuality ? [] : [],
+  });
+  const highestConfiguredQuality = highestQualityCandidate(configuredCandidates);
   const highestObservedNumber = qualityNumber(highestObservedQuality);
-  const targetNumber = qualityNumber(targetQuality);
+  const highestConfiguredNumber = qualityNumber(highestConfiguredQuality);
   const needsPolicyUpdate = Boolean(
-    highestObservedNumber && targetNumber && highestObservedNumber > targetNumber,
+    highestObservedNumber &&
+      (!highestConfiguredNumber || highestObservedNumber > highestConfiguredNumber),
   );
+  const suggestedQualityCandidates = needsPolicyUpdate
+    ? normalizeQualityCandidates(configuredCandidates, { include: [highestObservedQuality] })
+    : configuredCandidates;
 
   return {
+    highestConfiguredQuality,
     highestObservedQuality,
     needsPolicyUpdate,
-    observedQualities: qualities.sort((a, b) => (qualityNumber(a) ?? 0) - (qualityNumber(b) ?? 0)),
-    suggestedTargetQuality: needsPolicyUpdate ? highestObservedQuality : targetQuality,
-    targetQuality,
+    observedQualities,
+    suggestedQualityCandidates,
   };
 }

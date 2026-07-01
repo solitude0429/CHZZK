@@ -1,4 +1,9 @@
-import { buildQualityRegexFilter, parseQualityFromUrl, qualityNumber } from "./quality.js";
+import {
+  buildQualityRegexFilter,
+  highestQualityCandidate,
+  parseQualityFromUrl,
+  qualityNumber,
+} from "./quality.js";
 
 const DEFAULT_SESSION_RULE_BASE_ID = 100_000;
 export const SESSION_RULE_ID_RANGE = 100_000;
@@ -40,6 +45,12 @@ function resourceTypes(policy) {
 
 function requestMethods(policy) {
   return asArray(policy.requestMethods).length > 0 ? asArray(policy.requestMethods) : DEFAULT_REQUEST_METHODS;
+}
+
+export function defaultSessionTargetQuality(policy) {
+  return highestQualityCandidate(policy.qualityCandidates, {
+    minRedirectQuality: policy.minRedirectQuality,
+  });
 }
 
 export function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
@@ -128,35 +139,34 @@ export function shouldBootstrapSessionRule(details, policy) {
 
   const quality = parseQualityFromUrl(details.url);
   const current = qualityNumber(quality);
-  const target = qualityNumber(policy.targetQuality);
   const min = qualityNumber(policy.minRedirectQuality ?? "100p");
-  if (!quality || !current || !target || !min) {
+  if (!quality || !current || !min) {
     return { ok: false, reason: "unknown-quality-shape", tabId };
   }
   if (current < min) {
     return { ok: false, quality, reason: "quality-below-minimum", tabId };
   }
-  if (current >= target) {
-    return { ok: false, quality, reason: "target-or-higher-quality", tabId };
-  }
 
-  return { ok: true, quality, reason: "eligible-lower-quality-chzzk-hls", tabId };
+  return { ok: true, quality, reason: "eligible-chzzk-hls-quality", tabId };
 }
 
-export function buildScopedSessionRule({ policy, tabId }) {
+export function buildScopedSessionRule({ policy, tabId, targetQuality = defaultSessionTargetQuality(policy) }) {
+  const normalizedTarget = targetQuality ?? defaultSessionTargetQuality(policy);
+  if (!normalizedTarget) throw new Error("session rule target quality is required");
+
   return {
     id: sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? DEFAULT_SESSION_RULE_BASE_ID }),
     priority: policy.redirectRulePriority ?? 1,
     action: {
       type: "redirect",
       redirect: {
-        regexSubstitution: `\\1${policy.targetQuality}\\3`,
+        regexSubstitution: `\\1${normalizedTarget}\\3`,
       },
     },
     condition: {
       regexFilter: buildQualityRegexFilter({
         minRedirectQuality: policy.minRedirectQuality,
-        targetQuality: policy.targetQuality,
+        targetQuality: normalizedTarget,
       }),
       initiatorDomains: trustedInitiatorDomains(policy),
       isUrlFilterCaseSensitive: false,

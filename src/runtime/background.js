@@ -14,6 +14,12 @@ import {
   shouldRecordDiagnostics,
 } from "../shared/session-rules.js";
 import {
+  normalizeQualityCandidates,
+  parseQualityFromUrl,
+  qualityNumber,
+  replaceQualityInUrl,
+} from "../shared/quality.js";
+import {
   isChzzkLivePageUrl,
   makeTelemetryReport,
   prepareTelemetryRequest,
@@ -31,6 +37,7 @@ const REPORT_DEDUPE_TTL_MS = 60 * 60 * 1000;
 const TELEMETRY_POST_TIMEOUT_MS = 2000;
 const SESSION_RULE_ID_RANGE = 100_000;
 const activeRulesByTab = new Map();
+const activeTargetsByTab = new Map();
 let diagnosticsMutationQueue = Promise.resolve();
 
 function extensionIdentity() {
@@ -159,7 +166,7 @@ function diagnosticsReportFromSnapshot(snapshot, eventType) {
 }
 
 async function maybeReportDiagnostics(snapshot, decision) {
-  const analysis = analyzeDiagnostics(snapshot, { targetQuality: policy.targetQuality });
+  const analysis = analyzeDiagnostics(snapshot, { qualityCandidates: policy.qualityCandidates });
   const interesting = Boolean(
     analysis.needsPolicyUpdate ||
     snapshot.sessionRules?.lastError ||
@@ -180,6 +187,63 @@ function currentRuleState(lastError = null) {
   };
 }
 
+function activeTargetCoversObserved(tabId, observedQuality) {
+  const activeTarget = activeTargetsByTab.get(tabId);
+  const activeTargetNumber = qualityNumber(activeTarget);
+  const observedNumber = qualityNumber(observedQuality);
+  return Boolean(activeTargetNumber && observedNumber && activeTargetNumber >= observedNumber);
+}
+
+function probeTimeoutMs() {
+  const configured = Number(policy.probeTimeoutMs ?? 1500);
+  return Number.isFinite(configured) && configured > 0 ? configured : 1500;
+}
+
+function isLikelyHlsPlaylist(text) {
+  return /^\s*#EXTM3U/m.test(String(text ?? ""));
+}
+
+async function fetchLooksLikeHlsPlaylist(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), probeTimeoutMs());
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    if (!response.ok) return false;
+    return isLikelyHlsPlaylist(await response.text());
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveHighestSupportedQuality(details, observedQuality) {
+  const observedNumber = qualityNumber(observedQuality);
+  if (!observedNumber) return null;
+
+  const candidates = normalizeQualityCandidates(policy.qualityCandidates, {
+    include: [observedQuality],
+    minRedirectQuality: policy.minRedirectQuality,
+  });
+
+  for (const candidate of candidates) {
+    const candidateNumber = qualityNumber(candidate);
+    if (!candidateNumber || candidateNumber < observedNumber) continue;
+
+    const candidateUrl = replaceQualityInUrl(details.url, candidate);
+    if (!candidateUrl) continue;
+    if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) return candidate;
+    if (await fetchLooksLikeHlsPlaylist(candidateUrl)) return candidate;
+  }
+
+  return observedQuality;
+}
+
 function ownedRuleIdsFromSessionRules(rules) {
   const baseId = policy.sessionRuleBaseId ?? 100_000;
   return rules
@@ -195,21 +259,23 @@ async function clearOwnedSessionRules() {
     await api.declarativeNetRequest.updateSessionRules({ removeRuleIds });
   }
   activeRulesByTab.clear();
+  activeTargetsByTab.clear();
   await enqueueDiagnosticsMutation((diagnostics) => {
     updateSessionRuleDiagnostics(diagnostics, currentRuleState());
   });
 }
 
-async function ensureTabSessionRule(tabId) {
+async function ensureTabSessionRule(tabId, targetQuality) {
   const ruleId = sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? 100_000 });
-  if (activeRulesByTab.get(tabId) === ruleId) return;
+  if (activeRulesByTab.get(tabId) === ruleId && activeTargetsByTab.get(tabId) === targetQuality) return;
 
-  const rule = buildScopedSessionRule({ policy, tabId });
+  const rule = buildScopedSessionRule({ policy, tabId, targetQuality });
   await api.declarativeNetRequest.updateSessionRules({
     addRules: [rule],
     removeRuleIds: [ruleId],
   });
   activeRulesByTab.set(tabId, ruleId);
+  activeTargetsByTab.set(tabId, targetQuality);
   await enqueueDiagnosticsMutation((diagnostics) => {
     updateSessionRuleDiagnostics(diagnostics, currentRuleState());
   });
@@ -231,6 +297,7 @@ async function removeTabSessionRule(tabId) {
     activeRulesByTab.get(tabId) ??
     sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? 100_000 });
   activeRulesByTab.delete(tabId);
+  activeTargetsByTab.delete(tabId);
   try {
     await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
     await enqueueDiagnosticsMutation((diagnostics) => {
@@ -251,11 +318,17 @@ async function recordRequestDiagnostics(details, decision) {
 
 async function handleRequest(details) {
   const shouldRecord = shouldRecordDiagnostics(details, policy);
-  const decision = shouldBootstrapSessionRule(details, policy);
+  let decision = shouldBootstrapSessionRule(details, policy);
 
   if (decision.ok) {
     try {
-      await ensureTabSessionRule(decision.tabId);
+      const targetQuality = activeTargetCoversObserved(decision.tabId, decision.quality)
+        ? activeTargetsByTab.get(decision.tabId)
+        : await resolveHighestSupportedQuality(details, decision.quality);
+      if (targetQuality) {
+        await ensureTabSessionRule(decision.tabId, targetQuality);
+        decision = { ...decision, targetQuality };
+      }
     } catch (error) {
       await reportSessionRuleError(error);
       console.warn("[CHZZK] failed to install session redirect rule", error);

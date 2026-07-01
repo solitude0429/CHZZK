@@ -18,17 +18,17 @@ if (!fileArg) {
 const policyUrl = new URL("../policy/quality-policy.json", import.meta.url);
 const diagnostics = JSON.parse(await readFile(fileArg, "utf8"));
 const policy = JSON.parse(await readFile(policyUrl, "utf8"));
-const analysis = analyzeDiagnostics(diagnostics, { targetQuality: policy.targetQuality });
+const analysis = analyzeDiagnostics(diagnostics, { qualityCandidates: policy.qualityCandidates });
 
 console.log(JSON.stringify(analysis, null, 2));
 
 if (apply && analysis.needsPolicyUpdate) {
   const updatedPolicy = {
     ...policy,
-    targetQuality: analysis.suggestedTargetQuality,
+    qualityCandidates: analysis.suggestedQualityCandidates,
     notes: [
       ...(policy.notes ?? []),
-      `Updated targetQuality from diagnostics: ${policy.targetQuality} -> ${analysis.suggestedTargetQuality}`,
+      `Added ${analysis.highestObservedQuality} to qualityCandidates from diagnostics.`,
     ],
   };
   await writeFile(policyUrl, `${JSON.stringify(updatedPolicy, null, 2)}\n`);
