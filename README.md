@@ -5,6 +5,7 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 ## What it does
 
 - Watches trusted CHZZK live HLS playlist requests only.
+- Prewarms a tab-scoped startup redirect when a CHZZK live page starts, so playback does not need a manual refresh before moving off low quality.
 - Probes configured quality candidates from highest to lowest.
 - Redirects the current numeric playlist request and installs a tab-scoped session DNR rule for later requests below the resolved maximum.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
@@ -31,7 +32,7 @@ Current candidate order:
 2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p
 ```
 
-Runtime rules are session-only and scoped by tab, CHZZK live context, trusted CDN domains, GET requests, and media/XHR resource types. There is no always-on static DNR ruleset.
+Runtime rules are session-only and scoped by tab, CHZZK live context, trusted CDN domains, GET requests, and media/XHR resource types. There is no always-on static DNR ruleset. The startup prewarm target is `1080p`; after the first trusted numeric playlist is observed, the tab target is upgraded to the highest supported candidate when available.
 
 ## Build and verify
 

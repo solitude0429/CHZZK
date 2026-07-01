@@ -1,6 +1,7 @@
 import {
   buildQualityRegexFilter,
   highestQualityCandidate,
+  normalizeQualityCandidates,
   parseQualityFromUrl,
   qualityNumber,
 } from "./quality.js";
@@ -51,6 +52,18 @@ export function defaultSessionTargetQuality(policy) {
   return highestQualityCandidate(policy.qualityCandidates, {
     minRedirectQuality: policy.minRedirectQuality,
   });
+}
+
+export function prewarmSessionTargetQuality(policy) {
+  const [targetQuality] = normalizeQualityCandidates([policy.startupTargetQuality], {
+    minRedirectQuality: policy.minRedirectQuality,
+  });
+  if (!targetQuality) return null;
+
+  const configuredCandidates = normalizeQualityCandidates(policy.qualityCandidates, {
+    minRedirectQuality: policy.minRedirectQuality,
+  });
+  return configuredCandidates.includes(targetQuality) ? targetQuality : null;
 }
 
 export function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {

@@ -345,6 +345,9 @@
       type: "chzzk.telemetry.report",
     });
   }
+  function notifyLivePageReady() {
+    return api.runtime.sendMessage({ scope: TELEMETRY_SCOPE, type: "chzzk.live-page-ready" }).catch(() => {});
+  }
   function observeBody() {
     if (observer || !document.body || document.visibilityState === "hidden") return;
     observer = new MutationObserver(() => scheduleStructureReport("mutation"));
@@ -370,7 +373,10 @@
     observeBody();
     scheduleStructureReport("mutation");
   }
-  if (isChzzkLivePageUrl(globalThis.location.href)) {
+  var siteObservationStarted = false;
+  function startSiteObservation() {
+    if (siteObservationStarted) return;
+    siteObservationStarted = true;
     sendStructureReport("load").catch(() => {});
     observeBody();
     globalThis.addEventListener("visibilitychange", handleVisibilityChange);
@@ -380,5 +386,13 @@
     globalThis.addEventListener("unhandledrejection", (event) => {
       reportPageError("unhandledrejection", event.reason).catch(() => {});
     });
+  }
+  if (isChzzkLivePageUrl(globalThis.location.href)) {
+    notifyLivePageReady().catch(() => {});
+    if (document.readyState === "loading") {
+      globalThis.addEventListener("DOMContentLoaded", startSiteObservation, { once: true });
+    } else {
+      startSiteObservation();
+    }
   }
 })();

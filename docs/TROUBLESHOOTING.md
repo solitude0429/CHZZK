@@ -16,13 +16,14 @@ The core behavior is network/session-DNR level, so it does not depend on CHZZK p
 
 ## Popup shows no active session rule
 
-The extension does not ship a global static ruleset. A redirect rule is installed only after a trusted numeric HLS playlist request is observed in a CHZZK live tab.
+The extension does not ship a global static ruleset. A startup redirect rule should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab.
 
 Check:
 
 1. Page URL is `https://chzzk.naver.com/live/...`.
-2. Playback has started and a numeric HLS playlist request occurred.
-3. Popup `lastDecision` is one of:
+2. The page was opened after the current extension version loaded. If not, close and reopen the live tab once.
+3. Playback has started and a numeric HLS playlist request occurred.
+4. Popup `lastDecision` is one of:
    - `eligible-chzzk-hls-quality` — a per-tab target should be resolved and a rule installed.
    - `unknown-quality-shape` — CHZZK changed URL shape; add a redacted fixture and update parser.
    - `untrusted-initiator` — request was not tied to a CHZZK live tab.
@@ -30,7 +31,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects the current lower numeric playlist request, then installs a tab rule for later lower numeric playlists in that tab.
+The runtime prewarms a safe startup redirect before the first HLS playlist request, then probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects the current lower numeric playlist request, and upgrades the tab rule for later lower numeric playlists in that tab.
 
 Check:
 

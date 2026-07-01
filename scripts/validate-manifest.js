@@ -10,6 +10,7 @@ const policy = JSON.parse(await readFile(new URL("../policy/quality-policy.json"
 
 assert.equal(manifest.manifest_version, 3, "manifest_version must be 3");
 assert.equal(manifest.name, "CHZZK", "extension name must be CHZZK");
+assert.equal(manifest.description, undefined, "manifest description should be omitted from about:addons");
 assert.equal(manifest.version, packageJson.version, "manifest version must match package.json");
 assert.ok(
   manifest.permissions.includes("declarativeNetRequest"),
@@ -31,7 +32,7 @@ assert.deepEqual(
     {
       matches: ["https://chzzk.naver.com/live/*"],
       js: ["site-observer.js"],
-      run_at: "document_idle",
+      run_at: "document_start",
     },
   ],
   "content script must be scoped to CHZZK live pages only",
@@ -63,8 +64,16 @@ assert.equal(
   "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
   "Firefox auto-update manifest URL must remain stable",
 );
-assert.equal(manifest.icons?.["32"], "icon.png", "CHZZK favicon must be registered");
-assert.equal(manifest.action?.default_icon?.["32"], "icon.png", "action icon must use the CHZZK favicon");
+assert.deepEqual(
+  manifest.icons,
+  { 32: "icon-32.png", 48: "icon-48.png", 96: "icon-96.png", 128: "icon.png" },
+  "CHZZK favicon sizes must be registered with size-matched PNGs",
+);
+assert.deepEqual(
+  manifest.action?.default_icon,
+  { 32: "icon-32.png", 48: "icon-48.png", 96: "icon-96.png", 128: "icon.png" },
+  "action icon sizes must use size-matched CHZZK favicon PNGs",
+);
 assert.equal(manifest.action?.default_popup, "diagnostics.html", "diagnostics popup must be registered");
 
 const sampleRule = buildScopedSessionRule({ policy, tabId: 1 });

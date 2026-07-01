@@ -9,6 +9,7 @@ import {
 } from "../shared/diagnostics.js";
 import {
   buildScopedSessionRule,
+  prewarmSessionTargetQuality,
   sessionRuleIdForTab,
   shouldBootstrapSessionRule,
   shouldRecordDiagnostics,
@@ -39,6 +40,7 @@ const TELEMETRY_POST_TIMEOUT_MS = 2000;
 const SESSION_RULE_ID_RANGE = 100_000;
 const activeRulesByTab = new Map();
 const activeTargetsByTab = new Map();
+const resolvedTargetsByTab = new Set();
 let diagnosticsMutationQueue = Promise.resolve();
 
 function extensionIdentity() {
@@ -195,6 +197,10 @@ function activeTargetCoversObserved(tabId, observedQuality) {
   return Boolean(activeTargetNumber && observedNumber && activeTargetNumber >= observedNumber);
 }
 
+function resolvedTargetCoversObserved(tabId, observedQuality) {
+  return resolvedTargetsByTab.has(tabId) && activeTargetCoversObserved(tabId, observedQuality);
+}
+
 function probeTimeoutMs() {
   const configured = Number(policy.probeTimeoutMs ?? 1500);
   return Number.isFinite(configured) && configured > 0 ? configured : 1500;
@@ -261,14 +267,18 @@ async function clearOwnedSessionRules() {
   }
   activeRulesByTab.clear();
   activeTargetsByTab.clear();
+  resolvedTargetsByTab.clear();
   await enqueueDiagnosticsMutation((diagnostics) => {
     updateSessionRuleDiagnostics(diagnostics, currentRuleState());
   });
 }
 
-async function ensureTabSessionRule(tabId, targetQuality) {
+async function ensureTabSessionRule(tabId, targetQuality, { resolved = false } = {}) {
   const ruleId = sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? 100_000 });
-  if (activeRulesByTab.get(tabId) === ruleId && activeTargetsByTab.get(tabId) === targetQuality) return;
+  if (activeRulesByTab.get(tabId) === ruleId && activeTargetsByTab.get(tabId) === targetQuality) {
+    if (resolved) resolvedTargetsByTab.add(tabId);
+    return;
+  }
 
   const rule = buildScopedSessionRule({ policy, tabId, targetQuality });
   await api.declarativeNetRequest.updateSessionRules({
@@ -277,9 +287,25 @@ async function ensureTabSessionRule(tabId, targetQuality) {
   });
   activeRulesByTab.set(tabId, ruleId);
   activeTargetsByTab.set(tabId, targetQuality);
+  if (resolved) resolvedTargetsByTab.add(tabId);
   await enqueueDiagnosticsMutation((diagnostics) => {
     updateSessionRuleDiagnostics(diagnostics, currentRuleState());
   });
+}
+
+async function prewarmTabSessionRule(tabId) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) return false;
+  const targetQuality = prewarmSessionTargetQuality(policy);
+  if (!targetQuality) return false;
+  if (activeTargetCoversObserved(tabId, targetQuality)) return true;
+  try {
+    await ensureTabSessionRule(tabId, targetQuality);
+    return true;
+  } catch (error) {
+    await reportSessionRuleError(error);
+    console.warn("[CHZZK] failed to prewarm tab session rule", error);
+    return false;
+  }
 }
 
 async function reportSessionRuleError(error) {
@@ -299,6 +325,7 @@ async function removeTabSessionRule(tabId) {
     sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? 100_000 });
   activeRulesByTab.delete(tabId);
   activeTargetsByTab.delete(tabId);
+  resolvedTargetsByTab.delete(tabId);
   try {
     await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
     await enqueueDiagnosticsMutation((diagnostics) => {
@@ -324,7 +351,7 @@ async function handleRequest(details) {
 
   if (decision.ok) {
     try {
-      const targetQuality = activeTargetCoversObserved(decision.tabId, decision.quality)
+      const targetQuality = resolvedTargetCoversObserved(decision.tabId, decision.quality)
         ? activeTargetsByTab.get(decision.tabId)
         : await resolveHighestSupportedQuality(details, decision.quality);
       if (targetQuality) {
@@ -332,7 +359,7 @@ async function handleRequest(details) {
           minRedirectQuality: policy.minRedirectQuality,
           targetQuality,
         });
-        await ensureTabSessionRule(decision.tabId, targetQuality);
+        await ensureTabSessionRule(decision.tabId, targetQuality, { resolved: true });
         decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
       }
     } catch (error) {
@@ -364,7 +391,14 @@ api.webRequest.onBeforeRequest.addListener(
 );
 
 api.runtime.onMessage?.addListener((message, sender) => {
-  if (message?.type !== "chzzk.telemetry.report" || message?.scope !== TELEMETRY_SCOPE) return false;
+  if (message?.scope !== TELEMETRY_SCOPE) return false;
+
+  if (message?.type === "chzzk.live-page-ready") {
+    if (!sender?.url || !isChzzkLivePageUrl(sender.url)) return false;
+    return prewarmTabSessionRule(sender.tab?.id);
+  }
+
+  if (message?.type !== "chzzk.telemetry.report") return false;
   if (sender?.url && !isChzzkLivePageUrl(sender.url)) return false;
   return postTelemetryReport(message.report, {
     force: String(message.report?.eventType ?? "").includes("error"),
@@ -378,8 +412,15 @@ api.tabs?.onRemoved?.addListener((tabId) => {
 });
 
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
-  if (!activeRulesByTab.has(tabId)) return;
   const nextUrl = changeInfo?.url;
+  if (typeof nextUrl === "string" && isChzzkLivePageUrl(nextUrl)) {
+    prewarmTabSessionRule(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to prewarm CHZZK live tab session rule", error),
+    );
+    return;
+  }
+
+  if (!activeRulesByTab.has(tabId)) return;
   if (typeof nextUrl !== "string" || isChzzkLivePageUrl(nextUrl)) return;
   removeTabSessionRule(tabId).catch((error) =>
     console.warn("[CHZZK] failed to remove inactive tab session rule", error),

@@ -22,7 +22,7 @@ describe("personal CHZZK extension policy", () => {
         {
           matches: ["https://chzzk.naver.com/live/*"],
           js: ["site-observer.js"],
-          run_at: "document_idle",
+          run_at: "document_start",
         },
       ],
       "the only content script must be the CHZZK live-site observer",
@@ -64,8 +64,13 @@ describe("personal CHZZK extension policy", () => {
     assert.equal(runtimeText.includes("pzp-setting-quality-pane"), false);
   });
 
-  it("uses the official CHZZK favicon as the extension icon", () => {
-    assert.equal(manifest.icons?.["32"], "icon.png");
-    assert.equal(manifest.action?.default_icon?.["32"], "icon.png");
+  it("uses size-matched official CHZZK favicon PNGs as extension icons", () => {
+    assert.deepEqual(manifest.icons, {
+      32: "icon-32.png",
+      48: "icon-48.png",
+      96: "icon-96.png",
+      128: "icon.png",
+    });
+    assert.deepEqual(manifest.action?.default_icon, manifest.icons);
   });
 });

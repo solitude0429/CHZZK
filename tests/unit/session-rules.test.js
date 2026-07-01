@@ -6,6 +6,7 @@ import { buildQualityRegexFilter } from "../../src/shared/quality.js";
 import {
   buildScopedSessionRule,
   defaultSessionTargetQuality,
+  prewarmSessionTargetQuality,
   isTrustedChzzkContext,
   sessionRuleIdForTab,
   shouldBootstrapSessionRule,
@@ -42,6 +43,18 @@ describe("session-scoped CHZZK redirect rules", () => {
     assert.equal(defaultSessionTargetQuality(policy), "2160p");
     const rule = buildScopedSessionRule({ policy, tabId: 1 });
     assert.equal(rule.action.redirect.regexSubstitution, "\\12160p\\3");
+  });
+
+
+  it("uses an explicit startup target for first-load prewarm instead of the highest speculative candidate", () => {
+    assert.equal(
+      prewarmSessionTargetQuality({
+        minRedirectQuality: "100p",
+        qualityCandidates: ["2160p", "1440p", "1080p", "720p"],
+        startupTargetQuality: "1080p",
+      }),
+      "1080p",
+    );
   });
 
   it("keeps session rule IDs inside the owned cleanup range", () => {
