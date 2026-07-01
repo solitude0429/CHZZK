@@ -45,10 +45,8 @@ if (!/^user:\d+:\d+$/.test(apiKey)) {
 
 mkdirSync("dist/signed", { recursive: true });
 
-const allowedRuntimeFiles = [
-  "LICENSE",
-  "NOTICE",
-  "README.md",
+const optionalSignedPackageFiles = ["LICENSE", "NOTICE", "README.md"];
+const requiredSignedRuntimeFiles = [
   "background.js",
   "diagnostics.html",
   "diagnostics.js",
@@ -56,6 +54,7 @@ const allowedRuntimeFiles = [
   "manifest.json",
   "site-observer.js",
 ];
+const allowedRuntimeFiles = [...optionalSignedPackageFiles, ...requiredSignedRuntimeFiles];
 
 const ignoreFiles = [
   ".github",
@@ -104,10 +103,6 @@ async function amoFetch(url, options = {}) {
   });
 }
 
-function arrayEquals(left, right) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
 async function verifySignedXpiMatchesSource(xpiPath) {
   const zip = await JSZip.loadAsync(await readFile(xpiPath));
   const entries = Object.values(zip.files)
@@ -115,13 +110,19 @@ async function verifySignedXpiMatchesSource(xpiPath) {
     .map((entry) => entry.name)
     .sort();
   const runtimeEntries = entries.filter((entry) => !entry.startsWith("META-INF/")).sort();
-  const expectedEntries = [...allowedRuntimeFiles].sort();
+  const allowedEntries = [...allowedRuntimeFiles].sort();
+  const requiredEntries = [...requiredSignedRuntimeFiles].sort();
+  const extraEntries = runtimeEntries.filter((entry) => !allowedEntries.includes(entry));
+  const missingRequiredEntries = requiredEntries.filter((entry) => !runtimeEntries.includes(entry));
 
-  if (!arrayEquals(runtimeEntries, expectedEntries)) {
-    throw new Error("Existing signed XPI runtime file list does not match the current package files.");
+  if (extraEntries.length > 0 || missingRequiredEntries.length > 0) {
+    throw new Error(
+      `Existing signed XPI runtime files do not match expectations. Missing required: ${missingRequiredEntries.join(", ") || "none"}. Extra: ${extraEntries.join(", ") || "none"}.`,
+    );
   }
 
-  for (const file of expectedEntries) {
+  const comparableEntries = runtimeEntries.filter((entry) => allowedEntries.includes(entry));
+  for (const file of comparableEntries) {
     const zipEntry = zip.file(file);
     if (!zipEntry) throw new Error(`Existing signed XPI is missing ${file}.`);
     const [actual, expected] = await Promise.all([zipEntry.async("nodebuffer"), readFile(file)]);
