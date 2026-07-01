@@ -491,8 +491,7 @@
   api.runtime.onMessage?.addListener((message, sender) => {
     if (message?.type !== "chzzk.live-page-ready") return void 0;
     const tabId = sender?.tab?.id;
-    const tabUrl = sender?.url ?? sender?.tab?.url;
-    if (!isValidRedirectTabId(tabId) || !isChzzkLiveUrl(tabUrl, quality_policy_default)) return void 0;
+    if (!isValidRedirectTabId(tabId)) return void 0;
     prewarmTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm tab target", error));
     return void 0;
   });

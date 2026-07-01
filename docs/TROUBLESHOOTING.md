@@ -16,7 +16,7 @@ The core behavior is network/webRequest level, so it does not depend on CHZZK pl
 
 ## Popup shows no active redirect target
 
-The extension does not ship a global static ruleset. A startup redirect target should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab.
+The extension does not ship a global static ruleset. A startup redirect target should be prewarmed as soon as a CHZZK live page starts, then upgraded after a trusted numeric HLS playlist request is observed in that tab. Prewarm sender URL fields are not required because Firefox can omit them; the MV2 content-script match constrains the sender origin.
 
 Check:
 

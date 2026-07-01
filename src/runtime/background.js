@@ -227,8 +227,10 @@ api.webRequest.onBeforeRequest.addListener(
 api.runtime.onMessage?.addListener((message, sender) => {
   if (message?.type !== "chzzk.live-page-ready") return undefined;
   const tabId = sender?.tab?.id;
-  const tabUrl = sender?.url ?? sender?.tab?.url;
-  if (!isValidRedirectTabId(tabId) || !isChzzkLiveUrl(tabUrl, policy)) return undefined;
+  if (!isValidRedirectTabId(tabId)) return undefined;
+  // The sender is the packaged MV2 content script, whose manifest match is limited to
+  // https://chzzk.naver.com/live/*. Firefox can omit sender URL fields, so requiring
+  // them here would drop the prewarm before the first HLS playlist request.
   prewarmTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm tab target", error));
   return undefined;
 });

@@ -14,6 +14,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 
 - `site-observer.js` is scoped to `https://chzzk.naver.com/live/*` and only sends `chzzk.live-page-ready`.
 - The content script does not query or mutate the CHZZK page DOM.
+- The background trusts that manifest-scoped prewarm message by tab ID only; Firefox may omit message sender URL fields before the first HLS request.
 
 ## Permissions and data
 
