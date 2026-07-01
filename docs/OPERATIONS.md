@@ -20,30 +20,27 @@ When CHZZK/NAVER changes break playback:
    - no query/hash values
    - no cookies or headers
    - no account/session/key/UUID/connection identifiers
-3. Enable collector telemetry only for the categories needed to reproduce the issue.
-4. Run `npm run diagnostics:analyze -- diagnostics.json`.
-5. If URL shape changed, add a failing redacted fixture first.
-6. Fix `src/shared/quality.js` or `src/shared/session-rules.js`.
-7. Run `npm run verify` before PR.
+3. Run `npm run diagnostics:analyze -- diagnostics.json`.
+4. If URL shape changed, add a failing redacted fixture first.
+5. Fix `src/shared/quality.js` or `src/shared/session-rules.js`.
+6. Run `npm run verify` before PR.
 
-## Telemetry operations
+## Local diagnostics
 
-- Default is local-only.
-- External collector upload requires popup opt-in and category opt-in.
-- Diagnostics, structure, and errors are controlled independently.
-- Forced error reporting must not bypass collector opt-in.
-- If collector returns `rate_limited`, check nginx limits and collector limits together.
+- Diagnostics are stored only in the browser extension's local storage.
+- The extension runtime does not send diagnostics to an external collector.
+- Local samples are redacted before storage/export.
+- If a diagnostic export is shared manually, review it again for signed URLs or account/session-like values.
 
 ## Incident response
 
 ### Unrelated CDN traffic appears in diagnostics
 
 1. Stop sharing the affected diagnostics.
-2. Switch collector telemetry back to local-only.
-3. Add a `shouldRecordDiagnostics` regression test.
-4. Harden context gates in `src/shared/session-rules.js`.
-5. Run `npm run verify`.
-6. Add a privacy caveat to any affected release note before publishing another release.
+2. Add a `shouldRecordDiagnostics` regression test.
+3. Harden context gates in `src/shared/session-rules.js`.
+4. Run `npm run verify`.
+5. Add a privacy caveat to any affected release note before publishing another release.
 
 ### Playback fails completely
 
@@ -59,19 +56,11 @@ When CHZZK/NAVER changes break playback:
 2. If `needsPolicyUpdate` is true, use `--apply`.
 3. Review the added candidate before release.
 
-### Collector reports are excessive
-
-1. Turn collector telemetry off in the popup.
-2. Check collector logs for `rate_limited` and client keys.
-3. Check nginx/access logs and `/var/lib/chzzk-telemetry/reports-*.ndjson` growth.
-4. Adjust `CHZZK_TELEMETRY_RATE_WINDOW_SECONDS` / `CHZZK_TELEMETRY_RATE_MAX_REPORTS` only if needed.
-5. If repeated, re-check whether update host / collector access should be WireGuard-only.
-
 ## Operational boundaries
 
 - Do not reintroduce DOM-selector fake menu labels.
 - Do not reintroduce a global static DNR ruleset.
 - Do not store unrelated page/CDN traffic.
 - Do not store signed media URL query/hash values.
-- Do not enable collector telemetry by default.
+- Do not reintroduce external collector uploads unless the user explicitly accepts the additional Firefox data-consent UI.
 - Do not describe Mozilla unlisted signing as NAVER approval.

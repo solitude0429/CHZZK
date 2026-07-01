@@ -1,6 +1,6 @@
 # Firefox 자동 업데이트
 
-이 저장소는 self-distributed/unlisted Firefox 확장을 내부 HTTPS update host로 업데이트합니다. `0.0.5`부터는 CHZZK live 전용 telemetry collector가 오류/구조 변동을 수집하고, Hermes 자동 운영 루프가 그 데이터를 보고 패치/릴리즈 후보를 만들 수 있습니다. collector 전송은 확장 popup에서 명시적으로 켠 category만 외부로 전송합니다.
+이 저장소는 self-distributed/unlisted Firefox 확장을 내부 HTTPS update host로 업데이트합니다. 최신 확장 런타임은 외부 telemetry collector를 사용하지 않고, CHZZK live HLS 요청에서 생성한 redacted diagnostics를 브라우저 로컬 확장 저장소에만 보관합니다.
 
 ## 구조
 
@@ -12,27 +12,16 @@
 - VPS 배포 스크립트가 private GitHub Release에서 signed XPI/source ZIP을 내려받고, GitHub artifact attestation이 예상 source commit과 signing workflow에 묶여 있는지 검증한 뒤 내부 update host에 복사합니다.
 - `updates.json`에는 signed XPI의 `sha256` 해시가 함께 들어갑니다.
 
-## Telemetry collector
+## 데이터/진단
 
-- Report endpoint:
-  - `https://chzzk-report.alpha-apple.dedyn.io/report`
-- Local service:
-  - `chzzk-telemetry-collector.service`
-- Storage:
-  - `/var/lib/chzzk-telemetry/reports-YYYYMMDD.ndjson`
-- Summary command:
-
-```bash
-sudo /usr/local/sbin/chzzk-telemetry-summary --since=-24h
-```
-
-Collector는 HMAC-SHA256 report signature, CHZZK live scope, schema version, add-on ID/version, event type을 검증하고 저장 전 payload를 다시 sanitize합니다. signed CDN query string, token/auth/session-like material, raw URL path, raw page error text, page text, chat text, cookie/header/authentication data는 저장하지 않습니다.
+- 확장 popup은 active tab rule, last decision, redacted HLS samples, observed qualities만 보여줍니다.
+- 외부 collector 전송 UI와 manifest data collection consent는 제거되었습니다.
+- Firefox manifest는 `data_collection_permissions.required: ["none"]`을 선언합니다.
+- 과거 collector 운영 스크립트가 저장소에 남아 있더라도, 최신 확장 런타임/manifest/package에는 collector endpoint permission이 포함되지 않습니다.
 
 ## 첫 설치 주의
 
-자동 업데이트는 `update_url`이 들어 있는 버전부터 동작합니다. `0.0.1`에는 `update_url`이 없었고, `0.0.2`~`0.0.3`은 update host 정리 전 실험용이었기 때문에, 자동 업데이트를 쓰려면 `0.0.4` 이상 signed XPI를 한 번 수동 설치해야 합니다.
-
-Telemetry 기반 자동 패치 루프까지 쓰려면 `0.0.5` 이상 signed XPI를 설치해야 합니다. 단, 외부 collector 전송은 popup에서 명시적으로 켜야 합니다.
+자동 업데이트는 `update_url`이 들어 있는 버전부터 동작합니다. 기존 설치본에 `update_url`이 없었다면 signed XPI를 한 번 수동 설치해야 합니다.
 
 이전에 더 높은 번호의 실험 버전을 설치했다면 Firefox 업데이트 경로로 `0.0.x`가 들어가지 않습니다. 그 경우 기존 확장을 제거한 뒤 최신 signed XPI를 설치하세요.
 
@@ -68,7 +57,6 @@ npm run deploy:updates:internal
 
 ```text
 https://chzzk-updates.alpha-apple.dedyn.io/updates.json
-https://chzzk-report.alpha-apple.dedyn.io/healthz
 ```
 
 로컬에서 update manifest를 만들고 검증하려면 signed XPI가 필요합니다.

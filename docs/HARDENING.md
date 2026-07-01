@@ -1,29 +1,29 @@
 # CHZZK hardening notes
 
-This document summarizes the `0.0.6` telemetry/session-rule hardening release without changing the configured CHZZK HLS redirect target policy.
+This document summarizes the extension hardening invariants for the session-scoped CHZZK HLS redirect architecture.
 
 ## Runtime behavior
 
-- Session redirect bootstrap runs before diagnostics/telemetry reporting.
-- External collector transmission is disabled by default.
-- Diagnostics, structure, and error reports are independently opt-in.
-- Telemetry POST calls are bounded by a short timeout.
-- Telemetry dedupe state is pruned by TTL.
+- CHZZK live page start prewarms a safe tab-scoped startup rule.
+- Trusted numeric HLS playlist requests can synchronously redirect through blocking `webRequest` so the first playlist is not missed.
+- After observing the signed URL shape, the runtime probes configured quality candidates and upgrades the tab-scoped session DNR rule to the highest supported candidate.
+- Redirect bootstrap runs before local diagnostics recording.
 - Local diagnostics storage writes are serialized to reduce read-modify-write races.
 - Session rule IDs are bounded to the owned cleanup range.
-- A defensive tab navigation cleanup removes active session rules when a tab leaves a CHZZK live URL and the browser exposes that URL change.
+- Active rules are removed when the tab closes.
 
 ## Content script behavior
 
-- Structure reports are sent only after collector/category opt-in.
-- Mutation observation is narrowed to class changes plus child list changes.
-- Hidden tabs disconnect the observer and cancel pending mutation reports.
+- The content script is scoped to `https://chzzk.naver.com/live/*`.
+- It does not query or mutate the page DOM.
+- It only sends a live-page-ready message for startup rule prewarm.
 
-## Collector behavior
+## Permissions and data
 
-- NDJSON writes are protected by a process-local lock.
-- Report POSTs are rate-limited per client key.
-- Sanitization rejects signed CDN query values and token/auth/session-like query strings before storage.
+- No external telemetry/data collector is used by the extension runtime.
+- `data_collection_permissions` declares `required: ["none"]`.
+- CHZZK page access is declared only once through `content_scripts.matches`.
+- `host_permissions` are limited to the HTTPS HLS CDN origins needed by `webRequest`, fetch probes, and DNR redirects.
 
 ## Verification
 
@@ -41,6 +41,6 @@ This document summarizes the `0.0.6` telemetry/session-rule hardening release wi
 ## Release invariants
 
 - `package.json`, `manifest.json`, and release notes must describe the same extension version.
-- `policy/quality-policy.json` is the source of truth for the configured HLS redirect target.
-- README must describe the quality policy as a redirect attempt toward the configured target, not as a guarantee that CHZZK/NAVER provides that quality for every stream.
+- `policy/quality-policy.json` is the source of truth for quality candidates and trusted domains.
+- README must describe startup prewarm plus dynamic highest-supported target upgrade.
 - Signed XPI/update-site artifacts must be generated only from a verified build.

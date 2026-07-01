@@ -28,9 +28,10 @@ describe("background hardening invariants", () => {
     assert.match(source, /resolvedTargetsByTab/);
   });
 
-  it("gates external telemetry through settings and timeout", () => {
-    assert.match(source, /isTelemetryEventEnabled\(settings, enriched\.eventType\)/);
-    assert.match(source, /TELEMETRY_POST_TIMEOUT_MS/);
-    assert.match(source, /pruneReportState/);
+  it("keeps diagnostics local-only without external telemetry collector code", () => {
+    assert.equal(source.includes("TELEMETRY_ENDPOINT"), false);
+    assert.equal(source.includes("postTelemetryReport"), false);
+    assert.equal(source.includes("chzzk.telemetry.report"), false);
+    assert.match(source, /recordRequestDiagnostics\(details, decision\)/);
   });
 });

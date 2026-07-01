@@ -9,7 +9,7 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 - Probes configured quality candidates from highest to lowest.
 - Redirects the current numeric playlist request and installs a tab-scoped session DNR rule for later requests below the resolved maximum.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
-- Keeps signed CDN query strings out of diagnostics and telemetry.
+- Keeps signed CDN query strings out of local diagnostics.
 
 Example with supported `1440p`:
 
@@ -66,7 +66,7 @@ Mozilla unlisted signing is documented in `docs/SIGNING.md`. It only means the X
 
 ## Diagnostics
 
-The popup shows the active tab rule, last decision, redacted HLS samples, and observed qualities. External collector upload is off by default and can be enabled per category from the popup.
+The popup shows the active tab rule, last decision, redacted HLS samples, and observed qualities. Diagnostics stay local in the browser extension storage; the packaged extension does not send them to an external collector.
 
 If NAVER changes URL shapes or qualities:
 
