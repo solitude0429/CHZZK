@@ -306,7 +306,11 @@
   }
   function configuredRequiredOrigins(policy) {
     return trustedRequestDomains(policy)
-      .map((domain) => `https://*.${domain}/*`)
+      .map((domain) =>
+        trustedInitiatorDomains(policy).includes(domain)
+          ? `https://*.${domain}/live/*`
+          : `https://*.${domain}/*`,
+      )
       .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
   }
   function displayPermissionKey(permission) {
