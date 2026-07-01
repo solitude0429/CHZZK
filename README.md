@@ -5,9 +5,8 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 ## What it does
 
 - Watches trusted CHZZK live HLS playlist requests only.
-- Prewarms a tab-scoped startup redirect when a CHZZK live page starts, so playback does not need a manual refresh before moving off low quality.
 - Probes configured quality candidates from highest to lowest.
-- Redirects the current numeric playlist request and installs a tab-scoped session DNR rule for later requests below the resolved maximum.
+- Redirects trusted numeric playlist requests through MV2 required-permission `webRequestBlocking` handling and caches the resolved maximum quality per tab while the tab is open.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
 - Keeps signed CDN query strings out of local diagnostics.
 
@@ -32,7 +31,7 @@ Current candidate order:
 2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p
 ```
 
-Runtime rules are session-only and scoped by tab, CHZZK live context, trusted CDN domains, GET requests, and media/XHR resource types. There is no always-on static DNR ruleset. The startup prewarm target is `1080p`; after the first trusted numeric playlist is observed, the tab target is upgraded to the highest supported candidate when available.
+Runtime redirects are constrained by tab, CHZZK live context, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset; the persistent MV2 background redirects each eligible playlist request through `webRequestBlocking` and caches the highest supported target per tab.
 
 ## Build and verify
 
@@ -52,7 +51,7 @@ npm test
 npm run build
 ```
 
-Generated runtime files are `background.js`, `diagnostics.js`, and `site-observer.js`. Edit `src/`, `policy/`, or tests, then run `npm run build:runtime`.
+Generated runtime files are `background.js` and `diagnostics.js`. Edit `src/`, `policy/`, or tests, then run `npm run build:runtime`.
 
 ## Install
 
@@ -66,7 +65,7 @@ Mozilla unlisted signing is documented in `docs/SIGNING.md`. It only means the X
 
 ## Diagnostics
 
-The popup shows the active tab rule, last decision, redacted HLS samples, and observed qualities. Diagnostics stay local in the browser extension storage; the packaged extension does not send them to an external collector.
+The popup shows active tab redirect targets, the last decision, redacted HLS samples, and observed qualities. Diagnostics stay local in the browser extension storage; the packaged extension does not send them to an external collector.
 
 If NAVER changes URL shapes or qualities:
 

@@ -31,7 +31,7 @@ Safe automated actions are based on local diagnostics exported by the user or on
 
 - update `policy/quality-policy.json` when a higher quality is clearly observed;
 - add redacted fixtures/tests for new URL shapes;
-- patch parser/session-rule logic with tests;
+- patch parser/request-policy logic with tests;
 - bump the patch version;
 - run `npm run format:check` and `npm run verify`;
 - open a PR;

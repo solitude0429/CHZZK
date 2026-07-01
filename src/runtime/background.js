@@ -3,16 +3,15 @@ import {
   createEmptyDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
-  updateSessionRuleDiagnostics,
+  updateRuntimeRedirectDiagnostics,
 } from "../shared/diagnostics.js";
 import {
-  buildScopedSessionRule,
-  isChzzkLiveUrl,
-  prewarmSessionTargetQuality,
-  sessionRuleIdForTab,
-  shouldBootstrapSessionRule,
+  configuredResourceTypes,
+  configuredWebRequestUrls,
+  isValidRedirectTabId,
   shouldRecordDiagnostics,
-} from "../shared/session-rules.js";
+  shouldRedirectRequest,
+} from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
   normalizeQualityCandidates,
@@ -23,9 +22,7 @@ import {
 
 const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
-const SESSION_RULE_ID_RANGE = 100_000;
-const WEB_REQUEST_URLS = policy.trustedRequestDomains.map((domain) => `https://*.${domain}/*`);
-const activeRulesByTab = new Map();
+const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
 const activeTargetsByTab = new Map();
 const resolvedTargetsByTab = new Set();
 let diagnosticsMutationQueue = Promise.resolve();
@@ -54,11 +51,13 @@ async function enqueueDiagnosticsMutation(mutator) {
   return operation;
 }
 
-function currentRuleState(lastError = null) {
+function currentRedirectState(lastError = null) {
   return {
-    activeRuleIds: [...activeRulesByTab.values()],
-    activeTabIds: [...activeRulesByTab.keys()],
+    activeTabIds: [...activeTargetsByTab.keys()],
     lastError,
+    targetsByTab: Object.fromEntries(
+      [...activeTargetsByTab.entries()].map(([tabId, targetQuality]) => [String(tabId), targetQuality]),
+    ),
   };
 }
 
@@ -123,85 +122,35 @@ async function resolveHighestSupportedQuality(details, observedQuality) {
   return observedQuality;
 }
 
-function ownedRuleIdsFromSessionRules(rules) {
-  const baseId = policy.sessionRuleBaseId ?? 100_000;
-  return rules
-    .map((rule) => rule.id)
-    .filter((id) => Number.isSafeInteger(id) && id >= baseId && id < baseId + SESSION_RULE_ID_RANGE);
-}
-
-async function clearOwnedSessionRules() {
-  if (!api.declarativeNetRequest?.getSessionRules) return;
-  const rules = await api.declarativeNetRequest.getSessionRules();
-  const removeRuleIds = ownedRuleIdsFromSessionRules(rules ?? []);
-  if (removeRuleIds.length > 0) {
-    await api.declarativeNetRequest.updateSessionRules({ removeRuleIds });
-  }
-  activeRulesByTab.clear();
-  activeTargetsByTab.clear();
-  resolvedTargetsByTab.clear();
+async function updateRedirectDiagnostics(lastError = null) {
   await enqueueDiagnosticsMutation((diagnostics) => {
-    updateSessionRuleDiagnostics(diagnostics, currentRuleState());
+    updateRuntimeRedirectDiagnostics(diagnostics, currentRedirectState(lastError));
   });
 }
 
-async function ensureTabSessionRule(tabId, targetQuality, { resolved = false } = {}) {
-  const ruleId = sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? 100_000 });
-  if (activeRulesByTab.get(tabId) === ruleId && activeTargetsByTab.get(tabId) === targetQuality) {
-    if (resolved) resolvedTargetsByTab.add(tabId);
-    return;
-  }
+async function reportRedirectError(error) {
+  await updateRedirectDiagnostics(String(error?.message ?? error));
+}
 
-  const rule = buildScopedSessionRule({ policy, tabId, targetQuality });
-  await api.declarativeNetRequest.updateSessionRules({
-    addRules: [rule],
-    removeRuleIds: [ruleId],
-  });
-  activeRulesByTab.set(tabId, ruleId);
+async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
+  if (!isValidRedirectTabId(tabId) || !targetQuality) return;
+  const previous = activeTargetsByTab.get(tabId);
   activeTargetsByTab.set(tabId, targetQuality);
   if (resolved) resolvedTargetsByTab.add(tabId);
-  await enqueueDiagnosticsMutation((diagnostics) => {
-    updateSessionRuleDiagnostics(diagnostics, currentRuleState());
-  });
+  if (previous !== targetQuality || resolved) await updateRedirectDiagnostics();
 }
 
-async function prewarmTabSessionRule(tabId) {
-  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) return false;
-  const targetQuality = prewarmSessionTargetQuality(policy);
-  if (!targetQuality) return false;
-  if (activeTargetCoversObserved(tabId, targetQuality)) return true;
-  try {
-    await ensureTabSessionRule(tabId, targetQuality);
-    return true;
-  } catch (error) {
-    await reportSessionRuleError(error);
-    console.warn("[CHZZK] failed to prewarm tab session rule", error);
-    return false;
-  }
-}
-
-async function reportSessionRuleError(error) {
-  await enqueueDiagnosticsMutation((current) => {
-    updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
-  });
-}
-
-async function removeTabSessionRule(tabId) {
-  if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) return;
-  const ruleId =
-    activeRulesByTab.get(tabId) ??
-    sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? 100_000 });
-  activeRulesByTab.delete(tabId);
-  activeTargetsByTab.delete(tabId);
+async function removeTabTarget(tabId) {
+  if (!isValidRedirectTabId(tabId)) return;
+  const hadTarget = activeTargetsByTab.delete(tabId);
   resolvedTargetsByTab.delete(tabId);
-  try {
-    await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
-    await enqueueDiagnosticsMutation((diagnostics) => {
-      updateSessionRuleDiagnostics(diagnostics, currentRuleState());
-    });
-  } catch (error) {
-    await reportSessionRuleError(error);
-  }
+  if (hadTarget) await updateRedirectDiagnostics();
+}
+
+async function clearRuntimeRedirectState() {
+  activeTargetsByTab.clear();
+  resolvedTargetsByTab.clear();
+  await updateRedirectDiagnostics();
 }
 
 async function recordRequestDiagnostics(details, decision) {
@@ -213,7 +162,7 @@ async function recordRequestDiagnostics(details, decision) {
 
 async function handleRequest(details) {
   const shouldRecord = shouldRecordDiagnostics(details, policy);
-  let decision = shouldBootstrapSessionRule(details, policy);
+  let decision = shouldRedirectRequest(details, policy);
   let redirectUrl = null;
 
   if (decision.ok) {
@@ -226,12 +175,12 @@ async function handleRequest(details) {
           minRedirectQuality: policy.minRedirectQuality,
           targetQuality,
         });
-        await ensureTabSessionRule(decision.tabId, targetQuality, { resolved: true });
+        await setTabTarget(decision.tabId, targetQuality, { resolved: true });
         decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
       }
     } catch (error) {
-      await reportSessionRuleError(error);
-      console.warn("[CHZZK] failed to redirect/install session redirect rule", error);
+      await reportRedirectError(error);
+      console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
     }
   }
 
@@ -247,32 +196,24 @@ async function handleRequest(details) {
 api.webRequest.onBeforeRequest.addListener(
   (details) =>
     handleRequest(details).catch((error) => {
-      console.warn("[CHZZK] diagnostics/session bootstrap failed", error);
+      console.warn("[CHZZK] diagnostics/redirect handling failed", error);
       return undefined;
     }),
   {
     urls: WEB_REQUEST_URLS,
-    types: policy.resourceTypes,
+    types: configuredResourceTypes(policy),
   },
   ["blocking"],
 );
 
-api.runtime.onMessage?.addListener((message, sender) => {
-  if (message?.type !== "chzzk.live-page-ready") return false;
-  if (!sender?.url || !isChzzkLiveUrl(sender.url, policy)) return false;
-  return prewarmTabSessionRule(sender.tab?.id);
-});
-
 api.tabs?.onRemoved?.addListener((tabId) => {
-  removeTabSessionRule(tabId).catch((error) =>
-    console.warn("[CHZZK] failed to remove tab session rule", error),
-  );
+  removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to remove tab target", error));
 });
 
 api.runtime.onInstalled?.addListener(() => {
-  clearOwnedSessionRules().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  clearRuntimeRedirectState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
 });
 
 api.runtime.onStartup?.addListener(() => {
-  clearOwnedSessionRules().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  clearRuntimeRedirectState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
 });

@@ -1,5 +1,5 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "browser_specific_settings": {
     "gecko": {
       "id": "chzzk@solitude0429.local",
@@ -16,34 +16,22 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "permissions": [
-    "declarativeNetRequest",
     "storage",
     "webRequest",
-    "webRequestBlocking"
-  ],
-  "host_permissions": [
+    "webRequestBlocking",
     "https://*.akamaized.net/*",
     "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
-    "https://*.pstatic.net/*"
-  ],
-  "content_scripts": [
-    {
-      "matches": [
-        "https://chzzk.naver.com/live/*"
-      ],
-      "js": [
-        "site-observer.js"
-      ],
-      "run_at": "document_start"
-    }
+    "https://*.pstatic.net/*",
+    "https://chzzk.naver.com/live/*"
   ],
   "background": {
     "scripts": [
       "background.js"
-    ]
+    ],
+    "persistent": true
   },
   "icons": {
     "32": "icon-32.png",
@@ -51,7 +39,7 @@
     "96": "icon-96.png",
     "128": "icon.png"
   },
-  "action": {
+  "browser_action": {
     "default_icon": {
       "32": "icon-32.png",
       "48": "icon-48.png",

@@ -6,27 +6,18 @@ const manifest = JSON.parse(readFileSync(new URL("../../manifest.json", import.m
 
 describe("personal CHZZK extension policy", () => {
   it("does not inject into or control CHZZK player DOM", () => {
-    assert.ok(manifest.permissions?.includes("declarativeNetRequest"));
+    assert.equal(manifest.manifest_version, 2);
+    assert.ok(!manifest.permissions?.includes("declarativeNetRequest"));
     assert.ok(
       manifest.permissions?.includes("storage"),
       "storage permission should be used only for local diagnostics",
     );
     assert.ok(
       manifest.permissions?.includes("webRequest"),
-      "webRequest permission should be used only for local diagnostics and session-rule bootstrap",
+      "webRequest permission should be used only for local diagnostics and required HLS redirect handling",
     );
     assert.ok(!manifest.permissions?.includes("scripting"), "scripting permission should not be needed");
-    assert.deepEqual(
-      manifest.content_scripts,
-      [
-        {
-          matches: ["https://chzzk.naver.com/live/*"],
-          js: ["site-observer.js"],
-          run_at: "document_start",
-        },
-      ],
-      "the only content script must be the CHZZK live-site observer",
-    );
+    assert.equal(manifest.content_scripts, undefined, "MV2 build must not create a revocable site-access content-script toggle");
     assert.equal(
       existsSync(new URL("../../inject.js", import.meta.url)),
       false,
@@ -34,17 +25,17 @@ describe("personal CHZZK extension policy", () => {
     );
     assert.deepEqual(
       manifest.background,
-      { scripts: ["background.js"] },
-      "background manages diagnostics and session DNR only",
+      { scripts: ["background.js"], persistent: true },
+      "MV2 background handles required-permission webRequest redirects directly",
     );
   });
 
-  it("does not ship a global static DNR ruleset", () => {
-    assert.equal(
-      manifest.declarative_net_request,
-      undefined,
-      "redirect rules should be installed as tab-scoped session rules, not as always-on static rules",
-    );
+  it("does not ship declarativeNetRequest or optional site-permission surfaces", () => {
+    assert.equal(manifest.declarative_net_request, undefined);
+    assert.equal(manifest.host_permissions, undefined);
+    assert.equal(manifest.optional_permissions, undefined);
+    assert.equal(manifest.optional_host_permissions, undefined);
+    assert.equal(manifest.content_scripts, undefined);
     assert.equal(
       existsSync(new URL("../../rules.json", import.meta.url)),
       false,
@@ -65,12 +56,16 @@ describe("personal CHZZK extension policy", () => {
   });
 
 
-  it("does not duplicate CHZZK page access or request data-collection consent", () => {
-    assert.deepEqual(manifest.host_permissions, [
+  it("declares CHZZK and HLS origins as required MV2 permissions", () => {
+    assert.deepEqual(manifest.permissions, [
+      "storage",
+      "webRequest",
+      "webRequestBlocking",
       "https://*.akamaized.net/*",
       "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
+      "https://chzzk.naver.com/live/*",
     ]);
     assert.deepEqual(manifest.browser_specific_settings?.gecko?.data_collection_permissions, {
       required: ["none"],
@@ -78,7 +73,6 @@ describe("personal CHZZK extension policy", () => {
 
     const runtimeText = [
       readFileSync(new URL("../../src/runtime/background.js", import.meta.url), "utf8"),
-      readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8"),
       readFileSync(new URL("../../diagnostics.html", import.meta.url), "utf8"),
     ].join("\n");
     assert.equal(runtimeText.includes("chzzk-report"), false);
@@ -93,6 +87,7 @@ describe("personal CHZZK extension policy", () => {
       96: "icon-96.png",
       128: "icon.png",
     });
-    assert.deepEqual(manifest.action?.default_icon, manifest.icons);
+    assert.equal(manifest.action, undefined);
+    assert.deepEqual(manifest.browser_action?.default_icon, manifest.icons);
   });
 });

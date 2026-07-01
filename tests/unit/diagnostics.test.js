@@ -7,7 +7,7 @@ import {
   createEmptyDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
-  updateSessionRuleDiagnostics,
+  updateRuntimeRedirectDiagnostics,
 } from "../../src/shared/diagnostics.js";
 
 describe("diagnostics helpers", () => {
@@ -51,21 +51,32 @@ describe("diagnostics helpers", () => {
     assert.equal(analysis.needsPolicyUpdate, false);
   });
 
-  it("tracks session-rule state and redacted bootstrap decisions", () => {
+  it("tracks MV2 runtime redirect state and redacted bootstrap decisions", () => {
     const diagnostics = createEmptyDiagnostics({ maxSamples: 2 });
-    updateSessionRuleDiagnostics(diagnostics, { activeRuleIds: [100007], activeTabIds: [7] });
+    updateRuntimeRedirectDiagnostics(diagnostics, {
+      activeTabIds: [7],
+      targetsByTab: { 7: "1440p" },
+    });
     recordDecision(
       diagnostics,
-      { ok: true, quality: "720p", reason: "eligible-chzzk-hls-quality", tabId: 7, targetQuality: "1440p" },
+      {
+        ok: true,
+        quality: "720p",
+        reason: "eligible-chzzk-hls-quality",
+        redirectedCurrentRequest: true,
+        tabId: 7,
+        targetQuality: "1440p",
+      },
       { type: "media", url: "https://cdn.test/live/chunklist_720p.m3u8?Policy=example" },
     );
 
     const snapshot = createDiagnosticsSnapshot(diagnostics);
-    assert.deepEqual(snapshot.sessionRules.activeRuleIds, [100007]);
-    assert.deepEqual(snapshot.sessionRules.activeTabIds, [7]);
+    assert.deepEqual(snapshot.runtimeRedirects.activeTabIds, [7]);
+    assert.deepEqual(snapshot.runtimeRedirects.targetsByTab, { 7: "1440p" });
     assert.equal(snapshot.decisions.length, 1);
     assert.equal(snapshot.decisions[0].url.includes("Policy=example"), false);
     assert.equal(snapshot.decisions[0].reason, "eligible-chzzk-hls-quality");
     assert.equal(snapshot.decisions[0].targetQuality, "1440p");
+    assert.equal(snapshot.decisions[0].redirectedCurrentRequest, true);
   });
 });

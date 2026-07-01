@@ -22,7 +22,7 @@ When CHZZK/NAVER changes break playback:
    - no account/session/key/UUID/connection identifiers
 3. Run `npm run diagnostics:analyze -- diagnostics.json`.
 4. If URL shape changed, add a failing redacted fixture first.
-5. Fix `src/shared/quality.js` or `src/shared/session-rules.js`.
+5. Fix `src/shared/quality.js` or `src/shared/request-policy.js`.
 6. Run `npm run verify` before PR.
 
 ## Local diagnostics
@@ -38,7 +38,7 @@ When CHZZK/NAVER changes break playback:
 
 1. Stop sharing the affected diagnostics.
 2. Add a `shouldRecordDiagnostics` regression test.
-3. Harden context gates in `src/shared/session-rules.js`.
+3. Harden context gates in `src/shared/request-policy.js`.
 4. Run `npm run verify`.
 5. Add a privacy caveat to any affected release note before publishing another release.
 

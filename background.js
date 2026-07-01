@@ -8,20 +8,18 @@
     trustedRequestDomains: ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"],
     resourceTypes: ["media", "other", "xmlhttprequest"],
     requestMethods: ["get"],
-    sessionRuleBaseId: 1e5,
-    redirectRulePriority: 1,
     urlQualityPrefixes: ["chunklist_", "/"],
     mediaExtensions: ["m3u8"],
     maxDiagnosticsSamples: 200,
     probeTimeoutMs: 1500,
     notes: [
-      "A CHZZK live page prewarms a tab-scoped session DNR rule to startupTargetQuality before the first HLS playlist request so playback does not require a manual refresh.",
-      "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and upgrades the tab rule to the highest candidate that returns a valid HLS playlist.",
-      "The generated session regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
+      "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
+      "The persistent background page uses blocking webRequest to redirect each trusted numeric HLS playlist request; no DNR session or static ruleset is shipped.",
+      "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
+      "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects.",
+      "Request URL, initiator, method, resource type, trusted domain, and tab context all constrain redirects.",
     ],
-    startupTargetQuality: "1080p",
   };
 
   // src/shared/quality.js
@@ -96,66 +94,6 @@
       .sort((a, b) => b.value - a.value)
       .map((entry) => entry.label);
   }
-  function highestQualityCandidate(candidates, options = {}) {
-    return normalizeQualityCandidates(candidates, options)[0] ?? null;
-  }
-  function compactDigitsPattern(width) {
-    return width === 1 ? "[0-9]" : `[0-9]{${width}}`;
-  }
-  function regexForZeroToMax(maxText) {
-    if (!/^\d+$/.test(maxText)) throw new Error(`invalid numeric max: ${maxText}`);
-    if ([...maxText].every((digit) => digit === "9")) return compactDigitsPattern(maxText.length);
-    if (maxText.length === 1) {
-      const maxDigit = Number(maxText);
-      return maxDigit === 0 ? "0" : `[0-${maxDigit}]`;
-    }
-    const firstDigit = Number(maxText[0]);
-    const rest = maxText.slice(1);
-    const parts = [];
-    if (firstDigit > 0) parts.push(`[0-${firstDigit - 1}]${compactDigitsPattern(rest.length)}`);
-    parts.push(`${firstDigit}${regexForZeroToMax(rest)}`);
-    return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
-  }
-  function regexFromPowerOfTenToMax(maxText) {
-    if (!/^\d+$/.test(maxText)) throw new Error(`invalid numeric max: ${maxText}`);
-    if ([...maxText].every((digit) => digit === "9")) {
-      return maxText.length === 1 ? "[1-9]" : `[1-9]${compactDigitsPattern(maxText.length - 1)}`;
-    }
-    const firstDigit = Number(maxText[0]);
-    const rest = maxText.slice(1);
-    const parts = [];
-    if (firstDigit > 1) parts.push(`[1-${firstDigit - 1}]${compactDigitsPattern(rest.length)}`);
-    parts.push(`${firstDigit}${regexForZeroToMax(rest)}`);
-    return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
-  }
-  function lowerQualityNumberRegex(targetQuality, minQuality = "100p") {
-    const target = qualityNumber(targetQuality);
-    const min = qualityNumber(minQuality);
-    if (!target || !min || min >= target) {
-      throw new Error(`invalid quality range: min=${minQuality}, target=${targetQuality}`);
-    }
-    const parts = [];
-    const targetDigits = String(target).length;
-    for (let width = String(min).length; width <= targetDigits; width += 1) {
-      const start = Math.max(min, 10 ** (width - 1));
-      const end = Math.min(target - 1, 10 ** width - 1);
-      if (start > end) continue;
-      if (start === 10 ** (width - 1) && end === 10 ** width - 1) {
-        parts.push(width === 1 ? "[1-9]" : `[1-9]${compactDigitsPattern(width - 1)}`);
-        continue;
-      }
-      if (start === 10 ** (width - 1)) {
-        parts.push(regexFromPowerOfTenToMax(String(end)));
-        continue;
-      }
-      throw new Error(`unsupported non-power-of-ten lower bound: ${start}-${end}`);
-    }
-    return parts.length === 1 ? parts[0] : `(?:${parts.join("|")})`;
-  }
-  function buildQualityRegexFilter({ targetQuality, minRedirectQuality = "100p" }) {
-    const lowerPattern = lowerQualityNumberRegex(targetQuality, minRedirectQuality);
-    return `(.*(?:chunklist_|/))(${lowerPattern}p)(.*\\.m3u8.*)`;
-  }
   function replaceQualityInUrl(url, targetQuality) {
     const normalizedTarget = normalizeQualityLabel(targetQuality);
     const currentQuality = parseQualityFromUrl(url);
@@ -179,13 +117,13 @@
       generatedAt: /* @__PURE__ */ new Date(0).toISOString(),
       maxSamples,
       qualities: {},
-      samples: [],
-      sessionRules: {
-        activeRuleIds: [],
+      runtimeRedirects: {
         activeTabIds: [],
         lastError: null,
+        targetsByTab: {},
         updatedAt: /* @__PURE__ */ new Date(0).toISOString(),
       },
+      samples: [],
       totalHlsRequests: 0,
     };
   }
@@ -220,6 +158,7 @@
       ok: Boolean(decision.ok),
       quality: decision.quality ?? null,
       reason: decision.reason ?? "unknown",
+      redirectedCurrentRequest: Boolean(decision.redirectedCurrentRequest),
       seenAt: now.toISOString(),
       tabId: decision.tabId ?? details.tabId ?? null,
       targetQuality: decision.targetQuality ?? null,
@@ -230,25 +169,26 @@
     diagnostics.generatedAt = now.toISOString();
     return true;
   }
-  function updateSessionRuleDiagnostics(
+  function updateRuntimeRedirectDiagnostics(
     diagnostics,
-    { activeRuleIds = [], activeTabIds = [], lastError = null, now = /* @__PURE__ */ new Date() } = {},
+    { activeTabIds = [], lastError = null, now = /* @__PURE__ */ new Date(), targetsByTab = {} } = {},
   ) {
     if (!diagnostics) return false;
-    diagnostics.sessionRules = {
-      activeRuleIds: [...activeRuleIds].sort((a, b) => a - b),
+    diagnostics.runtimeRedirects = {
       activeTabIds: [...activeTabIds].sort((a, b) => a - b),
       lastError,
+      targetsByTab: Object.fromEntries(
+        Object.entries(targetsByTab).sort(([left], [right]) => Number(left) - Number(right)),
+      ),
       updatedAt: now.toISOString(),
     };
     diagnostics.generatedAt = now.toISOString();
     return true;
   }
 
-  // src/shared/session-rules.js
-  var DEFAULT_SESSION_RULE_BASE_ID = 1e5;
-  var SESSION_RULE_ID_RANGE = 1e5;
-  var DEFAULT_RESOURCE_TYPES = ["media", "xmlhttprequest"];
+  // src/shared/request-policy.js
+  var REDIRECT_TAB_ID_RANGE = 1e5;
+  var DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
   var DEFAULT_REQUEST_METHODS = ["get"];
   function asArray(value) {
     return Array.isArray(value) ? value : [];
@@ -282,26 +222,8 @@
       ? asArray(policy.requestMethods)
       : DEFAULT_REQUEST_METHODS;
   }
-  function defaultSessionTargetQuality(policy) {
-    return highestQualityCandidate(policy.qualityCandidates, {
-      minRedirectQuality: policy.minRedirectQuality,
-    });
-  }
-  function prewarmSessionTargetQuality(policy) {
-    const [targetQuality] = normalizeQualityCandidates([policy.startupTargetQuality], {
-      minRedirectQuality: policy.minRedirectQuality,
-    });
-    if (!targetQuality) return null;
-    const configuredCandidates = normalizeQualityCandidates(policy.qualityCandidates, {
-      minRedirectQuality: policy.minRedirectQuality,
-    });
-    return configuredCandidates.includes(targetQuality) ? targetQuality : null;
-  }
-  function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
-      throw new Error(`invalid tabId for session DNR rule: ${tabId}`);
-    }
-    return baseId + tabId;
+  function isValidRedirectTabId(tabId) {
+    return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
   }
   function isTrustedRequestDomain(url, policy) {
     const hostname = canonicalDomainFromUrl(url);
@@ -326,9 +248,7 @@
     }
   }
   function isTrustedChzzkContext(details, policy) {
-    if (!details || details.tabId == null || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
-      return false;
-    }
+    if (!details || !isValidRedirectTabId(details.tabId)) return false;
     if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
     if (isChzzkLiveUrl(details.originUrl, policy)) return true;
     const initiatorDomain = canonicalDomainFromUrl(details.initiator);
@@ -343,15 +263,13 @@
   }
   function shouldRecordDiagnostics(details, policy) {
     if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
-    if (!Number.isSafeInteger(details.tabId) || details.tabId < 0 || details.tabId >= SESSION_RULE_ID_RANGE) {
-      return false;
-    }
+    if (!isValidRedirectTabId(details.tabId)) return false;
     if (!isTrustedRequestDomain(details.url, policy)) return false;
     return isTrustedChzzkContext(details, policy);
   }
-  function shouldBootstrapSessionRule(details, policy) {
+  function shouldRedirectRequest(details, policy) {
     const tabId = details?.tabId;
-    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
+    if (!isValidRedirectTabId(tabId)) {
       return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
     }
     const allowedTypes = resourceTypes(policy);
@@ -380,41 +298,17 @@
     }
     return { ok: true, quality, reason: "eligible-chzzk-hls-quality", tabId };
   }
-  function buildScopedSessionRule({ policy, tabId, targetQuality = defaultSessionTargetQuality(policy) }) {
-    const normalizedTarget = targetQuality ?? defaultSessionTargetQuality(policy);
-    if (!normalizedTarget) throw new Error("session rule target quality is required");
-    return {
-      id: sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? DEFAULT_SESSION_RULE_BASE_ID }),
-      priority: policy.redirectRulePriority ?? 1,
-      action: {
-        type: "redirect",
-        redirect: {
-          regexSubstitution: `\\1${normalizedTarget}\\3`,
-        },
-      },
-      condition: {
-        regexFilter: buildQualityRegexFilter({
-          minRedirectQuality: policy.minRedirectQuality,
-          targetQuality: normalizedTarget,
-        }),
-        initiatorDomains: trustedInitiatorDomains(policy),
-        isUrlFilterCaseSensitive: false,
-        requestDomains: trustedRequestDomains(policy),
-        requestMethods: requestMethods(policy),
-        resourceTypes: resourceTypes(policy),
-        tabIds: [tabId],
-      },
-    };
+  function configuredWebRequestUrls(policy) {
+    return trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`);
+  }
+  function configuredResourceTypes(policy) {
+    return resourceTypes(policy);
   }
 
   // src/runtime/background.js
   var api = globalThis.browser ?? globalThis.chrome;
   var STORAGE_KEY = "chzzkDiagnostics";
-  var SESSION_RULE_ID_RANGE2 = 1e5;
-  var WEB_REQUEST_URLS = quality_policy_default.trustedRequestDomains.map(
-    (domain) => `https://*.${domain}/*`,
-  );
-  var activeRulesByTab = /* @__PURE__ */ new Map();
+  var WEB_REQUEST_URLS = configuredWebRequestUrls(quality_policy_default);
   var activeTargetsByTab = /* @__PURE__ */ new Map();
   var resolvedTargetsByTab = /* @__PURE__ */ new Set();
   var diagnosticsMutationQueue = Promise.resolve();
@@ -441,11 +335,13 @@
     });
     return operation;
   }
-  function currentRuleState(lastError = null) {
+  function currentRedirectState(lastError = null) {
     return {
-      activeRuleIds: [...activeRulesByTab.values()],
-      activeTabIds: [...activeRulesByTab.keys()],
+      activeTabIds: [...activeTargetsByTab.keys()],
       lastError,
+      targetsByTab: Object.fromEntries(
+        [...activeTargetsByTab.entries()].map(([tabId, targetQuality]) => [String(tabId), targetQuality]),
+      ),
     };
   }
   function activeTargetCoversObserved(tabId, observedQuality) {
@@ -499,79 +395,31 @@
     }
     return observedQuality;
   }
-  function ownedRuleIdsFromSessionRules(rules) {
-    const baseId = quality_policy_default.sessionRuleBaseId ?? 1e5;
-    return rules
-      .map((rule) => rule.id)
-      .filter((id) => Number.isSafeInteger(id) && id >= baseId && id < baseId + SESSION_RULE_ID_RANGE2);
-  }
-  async function clearOwnedSessionRules() {
-    if (!api.declarativeNetRequest?.getSessionRules) return;
-    const rules = await api.declarativeNetRequest.getSessionRules();
-    const removeRuleIds = ownedRuleIdsFromSessionRules(rules ?? []);
-    if (removeRuleIds.length > 0) {
-      await api.declarativeNetRequest.updateSessionRules({ removeRuleIds });
-    }
-    activeRulesByTab.clear();
-    activeTargetsByTab.clear();
-    resolvedTargetsByTab.clear();
+  async function updateRedirectDiagnostics(lastError = null) {
     await enqueueDiagnosticsMutation((diagnostics) => {
-      updateSessionRuleDiagnostics(diagnostics, currentRuleState());
+      updateRuntimeRedirectDiagnostics(diagnostics, currentRedirectState(lastError));
     });
   }
-  async function ensureTabSessionRule(tabId, targetQuality, { resolved = false } = {}) {
-    const ruleId = sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
-    if (activeRulesByTab.get(tabId) === ruleId && activeTargetsByTab.get(tabId) === targetQuality) {
-      if (resolved) resolvedTargetsByTab.add(tabId);
-      return;
-    }
-    const rule = buildScopedSessionRule({ policy: quality_policy_default, tabId, targetQuality });
-    await api.declarativeNetRequest.updateSessionRules({
-      addRules: [rule],
-      removeRuleIds: [ruleId],
-    });
-    activeRulesByTab.set(tabId, ruleId);
+  async function reportRedirectError(error) {
+    await updateRedirectDiagnostics(String(error?.message ?? error));
+  }
+  async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
+    if (!isValidRedirectTabId(tabId) || !targetQuality) return;
+    const previous = activeTargetsByTab.get(tabId);
     activeTargetsByTab.set(tabId, targetQuality);
     if (resolved) resolvedTargetsByTab.add(tabId);
-    await enqueueDiagnosticsMutation((diagnostics) => {
-      updateSessionRuleDiagnostics(diagnostics, currentRuleState());
-    });
+    if (previous !== targetQuality || resolved) await updateRedirectDiagnostics();
   }
-  async function prewarmTabSessionRule(tabId) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE2) return false;
-    const targetQuality = prewarmSessionTargetQuality(quality_policy_default);
-    if (!targetQuality) return false;
-    if (activeTargetCoversObserved(tabId, targetQuality)) return true;
-    try {
-      await ensureTabSessionRule(tabId, targetQuality);
-      return true;
-    } catch (error) {
-      await reportSessionRuleError(error);
-      console.warn("[CHZZK] failed to prewarm tab session rule", error);
-      return false;
-    }
-  }
-  async function reportSessionRuleError(error) {
-    await enqueueDiagnosticsMutation((current) => {
-      updateSessionRuleDiagnostics(current, currentRuleState(String(error?.message ?? error)));
-    });
-  }
-  async function removeTabSessionRule(tabId) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE2) return;
-    const ruleId =
-      activeRulesByTab.get(tabId) ??
-      sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
-    activeRulesByTab.delete(tabId);
-    activeTargetsByTab.delete(tabId);
+  async function removeTabTarget(tabId) {
+    if (!isValidRedirectTabId(tabId)) return;
+    const hadTarget = activeTargetsByTab.delete(tabId);
     resolvedTargetsByTab.delete(tabId);
-    try {
-      await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
-      await enqueueDiagnosticsMutation((diagnostics) => {
-        updateSessionRuleDiagnostics(diagnostics, currentRuleState());
-      });
-    } catch (error) {
-      await reportSessionRuleError(error);
-    }
+    if (hadTarget) await updateRedirectDiagnostics();
+  }
+  async function clearRuntimeRedirectState() {
+    activeTargetsByTab.clear();
+    resolvedTargetsByTab.clear();
+    await updateRedirectDiagnostics();
   }
   async function recordRequestDiagnostics(details, decision) {
     await enqueueDiagnosticsMutation((current) => {
@@ -581,7 +429,7 @@
   }
   async function handleRequest(details) {
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
-    let decision = shouldBootstrapSessionRule(details, quality_policy_default);
+    let decision = shouldRedirectRequest(details, quality_policy_default);
     let redirectUrl = null;
     if (decision.ok) {
       try {
@@ -593,12 +441,12 @@
             minRedirectQuality: quality_policy_default.minRedirectQuality,
             targetQuality,
           });
-          await ensureTabSessionRule(decision.tabId, targetQuality, { resolved: true });
+          await setTabTarget(decision.tabId, targetQuality, { resolved: true });
           decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
         }
       } catch (error) {
-        await reportSessionRuleError(error);
-        console.warn("[CHZZK] failed to redirect/install session redirect rule", error);
+        await reportRedirectError(error);
+        console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
       }
     }
     if (shouldRecord) {
@@ -611,29 +459,22 @@
   api.webRequest.onBeforeRequest.addListener(
     (details) =>
       handleRequest(details).catch((error) => {
-        console.warn("[CHZZK] diagnostics/session bootstrap failed", error);
+        console.warn("[CHZZK] diagnostics/redirect handling failed", error);
         return void 0;
       }),
     {
       urls: WEB_REQUEST_URLS,
-      types: quality_policy_default.resourceTypes,
+      types: configuredResourceTypes(quality_policy_default),
     },
     ["blocking"],
   );
-  api.runtime.onMessage?.addListener((message, sender) => {
-    if (message?.type !== "chzzk.live-page-ready") return false;
-    if (!sender?.url || !isChzzkLiveUrl(sender.url, quality_policy_default)) return false;
-    return prewarmTabSessionRule(sender.tab?.id);
-  });
   api.tabs?.onRemoved?.addListener((tabId) => {
-    removeTabSessionRule(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to remove tab session rule", error),
-    );
+    removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to remove tab target", error));
   });
   api.runtime.onInstalled?.addListener(() => {
-    clearOwnedSessionRules().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+    clearRuntimeRedirectState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
   });
   api.runtime.onStartup?.addListener(() => {
-    clearOwnedSessionRules().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+    clearRuntimeRedirectState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
   });
 })();
