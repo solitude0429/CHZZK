@@ -24,6 +24,7 @@ import {
 const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
 const SESSION_RULE_ID_RANGE = 100_000;
+const WEB_REQUEST_URLS = policy.trustedRequestDomains.map((domain) => `https://*.${domain}/*`);
 const activeRulesByTab = new Map();
 const activeTargetsByTab = new Map();
 const resolvedTargetsByTab = new Set();
@@ -250,7 +251,7 @@ api.webRequest.onBeforeRequest.addListener(
       return undefined;
     }),
   {
-    urls: ["https://*.akamaized.net/*", "https://*.navercdn.com/*", "https://*.pstatic.net/*"],
+    urls: WEB_REQUEST_URLS,
     types: policy.resourceTypes,
   },
   ["blocking"],

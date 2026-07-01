@@ -37,7 +37,7 @@ function trustedInitiatorDomains(policy) {
 function trustedRequestDomains(policy) {
   return asArray(policy.trustedRequestDomains).length > 0
     ? asArray(policy.trustedRequestDomains)
-    : ["akamaized.net", "navercdn.com", "pstatic.net"];
+    : ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"];
 }
 
 function resourceTypes(policy) {

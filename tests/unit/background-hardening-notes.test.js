@@ -34,4 +34,10 @@ describe("background hardening invariants", () => {
     assert.equal(source.includes("chzzk.telemetry.report"), false);
     assert.match(source, /recordRequestDiagnostics\(details, decision\)/);
   });
+
+  it("derives webRequest URL coverage from the trusted HLS domain policy", () => {
+    assert.match(source, /WEB_REQUEST_URLS = policy\.trustedRequestDomains\.map/);
+    assert.match(source, /urls: WEB_REQUEST_URLS/);
+    assert.match(source, /types: policy\.resourceTypes/);
+  });
 });

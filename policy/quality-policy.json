@@ -16,11 +16,13 @@
   ],
   "trustedRequestDomains": [
     "akamaized.net",
+    "gscdn.net",
     "navercdn.com",
     "pstatic.net"
   ],
   "resourceTypes": [
     "media",
+    "other",
     "xmlhttprequest"
   ],
   "requestMethods": [
@@ -41,6 +43,7 @@
     "A CHZZK live page prewarms a tab-scoped session DNR rule to startupTargetQuality before the first HLS playlist request so playback does not require a manual refresh.",
     "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and upgrades the tab rule to the highest candidate that returns a valid HLS playlist.",
     "The generated session regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
+    "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
     "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects."
   ],
   "startupTargetQuality": "1080p"
