@@ -5,7 +5,7 @@
     qualityCandidates: ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"],
     minRedirectQuality: "100p",
     trustedInitiatorDomains: ["chzzk.naver.com"],
-    trustedRequestDomains: ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"],
+    trustedRequestDomains: ["akamaized.net", "chzzk.naver.com", "gscdn.net", "navercdn.com", "pstatic.net"],
     resourceTypes: ["media", "other", "xmlhttprequest"],
     requestMethods: ["get"],
     urlQualityPrefixes: ["chunklist_", "/"],
@@ -19,7 +19,7 @@
       "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
       "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted domain, and tab context or prewarmed live-tab state all constrain redirects.",
+      "Request URL, initiator, method, resource type, trusted request domain, and tab context or prewarmed live-tab state all constrain redirects; CHZZK-hosted numeric playlist URLs are covered as trusted request domains.",
     ],
     startupTargetQuality: "1080p",
   };
@@ -214,7 +214,7 @@
   function trustedRequestDomains(policy) {
     return asArray(policy.trustedRequestDomains).length > 0
       ? asArray(policy.trustedRequestDomains)
-      : ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"];
+      : ["akamaized.net", "chzzk.naver.com", "gscdn.net", "navercdn.com", "pstatic.net"];
   }
   function resourceTypes(policy) {
     return asArray(policy.resourceTypes).length > 0 ? asArray(policy.resourceTypes) : DEFAULT_RESOURCE_TYPES;
@@ -304,8 +304,16 @@
     }
     return { ok: true, quality, reason: "eligible-chzzk-hls-quality", tabId };
   }
+  function configuredRequiredOrigins(policy) {
+    return trustedRequestDomains(policy)
+      .map((domain) => `https://*.${domain}/*`)
+      .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
+  }
+  function displayPermissionKey(permission) {
+    return permission.replace(/^https:\/\/\*\./, "").replace(/^https:\/\//, "");
+  }
   function configuredWebRequestUrls(policy) {
-    return trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`);
+    return configuredRequiredOrigins(policy);
   }
   function configuredResourceTypes(policy) {
     return resourceTypes(policy);

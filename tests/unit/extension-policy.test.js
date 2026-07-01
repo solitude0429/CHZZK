@@ -74,7 +74,7 @@ describe("personal CHZZK extension policy", () => {
   it("declares CHZZK and HLS origins as required MV2 permissions", () => {
     assert.deepEqual(manifest.permissions, [
       "https://*.akamaized.net/*",
-      "https://chzzk.naver.com/live/*",
+      "https://*.chzzk.naver.com/*",
       "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
