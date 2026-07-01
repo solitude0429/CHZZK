@@ -123,6 +123,32 @@ describe("background runtime quality resolution", () => {
     assert.equal(diagnostics.decisions.at(-1).redirectedCurrentRequest, true);
   });
 
+  it("redirects the first request without content-script prewarm when Firefox only provides the CHZZK initiator", async () => {
+    const { listeners } = await loadBackground({ availableQualities: new Set(["1080p"]) });
+
+    const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(91)));
+    assert.equal(
+      redirect.redirectUrl,
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
+    );
+  });
+
+  it("redirects CHZZK/livecloud playlist URLs even when Firefox omits both page URL and initiator", async () => {
+    const { listeners } = await loadBackground({ availableQualities: new Set(["1080p"]) });
+
+    const redirect = plain(
+      await listeners.onBeforeRequest({
+        ...firstLowQualityRequest(92),
+        initiator: undefined,
+        url: "https://livecloud.pstatic.net.live.gscdn.net/live/chunklist_480p.m3u8?Policy=redacted",
+      }),
+    );
+    assert.equal(
+      redirect.redirectUrl,
+      "https://livecloud.pstatic.net.live.gscdn.net/live/chunklist_1080p.m3u8?Policy=redacted",
+    );
+  });
+
   it("prewarms a live tab from tabs.onUpdated before the first HLS request when content-script timing loses the race", async () => {
     const { listeners, storage } = await loadBackground({ availableQualities: new Set(["1080p"]) });
 
