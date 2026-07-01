@@ -18,6 +18,11 @@ describe("background hardening invariants", () => {
     const observer = readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8");
     assert.match(observer, /chzzk\.live-page-ready/);
     assert.match(observer, /sendMessage/);
+    assert.equal(
+      source.includes("sender?.url") || source.includes("sender?.tab?.url") || source.includes("tabUrl"),
+      false,
+      "prewarm must trust the MV2 content_scripts match because Firefox can omit sender URL fields",
+    );
     assert.equal(observer.includes("querySelector"), false);
     assert.equal(observer.includes("MutationObserver"), false);
   });
