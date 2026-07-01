@@ -1,7 +1,19 @@
 export const QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
+export const DEFAULT_QUALITY_CANDIDATES = [
+  "2160p",
+  "1440p",
+  "1080p",
+  "720p",
+  "480p",
+  "360p",
+  "270p",
+  "144p",
+];
+
 const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
 const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
+const URL_QUALITY_RE = /(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i;
 
 export function normalizeQualityLabel(value) {
   if (typeof value !== "string") return null;
@@ -48,6 +60,26 @@ export function redactMediaUrl(url) {
   } catch {
     return url.replace(/[?#].*$/, "?[redacted]");
   }
+}
+
+export function normalizeQualityCandidates(
+  candidates = DEFAULT_QUALITY_CANDIDATES,
+  { include = [], minRedirectQuality = "100p" } = {},
+) {
+  const min = qualityNumber(minRedirectQuality) ?? 0;
+  const labels = [...(Array.isArray(candidates) ? candidates : []), ...include]
+    .map((candidate) => normalizeQualityLabel(candidate))
+    .filter(Boolean);
+
+  return [...new Set(labels)]
+    .map((label) => ({ label, value: qualityNumber(label) }))
+    .filter((entry) => entry.value && entry.value >= min)
+    .sort((a, b) => b.value - a.value)
+    .map((entry) => entry.label);
+}
+
+export function highestQualityCandidate(candidates, options = {}) {
+  return normalizeQualityCandidates(candidates, options)[0] ?? null;
 }
 
 function compactDigitsPattern(width) {
@@ -119,16 +151,23 @@ export function buildQualityRegexFilter({ targetQuality, minRedirectQuality = "1
   return `(.*(?:chunklist_|/))(${lowerPattern}p)(.*\\.m3u8.*)`;
 }
 
+export function replaceQualityInUrl(url, targetQuality) {
+  const normalizedTarget = normalizeQualityLabel(targetQuality);
+  const currentQuality = parseQualityFromUrl(url);
+  if (typeof url !== "string" || !normalizedTarget || !currentQuality) return null;
+  const replaced = url.replace(URL_QUALITY_RE, `$1${normalizedTarget}$3`);
+  if (replaced === url && normalizedTarget !== currentQuality) return null;
+  return replaced;
+}
+
 export function buildHighestQualityRedirectUrl(
   url,
-  { targetQuality = "1080p", minRedirectQuality = "100p" } = {},
+  { targetQuality, minRedirectQuality = "100p" } = {},
 ) {
-  if (typeof url !== "string") return null;
-
   const currentQuality = qualityNumber(parseQualityFromUrl(url));
   const target = qualityNumber(targetQuality);
   const min = qualityNumber(minRedirectQuality);
   if (!currentQuality || !target || !min || currentQuality < min || currentQuality >= target) return null;
 
-  return url.replace(/(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i, `$1${targetQuality}$3`);
+  return replaceQualityInUrl(url, targetQuality);
 }

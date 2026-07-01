@@ -1,7 +1,8 @@
 (() => {
   // policy/quality-policy.json
   var quality_policy_default = {
-    targetQuality: "1080p",
+    mode: "highest-supported-grid-quality",
+    qualityCandidates: ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"],
     minRedirectQuality: "100p",
     trustedInitiatorDomains: ["chzzk.naver.com"],
     trustedRequestDomains: ["akamaized.net", "navercdn.com", "pstatic.net"],
@@ -12,19 +13,22 @@
     urlQualityPrefixes: ["chunklist_", "/"],
     mediaExtensions: ["m3u8"],
     maxDiagnosticsSamples: 200,
+    probeTimeoutMs: 1500,
     notes: [
-      "targetQuality is the configured CHZZK HLS redirect target, not a guarantee that NAVER currently provides that quality for every live stream.",
       "Runtime redirects are installed as tab-scoped session DNR rules only after a trusted CHZZK live HLS request is observed.",
-      "The generated regex matches numeric qualities lower than targetQuality by range, not by enumerating current menu values.",
+      "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and redirects to the highest candidate that returns a valid HLS playlist.",
+      "The generated session regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "No global static ruleset is shipped; request URL, initiator, method, resource type, and tab scope all constrain redirects.",
     ],
   };
 
   // src/shared/quality.js
   var QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
+  var DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
   var PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
+  var URL_QUALITY_RE = /(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i;
   function normalizeQualityLabel(value) {
     if (typeof value !== "string") return null;
     const resolutionMatch = value.match(RESOLUTION_RE);
@@ -61,6 +65,23 @@
     } catch {
       return url.replace(/[?#].*$/, "?[redacted]");
     }
+  }
+  function normalizeQualityCandidates(
+    candidates = DEFAULT_QUALITY_CANDIDATES,
+    { include = [], minRedirectQuality = "100p" } = {},
+  ) {
+    const min = qualityNumber(minRedirectQuality) ?? 0;
+    const labels = [...(Array.isArray(candidates) ? candidates : []), ...include]
+      .map((candidate) => normalizeQualityLabel(candidate))
+      .filter(Boolean);
+    return [...new Set(labels)]
+      .map((label) => ({ label, value: qualityNumber(label) }))
+      .filter((entry) => entry.value && entry.value >= min)
+      .sort((a, b) => b.value - a.value)
+      .map((entry) => entry.label);
+  }
+  function highestQualityCandidate(candidates, options = {}) {
+    return normalizeQualityCandidates(candidates, options)[0] ?? null;
   }
   function compactDigitsPattern(width) {
     return width === 1 ? "[0-9]" : `[0-9]{${width}}`;
@@ -119,6 +140,14 @@
     const lowerPattern = lowerQualityNumberRegex(targetQuality, minRedirectQuality);
     return `(.*(?:chunklist_|/))(${lowerPattern}p)(.*\\.m3u8.*)`;
   }
+  function replaceQualityInUrl(url, targetQuality) {
+    const normalizedTarget = normalizeQualityLabel(targetQuality);
+    const currentQuality = parseQualityFromUrl(url);
+    if (typeof url !== "string" || !normalizedTarget || !currentQuality) return null;
+    const replaced = url.replace(URL_QUALITY_RE, `$1${normalizedTarget}$3`);
+    if (replaced === url && normalizedTarget !== currentQuality) return null;
+    return replaced;
+  }
 
   // src/shared/diagnostics.js
   function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
@@ -170,6 +199,7 @@
       reason: decision.reason ?? "unknown",
       seenAt: now.toISOString(),
       tabId: decision.tabId ?? details.tabId ?? null,
+      targetQuality: decision.targetQuality ?? null,
       type: details.type ?? null,
       url: redactMediaUrl(details.url ?? ""),
     });
@@ -206,24 +236,32 @@
       totalHlsRequests: diagnostics.totalHlsRequests ?? 0,
     };
   }
-  function analyzeDiagnostics(snapshot, { targetQuality = "1080p" } = {}) {
+  function analyzeDiagnostics(snapshot, { qualityCandidates = [] } = {}) {
     const qualities = Object.keys(snapshot?.qualities ?? {});
+    const observedQualities = qualities.sort((a, b) => (qualityNumber(a) ?? 0) - (qualityNumber(b) ?? 0));
     const highestObservedQuality =
-      qualities
+      observedQualities
         .map((quality) => ({ label: quality, value: qualityNumber(quality) }))
         .filter((entry) => entry.value != null)
         .sort((a, b) => b.value - a.value)[0]?.label ?? null;
+    const configuredCandidates = normalizeQualityCandidates(qualityCandidates, {
+      include: highestObservedQuality ? [] : [],
+    });
+    const highestConfiguredQuality = highestQualityCandidate(configuredCandidates);
     const highestObservedNumber = qualityNumber(highestObservedQuality);
-    const targetNumber = qualityNumber(targetQuality);
+    const highestConfiguredNumber = qualityNumber(highestConfiguredQuality);
     const needsPolicyUpdate = Boolean(
-      highestObservedNumber && targetNumber && highestObservedNumber > targetNumber,
+      highestObservedNumber && (!highestConfiguredNumber || highestObservedNumber > highestConfiguredNumber),
     );
+    const suggestedQualityCandidates = needsPolicyUpdate
+      ? normalizeQualityCandidates(configuredCandidates, { include: [highestObservedQuality] })
+      : configuredCandidates;
     return {
+      highestConfiguredQuality,
       highestObservedQuality,
       needsPolicyUpdate,
-      observedQualities: qualities.sort((a, b) => (qualityNumber(a) ?? 0) - (qualityNumber(b) ?? 0)),
-      suggestedTargetQuality: needsPolicyUpdate ? highestObservedQuality : targetQuality,
-      targetQuality,
+      observedQualities,
+      suggestedQualityCandidates,
     };
   }
 
@@ -263,6 +301,11 @@
     return asArray(policy.requestMethods).length > 0
       ? asArray(policy.requestMethods)
       : DEFAULT_REQUEST_METHODS;
+  }
+  function defaultSessionTargetQuality(policy) {
+    return highestQualityCandidate(policy.qualityCandidates, {
+      minRedirectQuality: policy.minRedirectQuality,
+    });
   }
   function sessionRuleIdForTab(tabId, { baseId = DEFAULT_SESSION_RULE_BASE_ID } = {}) {
     if (!Number.isSafeInteger(tabId) || tabId < 0 || tabId >= SESSION_RULE_ID_RANGE) {
@@ -338,33 +381,31 @@
     }
     const quality = parseQualityFromUrl(details.url);
     const current = qualityNumber(quality);
-    const target = qualityNumber(policy.targetQuality);
     const min = qualityNumber(policy.minRedirectQuality ?? "100p");
-    if (!quality || !current || !target || !min) {
+    if (!quality || !current || !min) {
       return { ok: false, reason: "unknown-quality-shape", tabId };
     }
     if (current < min) {
       return { ok: false, quality, reason: "quality-below-minimum", tabId };
     }
-    if (current >= target) {
-      return { ok: false, quality, reason: "target-or-higher-quality", tabId };
-    }
-    return { ok: true, quality, reason: "eligible-lower-quality-chzzk-hls", tabId };
+    return { ok: true, quality, reason: "eligible-chzzk-hls-quality", tabId };
   }
-  function buildScopedSessionRule({ policy, tabId }) {
+  function buildScopedSessionRule({ policy, tabId, targetQuality = defaultSessionTargetQuality(policy) }) {
+    const normalizedTarget = targetQuality ?? defaultSessionTargetQuality(policy);
+    if (!normalizedTarget) throw new Error("session rule target quality is required");
     return {
       id: sessionRuleIdForTab(tabId, { baseId: policy.sessionRuleBaseId ?? DEFAULT_SESSION_RULE_BASE_ID }),
       priority: policy.redirectRulePriority ?? 1,
       action: {
         type: "redirect",
         redirect: {
-          regexSubstitution: `\\1${policy.targetQuality}\\3`,
+          regexSubstitution: `\\1${normalizedTarget}\\3`,
         },
       },
       condition: {
         regexFilter: buildQualityRegexFilter({
           minRedirectQuality: policy.minRedirectQuality,
-          targetQuality: policy.targetQuality,
+          targetQuality: normalizedTarget,
         }),
         initiatorDomains: trustedInitiatorDomains(policy),
         isUrlFilterCaseSensitive: false,
@@ -629,6 +670,7 @@
   var TELEMETRY_POST_TIMEOUT_MS = 2e3;
   var SESSION_RULE_ID_RANGE2 = 1e5;
   var activeRulesByTab = /* @__PURE__ */ new Map();
+  var activeTargetsByTab = /* @__PURE__ */ new Map();
   var diagnosticsMutationQueue = Promise.resolve();
   function extensionIdentity() {
     const manifest = api.runtime.getManifest();
@@ -742,7 +784,9 @@
     });
   }
   async function maybeReportDiagnostics(snapshot, decision) {
-    const analysis = analyzeDiagnostics(snapshot, { targetQuality: quality_policy_default.targetQuality });
+    const analysis = analyzeDiagnostics(snapshot, {
+      qualityCandidates: quality_policy_default.qualityCandidates,
+    });
     const interesting = Boolean(
       analysis.needsPolicyUpdate ||
       snapshot.sessionRules?.lastError ||
@@ -763,6 +807,54 @@
       lastError,
     };
   }
+  function activeTargetCoversObserved(tabId, observedQuality) {
+    const activeTarget = activeTargetsByTab.get(tabId);
+    const activeTargetNumber = qualityNumber(activeTarget);
+    const observedNumber = qualityNumber(observedQuality);
+    return Boolean(activeTargetNumber && observedNumber && activeTargetNumber >= observedNumber);
+  }
+  function probeTimeoutMs() {
+    const configured = Number(quality_policy_default.probeTimeoutMs ?? 1500);
+    return Number.isFinite(configured) && configured > 0 ? configured : 1500;
+  }
+  function isLikelyHlsPlaylist(text) {
+    return /^\s*#EXTM3U/m.test(String(text ?? ""));
+  }
+  async function fetchLooksLikeHlsPlaylist(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), probeTimeoutMs());
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      if (!response.ok) return false;
+      return isLikelyHlsPlaylist(await response.text());
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  async function resolveHighestSupportedQuality(details, observedQuality) {
+    const observedNumber = qualityNumber(observedQuality);
+    if (!observedNumber) return null;
+    const candidates = normalizeQualityCandidates(quality_policy_default.qualityCandidates, {
+      include: [observedQuality],
+      minRedirectQuality: quality_policy_default.minRedirectQuality,
+    });
+    for (const candidate of candidates) {
+      const candidateNumber = qualityNumber(candidate);
+      if (!candidateNumber || candidateNumber < observedNumber) continue;
+      const candidateUrl = replaceQualityInUrl(details.url, candidate);
+      if (!candidateUrl) continue;
+      if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) return candidate;
+      if (await fetchLooksLikeHlsPlaylist(candidateUrl)) return candidate;
+    }
+    return observedQuality;
+  }
   function ownedRuleIdsFromSessionRules(rules) {
     const baseId = quality_policy_default.sessionRuleBaseId ?? 1e5;
     return rules
@@ -777,19 +869,21 @@
       await api.declarativeNetRequest.updateSessionRules({ removeRuleIds });
     }
     activeRulesByTab.clear();
+    activeTargetsByTab.clear();
     await enqueueDiagnosticsMutation((diagnostics) => {
       updateSessionRuleDiagnostics(diagnostics, currentRuleState());
     });
   }
-  async function ensureTabSessionRule(tabId) {
+  async function ensureTabSessionRule(tabId, targetQuality) {
     const ruleId = sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
-    if (activeRulesByTab.get(tabId) === ruleId) return;
-    const rule = buildScopedSessionRule({ policy: quality_policy_default, tabId });
+    if (activeRulesByTab.get(tabId) === ruleId && activeTargetsByTab.get(tabId) === targetQuality) return;
+    const rule = buildScopedSessionRule({ policy: quality_policy_default, tabId, targetQuality });
     await api.declarativeNetRequest.updateSessionRules({
       addRules: [rule],
       removeRuleIds: [ruleId],
     });
     activeRulesByTab.set(tabId, ruleId);
+    activeTargetsByTab.set(tabId, targetQuality);
     await enqueueDiagnosticsMutation((diagnostics) => {
       updateSessionRuleDiagnostics(diagnostics, currentRuleState());
     });
@@ -809,6 +903,7 @@
       activeRulesByTab.get(tabId) ??
       sessionRuleIdForTab(tabId, { baseId: quality_policy_default.sessionRuleBaseId ?? 1e5 });
     activeRulesByTab.delete(tabId);
+    activeTargetsByTab.delete(tabId);
     try {
       await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
       await enqueueDiagnosticsMutation((diagnostics) => {
@@ -827,10 +922,16 @@
   }
   async function handleRequest(details) {
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
-    const decision = shouldBootstrapSessionRule(details, quality_policy_default);
+    let decision = shouldBootstrapSessionRule(details, quality_policy_default);
     if (decision.ok) {
       try {
-        await ensureTabSessionRule(decision.tabId);
+        const targetQuality = activeTargetCoversObserved(decision.tabId, decision.quality)
+          ? activeTargetsByTab.get(decision.tabId)
+          : await resolveHighestSupportedQuality(details, decision.quality);
+        if (targetQuality) {
+          await ensureTabSessionRule(decision.tabId, targetQuality);
+          decision = { ...decision, targetQuality };
+        }
       } catch (error) {
         await reportSessionRuleError(error);
         console.warn("[CHZZK] failed to install session redirect rule", error);

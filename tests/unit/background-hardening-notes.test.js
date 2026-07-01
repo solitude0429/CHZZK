@@ -7,7 +7,7 @@ describe("background hardening invariants", () => {
 
   it("installs session rules before recording/reporting diagnostics", () => {
     const handleRequestIndex = source.indexOf("async function handleRequest(details)");
-    const installIndex = source.indexOf("await ensureTabSessionRule(decision.tabId)", handleRequestIndex);
+    const installIndex = source.indexOf("await ensureTabSessionRule(decision.tabId, targetQuality)", handleRequestIndex);
     const recordIndex = source.indexOf("recordRequestDiagnostics(details, decision)", installIndex);
     assert.ok(handleRequestIndex > -1, "request handler must exist");
     assert.ok(installIndex > -1, "session rule install call must exist");

@@ -7,8 +7,7 @@ npm ci
 npm run verify
 ```
 
-`verify` runs generated-runtime drift checks, manifest/session-DNR validation, ESLint, web-ext lint with warnings as errors,
-unit tests, dependency audit, packaging, and package-content audit.
+`verify` runs generated-runtime drift checks, manifest/session-DNR validation, ESLint, web-ext lint with warnings as errors, unit tests, dependency audit, packaging, and package-content audit.
 
 ## Individual gates
 
@@ -36,13 +35,13 @@ Manual checklist:
 1. Remove or disable NAVER Live Streaming Connector/NLiveConnector on the test PC.
 2. Open a CHZZK live page.
 3. Open the extension popup and confirm `activeTabIds` / `activeRuleIds` initially show `none`.
-4. Start playback and select a lower numeric quality such as 360p, 480p, or 720p.
+4. Start playback and select any numeric quality, such as 360p, 480p, 720p, or 1080p.
 5. Reopen the popup and confirm:
-   - `lastDecision: ok / eligible-lower-quality-chzzk-hls / tab <id>` appears, or
+   - `lastDecision: ok / eligible-chzzk-hls-quality / tab <id>` appears, or
    - a clear blocked reason appears if the request is not eligible.
-6. Confirm the quality menu is not relabeled; there should be no `1080p with CHZZK GRID™` fake item.
-7. Confirm DevTools Network shows subsequent same-tab lower playlist requests redirected to `chunklist_1080p.m3u8` or `/1080p/...m3u8`.
-8. Confirm a synthetic/future lower quality such as `540p` or `900p` is covered by unit tests, not by hand-added DNR alternatives.
+6. Confirm the quality menu is not relabeled; there should be no fake `1080p with CHZZK GRID™` item.
+7. Confirm DevTools Network shows subsequent same-tab lower playlist requests redirected to the resolved maximum supported quality, for example `chunklist_1440p.m3u8` when 1440p is available or `chunklist_1080p.m3u8` when 1080p is the maximum.
+8. Confirm synthetic/future qualities such as `540p`, `900p`, and `1439p` are covered by unit tests, not by hand-added DNR alternatives.
 9. Confirm diagnostics show only redacted HLS URLs and quality counters.
 10. Confirm no cookies, signed URL queries, or tokens are copied into logs or issue reports.
 
