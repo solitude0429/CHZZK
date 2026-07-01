@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -44,6 +44,9 @@ if (!/^user:\d+:\d+$/.test(apiKey)) {
 }
 
 mkdirSync("dist/signed", { recursive: true });
+for (const entry of readdirSync("dist/signed")) {
+  if (entry.endsWith(".xpi")) rmSync(join("dist", "signed", entry), { force: true });
+}
 
 const optionalSignedPackageFiles = ["LICENSE", "NOTICE", "README.md"];
 const requiredSignedRuntimeFiles = [
@@ -63,6 +66,7 @@ const ignoreFiles = [
   "codex-security-scans",
   "docs",
   "node_modules",
+  "ops",
   "package-lock.json",
   "package.json",
   "policy",
@@ -117,19 +121,29 @@ async function verifySignedXpiMatchesSource(xpiPath) {
 
   if (extraEntries.length > 0 || missingRequiredEntries.length > 0) {
     throw new Error(
-      `Existing signed XPI runtime files do not match expectations. Missing required: ${missingRequiredEntries.join(", ") || "none"}. Extra: ${extraEntries.join(", ") || "none"}.`,
+      `Signed XPI runtime files do not match expectations. Missing required: ${missingRequiredEntries.join(", ") || "none"}. Extra: ${extraEntries.join(", ") || "none"}.`,
     );
   }
 
   const comparableEntries = runtimeEntries.filter((entry) => allowedEntries.includes(entry));
   for (const file of comparableEntries) {
     const zipEntry = zip.file(file);
-    if (!zipEntry) throw new Error(`Existing signed XPI is missing ${file}.`);
+    if (!zipEntry) throw new Error(`Signed XPI is missing ${file}.`);
     const [actual, expected] = await Promise.all([zipEntry.async("nodebuffer"), readFile(file)]);
     if (!actual.equals(expected)) {
-      throw new Error(`Existing signed XPI ${file} does not match the current source file.`);
+      throw new Error(`Signed XPI ${file} does not match the current source file.`);
     }
   }
+}
+
+function singleSignedXpiPath() {
+  const files = readdirSync("dist/signed")
+    .filter((entry) => entry.endsWith(".xpi"))
+    .sort();
+  if (files.length !== 1) {
+    throw new Error(`Expected exactly one signed XPI in dist/signed, found ${files.length}.`);
+  }
+  return join("dist", "signed", files[0]);
 }
 
 async function downloadExistingSignedVersionIfPresent() {
@@ -216,6 +230,9 @@ try {
   });
   if (result.error) console.error(result.error.message);
   exitCode = result.status ?? 1;
+  if (exitCode === 0 && process.env.CHZZK_SKIP_SIGNED_XPI_VERIFY !== "1") {
+    await verifySignedXpiMatchesSource(singleSignedXpiPath());
+  }
 } finally {
   rmSync(tempDir, { force: true, recursive: true });
 }

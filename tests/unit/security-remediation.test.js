@@ -25,9 +25,12 @@ import { readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const configArg = args.find((arg) => arg.startsWith("--config="));
+const artifactsArg = args.find((arg) => arg.startsWith("--artifacts-dir="));
 assert.ok(configArg, "web-ext config path is required");
+assert.ok(artifactsArg, "web-ext artifacts dir is required");
 assert.equal(args.some((arg) => arg.startsWith("--api-key")), false);
 assert.equal(args.some((arg) => arg.startsWith("--api-secret")), false);
+assert.equal(args.includes("ops"), true);
 assert.equal(Object.hasOwn(process.env, "WEB_EXT_API_KEY"), false);
 assert.equal(Object.hasOwn(process.env, "WEB_EXT_API_SECRET"), false);
 const config = readFileSync(configArg.slice("--config=".length), "utf8");
@@ -48,6 +51,7 @@ process.exit(${exitCode});
       WEB_EXT_API_KEY: "user:123:456",
       WEB_EXT_API_SECRET: "synthetic-secret-for-cleanup-test",
       CHZZK_REUSE_EXISTING_AMO_VERSION: "0",
+      CHZZK_SKIP_SIGNED_XPI_VERIFY: "1",
     },
   });
   const leftovers = readdirSync(tempRoot).filter((entry) => entry.startsWith("chzzk-web-ext-sign-"));
