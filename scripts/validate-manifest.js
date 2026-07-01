@@ -43,21 +43,25 @@ assert.equal(
   "global static DNR rulesets are forbidden; use tab-scoped session rules instead",
 );
 assert.equal(existsSync(new URL("../rules.json", import.meta.url)), false, "rules.json must not exist");
-assert.ok(
-  manifest.host_permissions.includes("*://chzzk.naver.com/live/*"),
-  "CHZZK live host permission is required",
+assert.deepEqual(
+  manifest.host_permissions,
+  ["https://*.akamaized.net/*", "https://*.navercdn.com/*", "https://*.pstatic.net/*"],
+  "host permissions must be limited to the trusted HLS CDN origins that webRequest/DNR need",
 );
-assert.ok(
-  manifest.host_permissions.includes("https://chzzk-report.alpha-apple.dedyn.io/report"),
-  "CHZZK telemetry collector permission is required",
+assert.equal(
+  manifest.host_permissions.some((permission) => permission.includes("chzzk.naver.com")),
+  false,
+  "CHZZK page access must be declared only once via content_scripts.matches, not duplicated in host_permissions",
+);
+assert.equal(
+  manifest.host_permissions.some((permission) => permission.includes("chzzk-report")),
+  false,
+  "external diagnostics collector host permission must not be requested",
 );
 assert.deepEqual(
   manifest.browser_specific_settings?.gecko?.data_collection_permissions,
-  {
-    required: ["websiteContent"],
-    optional: ["technicalAndInteraction"],
-  },
-  "manifest must declare CHZZK-only website structure collection and optional technical reports",
+  { required: ["none"] },
+  "manifest must declare no external data collection/transmission",
 );
 assert.equal(
   manifest.browser_specific_settings?.gecko?.update_url,

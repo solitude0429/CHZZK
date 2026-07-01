@@ -5,10 +5,7 @@
       "id": "chzzk@solitude0429.local",
       "data_collection_permissions": {
         "required": [
-          "websiteContent"
-        ],
-        "optional": [
-          "technicalAndInteraction"
+          "none"
         ]
       },
       "strict_min_version": "140.0",
@@ -19,7 +16,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "permissions": [
     "declarativeNetRequest",
     "storage",
@@ -27,11 +24,9 @@
     "webRequestBlocking"
   ],
   "host_permissions": [
-    "*://*.akamaized.net/*",
-    "*://*.navercdn.com/*",
-    "*://*.pstatic.net/*",
-    "*://chzzk.naver.com/live/*",
-    "https://chzzk-report.alpha-apple.dedyn.io/report"
+    "https://*.akamaized.net/*",
+    "https://*.navercdn.com/*",
+    "https://*.pstatic.net/*"
   ],
   "content_scripts": [
     {

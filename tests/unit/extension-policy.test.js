@@ -64,6 +64,27 @@ describe("personal CHZZK extension policy", () => {
     assert.equal(runtimeText.includes("pzp-setting-quality-pane"), false);
   });
 
+
+  it("does not duplicate CHZZK page access or request data-collection consent", () => {
+    assert.deepEqual(manifest.host_permissions, [
+      "https://*.akamaized.net/*",
+      "https://*.navercdn.com/*",
+      "https://*.pstatic.net/*",
+    ]);
+    assert.deepEqual(manifest.browser_specific_settings?.gecko?.data_collection_permissions, {
+      required: ["none"],
+    });
+
+    const runtimeText = [
+      readFileSync(new URL("../../src/runtime/background.js", import.meta.url), "utf8"),
+      readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8"),
+      readFileSync(new URL("../../diagnostics.html", import.meta.url), "utf8"),
+    ].join("\n");
+    assert.equal(runtimeText.includes("chzzk-report"), false);
+    assert.equal(runtimeText.includes("Telemetry collector"), false);
+    assert.equal(runtimeText.includes("MutationObserver"), false);
+  });
+
   it("uses size-matched official CHZZK favicon PNGs as extension icons", () => {
     assert.deepEqual(manifest.icons, {
       32: "icon-32.png",
