@@ -6,7 +6,7 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 
 - Watches trusted CHZZK live HLS playlist requests only.
 - Probes configured quality candidates from highest to lowest.
-- Redirects trusted numeric playlist requests through MV2 required-permission `webRequestBlocking` handling and caches the resolved maximum quality per tab while the tab is open.
+- Prewarms CHZZK live tabs at `document_start`, then redirects trusted numeric playlist requests through MV2 required-permission `webRequestBlocking` handling and caches the resolved maximum quality per tab while the tab is open.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
 - Keeps signed CDN query strings out of local diagnostics.
 
@@ -31,7 +31,7 @@ Current candidate order:
 2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p
 ```
 
-Runtime redirects are constrained by tab, CHZZK live context, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset; the persistent MV2 background redirects each eligible playlist request through `webRequestBlocking` and caches the highest supported target per tab.
+Runtime redirects are constrained by tab, CHZZK live context or prewarmed live-tab state, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset; a minimal MV2 content script only sends a live-page-ready prewarm message, and the persistent MV2 background redirects eligible playlist requests through `webRequestBlocking`.
 
 ## Build and verify
 
@@ -51,7 +51,7 @@ npm test
 npm run build
 ```
 
-Generated runtime files are `background.js` and `diagnostics.js`. Edit `src/`, `policy/`, or tests, then run `npm run build:runtime`.
+Generated runtime files are `background.js`, `diagnostics.js`, and `site-observer.js`. Edit `src/`, `policy/`, or tests, then run `npm run build:runtime`.
 
 ## Install
 

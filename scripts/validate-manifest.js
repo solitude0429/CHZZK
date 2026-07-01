@@ -13,21 +13,25 @@ assert.equal(manifest.version, packageJson.version, "manifest version must match
 assert.deepEqual(
   manifest.permissions,
   [
-    "storage",
-    "webRequest",
-    "webRequestBlocking",
     "https://*.akamaized.net/*",
+    "https://chzzk.naver.com/live/*",
     "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
     "https://*.pstatic.net/*",
-    "https://chzzk.naver.com/live/*",
+    "storage",
+    "webRequest",
+    "webRequestBlocking",
   ],
   "MV2 must declare all core API and origin access as required permissions",
 );
 assert.ok(!manifest.permissions.includes("declarativeNetRequest"), "DNR must not be used in the MV2 build");
 assert.ok(!manifest.permissions.includes("scripting"), "scripting permission must not be needed");
 assert.equal(manifest.host_permissions, undefined, "MV2 build must not expose revocable host_permissions");
-assert.equal(manifest.content_scripts, undefined, "MV2 build must not expose a revocable content-script site toggle");
+assert.deepEqual(
+  manifest.content_scripts,
+  [{ js: ["site-observer.js"], matches: ["https://chzzk.naver.com/live/*"], run_at: "document_start" }],
+  "MV2 content script must be required install-time CHZZK live access for first-request prewarm only",
+);
 assert.equal(manifest.optional_permissions, undefined, "optional permissions must not be used for core functionality");
 assert.equal(manifest.optional_host_permissions, undefined, "optional host permissions must not be used for core functionality");
 assert.equal(

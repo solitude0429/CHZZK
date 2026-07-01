@@ -8,9 +8,11 @@ import {
 import {
   configuredResourceTypes,
   configuredWebRequestUrls,
+  isChzzkLiveUrl,
   isValidRedirectTabId,
   shouldRecordDiagnostics,
   shouldRedirectRequest,
+  startupRedirectTargetQuality,
 } from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
@@ -132,6 +134,10 @@ async function reportRedirectError(error) {
   await updateRedirectDiagnostics(String(error?.message ?? error));
 }
 
+async function prewarmTabTarget(tabId) {
+  await setTabTarget(tabId, startupRedirectTargetQuality(policy));
+}
+
 async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
   if (!isValidRedirectTabId(tabId) || !targetQuality) return;
   const previous = activeTargetsByTab.get(tabId);
@@ -160,22 +166,34 @@ async function recordRequestDiagnostics(details, decision) {
   });
 }
 
+async function resolveAndStoreHighestTarget(details, decision) {
+  const targetQuality = await resolveHighestSupportedQuality(details, decision.quality);
+  if (targetQuality) await setTabTarget(decision.tabId, targetQuality, { resolved: true });
+  return targetQuality;
+}
+
 async function handleRequest(details) {
-  const shouldRecord = shouldRecordDiagnostics(details, policy);
-  let decision = shouldRedirectRequest(details, policy);
+  const redirectOptions = { trustedLiveTabIds: activeTargetsByTab };
+  const shouldRecord = shouldRecordDiagnostics(details, policy, redirectOptions);
+  let decision = shouldRedirectRequest(details, policy, redirectOptions);
   let redirectUrl = null;
 
   if (decision.ok) {
     try {
-      const targetQuality = resolvedTargetCoversObserved(decision.tabId, decision.quality)
-        ? activeTargetsByTab.get(decision.tabId)
-        : await resolveHighestSupportedQuality(details, decision.quality);
+      let targetQuality = activeTargetsByTab.get(decision.tabId);
+      if (!targetQuality) {
+        targetQuality = await resolveAndStoreHighestTarget(details, decision);
+      } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
+        resolveAndStoreHighestTarget(details, decision).catch((error) => {
+          reportRedirectError(error).catch(() => {});
+          console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+        });
+      }
       if (targetQuality) {
         redirectUrl = buildHighestQualityRedirectUrl(details.url, {
           minRedirectQuality: policy.minRedirectQuality,
           targetQuality,
         });
-        await setTabTarget(decision.tabId, targetQuality, { resolved: true });
         decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
       }
     } catch (error) {
@@ -205,6 +223,21 @@ api.webRequest.onBeforeRequest.addListener(
   },
   ["blocking"],
 );
+
+api.runtime.onMessage?.addListener((message, sender) => {
+  if (message?.type !== "chzzk.live-page-ready") return undefined;
+  const tabId = sender?.tab?.id;
+  const tabUrl = sender?.url ?? sender?.tab?.url;
+  if (!isValidRedirectTabId(tabId) || !isChzzkLiveUrl(tabUrl, policy)) return undefined;
+  prewarmTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm tab target", error));
+  return undefined;
+});
+
+api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+  if (changeInfo?.url && !isChzzkLiveUrl(changeInfo.url, policy)) {
+    removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to clear tab target", error));
+  }
+});
 
 api.tabs?.onRemoved?.addListener((tabId) => {
   removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to remove tab target", error));

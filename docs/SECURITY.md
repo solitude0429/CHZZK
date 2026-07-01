@@ -12,11 +12,11 @@ This extension observes CHZZK live-page HLS playlist requests only to redirect e
 ## Controls
 
 - No `scripting` permission and no page-DOM mutation.
-- No content script is packaged; the extension does not mutate or query the CHZZK page DOM.
+- `site-observer.js` is the only content script; it is scoped to CHZZK live pages, sends only a live-page-ready prewarm message, and does not mutate or query the page DOM.
 - No external telemetry/data collector is used by the extension runtime.
 - The Firefox manifest declares no data collection/transmission with `data_collection_permissions.required: ["none"]`.
 - Firefox MV2 required permissions include CHZZK live pages and trusted HLS CDN origins needed by `webRequest`, HLS availability probes, and redirects.
-- No `host_permissions`, `content_scripts`, or optional host permission surface is used for core functionality.
+- No `host_permissions` or optional host permission surface is used for core functionality; the MV2 content script match is required install-time CHZZK live access.
 - Local diagnostics storage mutations are serialized to avoid local read-modify-write races during HLS bursts.
 - No global static or session DNR ruleset.
 - Redirect handling is constrained by tab, CHZZK live context, trusted request domains, request methods, and resource types.

@@ -17,11 +17,26 @@ describe("personal CHZZK extension policy", () => {
       "webRequest permission should be used only for local diagnostics and required HLS redirect handling",
     );
     assert.ok(!manifest.permissions?.includes("scripting"), "scripting permission should not be needed");
-    assert.equal(manifest.content_scripts, undefined, "MV2 build must not create a revocable site-access content-script toggle");
+    assert.deepEqual(
+      manifest.content_scripts,
+      [
+        {
+          js: ["site-observer.js"],
+          matches: ["https://chzzk.naver.com/live/*"],
+          run_at: "document_start",
+        },
+      ],
+      "MV2 content script is required install-time access and must only prewarm the background redirect target",
+    );
     assert.equal(
       existsSync(new URL("../../inject.js", import.meta.url)),
       false,
       "no page script should be packaged",
+    );
+    assert.equal(
+      readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8").includes("querySelector"),
+      false,
+      "site observer must not query or control the player DOM",
     );
     assert.deepEqual(
       manifest.background,
@@ -35,7 +50,7 @@ describe("personal CHZZK extension policy", () => {
     assert.equal(manifest.host_permissions, undefined);
     assert.equal(manifest.optional_permissions, undefined);
     assert.equal(manifest.optional_host_permissions, undefined);
-    assert.equal(manifest.content_scripts, undefined);
+    assert.equal(manifest.content_scripts?.[0]?.js?.[0], "site-observer.js");
     assert.equal(
       existsSync(new URL("../../rules.json", import.meta.url)),
       false,
@@ -58,14 +73,14 @@ describe("personal CHZZK extension policy", () => {
 
   it("declares CHZZK and HLS origins as required MV2 permissions", () => {
     assert.deepEqual(manifest.permissions, [
-      "storage",
-      "webRequest",
-      "webRequestBlocking",
       "https://*.akamaized.net/*",
+      "https://chzzk.naver.com/live/*",
       "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
-      "https://chzzk.naver.com/live/*",
+      "storage",
+      "webRequest",
+      "webRequestBlocking",
     ]);
     assert.deepEqual(manifest.browser_specific_settings?.gecko?.data_collection_permissions, {
       required: ["none"],
@@ -73,6 +88,7 @@ describe("personal CHZZK extension policy", () => {
 
     const runtimeText = [
       readFileSync(new URL("../../src/runtime/background.js", import.meta.url), "utf8"),
+      readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8"),
       readFileSync(new URL("../../diagnostics.html", import.meta.url), "utf8"),
     ].join("\n");
     assert.equal(runtimeText.includes("chzzk-report"), false);

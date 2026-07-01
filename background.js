@@ -14,12 +14,14 @@
     probeTimeoutMs: 1500,
     notes: [
       "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
-      "The persistent background page uses blocking webRequest to redirect each trusted numeric HLS playlist request; no DNR session or static ruleset is shipped.",
+      "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
+      "The persistent background page prewarms a safe per-tab startup redirect target before the first HLS playlist request, then uses blocking webRequest to redirect trusted numeric playlist requests.",
       "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
       "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted domain, and tab context all constrain redirects.",
+      "Request URL, initiator, method, resource type, trusted domain, and tab context or prewarmed live-tab state all constrain redirects.",
     ],
+    startupTargetQuality: "1080p",
   };
 
   // src/shared/quality.js
@@ -222,6 +224,9 @@
       ? asArray(policy.requestMethods)
       : DEFAULT_REQUEST_METHODS;
   }
+  function startupRedirectTargetQuality(policy) {
+    return policy.startupTargetQuality ?? "1080p";
+  }
   function isValidRedirectTabId(tabId) {
     return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
   }
@@ -247,8 +252,9 @@
       return false;
     }
   }
-  function isTrustedChzzkContext(details, policy) {
+  function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
+    if (trustedLiveTabIds?.has?.(details.tabId)) return true;
     if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
     if (isChzzkLiveUrl(details.originUrl, policy)) return true;
     const initiatorDomain = canonicalDomainFromUrl(details.initiator);
@@ -261,13 +267,13 @@
       [details.documentUrl, details.originUrl].some((url) => isChzzkLiveUrl(url, policy)),
     );
   }
-  function shouldRecordDiagnostics(details, policy) {
+  function shouldRecordDiagnostics(details, policy, options = {}) {
     if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
     if (!isValidRedirectTabId(details.tabId)) return false;
     if (!isTrustedRequestDomain(details.url, policy)) return false;
-    return isTrustedChzzkContext(details, policy);
+    return isTrustedChzzkContext(details, policy, options);
   }
-  function shouldRedirectRequest(details, policy) {
+  function shouldRedirectRequest(details, policy, options = {}) {
     const tabId = details?.tabId;
     if (!isValidRedirectTabId(tabId)) {
       return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
@@ -284,7 +290,7 @@
     if (!isTrustedRequestDomain(details.url, policy)) {
       return { ok: false, reason: "untrusted-request-domain", tabId };
     }
-    if (!isTrustedChzzkContext(details, policy)) {
+    if (!isTrustedChzzkContext(details, policy, options)) {
       return { ok: false, reason: "untrusted-initiator", tabId };
     }
     const quality = parseQualityFromUrl(details.url);
@@ -403,6 +409,9 @@
   async function reportRedirectError(error) {
     await updateRedirectDiagnostics(String(error?.message ?? error));
   }
+  async function prewarmTabTarget(tabId) {
+    await setTabTarget(tabId, startupRedirectTargetQuality(quality_policy_default));
+  }
   async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
     if (!isValidRedirectTabId(tabId) || !targetQuality) return;
     const previous = activeTargetsByTab.get(tabId);
@@ -427,21 +436,32 @@
       recordDecision(current, decision, details);
     });
   }
+  async function resolveAndStoreHighestTarget(details, decision) {
+    const targetQuality = await resolveHighestSupportedQuality(details, decision.quality);
+    if (targetQuality) await setTabTarget(decision.tabId, targetQuality, { resolved: true });
+    return targetQuality;
+  }
   async function handleRequest(details) {
-    const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
-    let decision = shouldRedirectRequest(details, quality_policy_default);
+    const redirectOptions = { trustedLiveTabIds: activeTargetsByTab };
+    const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default, redirectOptions);
+    let decision = shouldRedirectRequest(details, quality_policy_default, redirectOptions);
     let redirectUrl = null;
     if (decision.ok) {
       try {
-        const targetQuality = resolvedTargetCoversObserved(decision.tabId, decision.quality)
-          ? activeTargetsByTab.get(decision.tabId)
-          : await resolveHighestSupportedQuality(details, decision.quality);
+        let targetQuality = activeTargetsByTab.get(decision.tabId);
+        if (!targetQuality) {
+          targetQuality = await resolveAndStoreHighestTarget(details, decision);
+        } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
+          resolveAndStoreHighestTarget(details, decision).catch((error) => {
+            reportRedirectError(error).catch(() => {});
+            console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+          });
+        }
         if (targetQuality) {
           redirectUrl = buildHighestQualityRedirectUrl(details.url, {
             minRedirectQuality: quality_policy_default.minRedirectQuality,
             targetQuality,
           });
-          await setTabTarget(decision.tabId, targetQuality, { resolved: true });
           decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
         }
       } catch (error) {
@@ -468,6 +488,19 @@
     },
     ["blocking"],
   );
+  api.runtime.onMessage?.addListener((message, sender) => {
+    if (message?.type !== "chzzk.live-page-ready") return void 0;
+    const tabId = sender?.tab?.id;
+    const tabUrl = sender?.url ?? sender?.tab?.url;
+    if (!isValidRedirectTabId(tabId) || !isChzzkLiveUrl(tabUrl, quality_policy_default)) return void 0;
+    prewarmTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm tab target", error));
+    return void 0;
+  });
+  api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+    if (changeInfo?.url && !isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
+      removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to clear tab target", error));
+    }
+  });
   api.tabs?.onRemoved?.addListener((tabId) => {
     removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to remove tab target", error));
   });
