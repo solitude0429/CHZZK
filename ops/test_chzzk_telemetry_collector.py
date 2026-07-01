@@ -25,7 +25,7 @@ def safe_report() -> dict:
         "addonId": "chzzk@solitude0429.local",
         "auth": {"scheme": collector.AUTH_SCHEME},
         "eventType": "diagnostics-summary",
-        "extensionVersion": "0.0.7",
+        "extensionVersion": "0.0.8",
         "installId": INSTALL_ID,
         "schemaVersion": 1,
         "scope": "chzzk-live",
