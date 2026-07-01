@@ -7,7 +7,7 @@ describe("background hardening invariants", () => {
 
   it("installs session rules before recording/reporting diagnostics", () => {
     const handleRequestIndex = source.indexOf("async function handleRequest(details)");
-    const installIndex = source.indexOf("await ensureTabSessionRule(decision.tabId, targetQuality)", handleRequestIndex);
+    const installIndex = source.indexOf("await ensureTabSessionRule(decision.tabId, targetQuality, { resolved: true })", handleRequestIndex);
     const recordIndex = source.indexOf("recordRequestDiagnostics(details, decision)", installIndex);
     assert.ok(handleRequestIndex > -1, "request handler must exist");
     assert.ok(installIndex > -1, "session rule install call must exist");
@@ -19,6 +19,13 @@ describe("background hardening invariants", () => {
     assert.match(source, /buildHighestQualityRedirectUrl\(details\.url/);
     assert.match(source, /return redirectUrl \? \{ redirectUrl \} : undefined/);
     assert.match(source, /\["blocking"\]/);
+  });
+
+
+  it("prewarms a safe tab-scoped rule as soon as a CHZZK live page starts", () => {
+    assert.match(source, /prewarmTabSessionRule/);
+    assert.match(source, /chzzk\.live-page-ready/);
+    assert.match(source, /resolvedTargetsByTab/);
   });
 
   it("gates external telemetry through settings and timeout", () => {
