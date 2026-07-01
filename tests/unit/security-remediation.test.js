@@ -47,6 +47,7 @@ process.exit(${exitCode});
       TMPDIR: tempRoot,
       WEB_EXT_API_KEY: "user:123:456",
       WEB_EXT_API_SECRET: "synthetic-secret-for-cleanup-test",
+      CHZZK_REUSE_EXISTING_AMO_VERSION: "0",
     },
   });
   const leftovers = readdirSync(tempRoot).filter((entry) => entry.startsWith("chzzk-web-ext-sign-"));

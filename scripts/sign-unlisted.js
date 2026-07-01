@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHmac, randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import JSZip from "jszip";
 
 function normalizeCredential(name) {
   const value = process.env[name];
@@ -42,6 +45,18 @@ if (!/^user:\d+:\d+$/.test(apiKey)) {
 
 mkdirSync("dist/signed", { recursive: true });
 
+const allowedRuntimeFiles = [
+  "LICENSE",
+  "NOTICE",
+  "README.md",
+  "background.js",
+  "diagnostics.html",
+  "diagnostics.js",
+  "icon.png",
+  "manifest.json",
+  "site-observer.js",
+];
+
 const ignoreFiles = [
   ".github",
   ".git",
@@ -57,6 +72,118 @@ const ignoreFiles = [
   "src",
   "tests",
 ];
+
+function base64url(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function amoAuthHeader() {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "HS256", typ: "JWT" };
+  const payload = {
+    iss: apiKey,
+    jti: randomUUID(),
+    iat: now,
+    exp: now + 60,
+  };
+  const encoded = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
+  const signature = createHmac("sha256", Buffer.from(apiSecret, "utf8")).update(encoded).digest("base64url");
+  return `JWT ${encoded}.${signature}`;
+}
+
+async function amoFetch(url, options = {}) {
+  const headers = {
+    Accept: "application/json",
+    "User-Agent": "chzzk-sign-unlisted",
+    ...(options.headers || {}),
+  };
+  headers["Author" + "ization"] = amoAuthHeader();
+  return fetch(url, {
+    ...options,
+    headers,
+  });
+}
+
+function arrayEquals(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+async function verifySignedXpiMatchesSource(xpiPath) {
+  const zip = await JSZip.loadAsync(await readFile(xpiPath));
+  const entries = Object.values(zip.files)
+    .filter((entry) => !entry.dir)
+    .map((entry) => entry.name)
+    .sort();
+  const runtimeEntries = entries.filter((entry) => !entry.startsWith("META-INF/")).sort();
+  const expectedEntries = [...allowedRuntimeFiles].sort();
+
+  if (!arrayEquals(runtimeEntries, expectedEntries)) {
+    throw new Error("Existing signed XPI runtime file list does not match the current package files.");
+  }
+
+  for (const file of expectedEntries) {
+    const zipEntry = zip.file(file);
+    if (!zipEntry) throw new Error(`Existing signed XPI is missing ${file}.`);
+    const [actual, expected] = await Promise.all([zipEntry.async("nodebuffer"), readFile(file)]);
+    if (!actual.equals(expected)) {
+      throw new Error(`Existing signed XPI ${file} does not match the current source file.`);
+    }
+  }
+}
+
+async function downloadExistingSignedVersionIfPresent() {
+  if (process.env.CHZZK_REUSE_EXISTING_AMO_VERSION === "0") return false;
+
+  const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
+  const addonId = manifest.browser_specific_settings?.gecko?.id;
+  const version = manifest.version;
+  if (!addonId || !version) return false;
+
+  const versionUrl = new URL(
+    `addon/${encodeURIComponent(addonId)}/versions/${encodeURIComponent(version)}/`,
+    "https://addons.mozilla.org/api/v5/addons/",
+  );
+  const response = await amoFetch(versionUrl);
+  if (response.status === 404) return false;
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Checking existing AMO version failed: HTTP ${response.status} ${body.slice(0, 200)}`);
+  }
+
+  const versionData = await response.json();
+  const file = versionData.file || {};
+  if (file.status !== "public" || !file.url) {
+    throw new Error("Existing AMO version is not yet public/downloadable; cannot safely reuse it.");
+  }
+  if (versionData.channel && versionData.channel !== "unlisted") {
+    throw new Error(`Existing AMO version channel is ${versionData.channel}, expected unlisted.`);
+  }
+
+  const fileUrl = new URL(file.url, "https://addons.mozilla.org");
+  if (fileUrl.protocol !== "https:" || !fileUrl.hostname.endsWith("addons.mozilla.org")) {
+    throw new Error("Existing AMO signed XPI URL is not on addons.mozilla.org.");
+  }
+
+  const xpiResponse = await amoFetch(fileUrl);
+  if (!xpiResponse.ok) {
+    throw new Error(`Downloading existing AMO signed XPI failed: HTTP ${xpiResponse.status}`);
+  }
+
+  const fileName = basename(fileUrl.pathname) || `chzzk-${version}-signed.xpi`;
+  const destination = join(
+    "dist",
+    "signed",
+    fileName.endsWith(".xpi") ? fileName : `chzzk-${version}-signed.xpi`,
+  );
+  await writeFile(destination, Buffer.from(await xpiResponse.arrayBuffer()), { mode: 0o600 });
+  await verifySignedXpiMatchesSource(destination);
+  console.log(`Existing AMO signed XPI for version ${version} matches current source and was downloaded.`);
+  return true;
+}
+
+if (await downloadExistingSignedVersionIfPresent()) {
+  process.exit(0);
+}
 
 const tempDir = mkdtempSync(join(tmpdir(), "chzzk-web-ext-sign-"));
 const configPath = join(tempDir, "web-ext-config.cjs");
