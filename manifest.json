@@ -4,8 +4,12 @@
     "gecko": {
       "id": "chzzk@solitude0429.local",
       "data_collection_permissions": {
-        "required": ["websiteContent"],
-        "optional": ["technicalAndInteraction"]
+        "required": [
+          "websiteContent"
+        ],
+        "optional": [
+          "technicalAndInteraction"
+        ]
       },
       "strict_min_version": "140.0",
       "update_url": "https://chzzk-updates.alpha-apple.dedyn.io/updates.json"
@@ -16,8 +20,13 @@
   },
   "name": "CHZZK",
   "description": "Personal Firefox extension that installs tab-scoped session redirects for trusted CHZZK HLS quality requests.",
-  "version": "0.0.9",
-  "permissions": ["declarativeNetRequest", "storage", "webRequest"],
+  "version": "0.0.10",
+  "permissions": [
+    "declarativeNetRequest",
+    "storage",
+    "webRequest",
+    "webRequestBlocking"
+  ],
   "host_permissions": [
     "*://*.akamaized.net/*",
     "*://*.navercdn.com/*",
@@ -27,13 +36,19 @@
   ],
   "content_scripts": [
     {
-      "matches": ["https://chzzk.naver.com/live/*"],
-      "js": ["site-observer.js"],
+      "matches": [
+        "https://chzzk.naver.com/live/*"
+      ],
+      "js": [
+        "site-observer.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "icons": {
     "32": "icon.png"

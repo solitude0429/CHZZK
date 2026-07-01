@@ -29,6 +29,8 @@
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
   var URL_QUALITY_RE = /(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i;
+  var SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
+  var HIGH_ENTROPY_PATH_SEGMENT_RE = /(?:[a-z0-9_-]{24,}|[a-f0-9]{16,})/i;
   function normalizeQualityLabel(value) {
     if (typeof value !== "string") return null;
     const resolutionMatch = value.match(RESOLUTION_RE);
@@ -59,6 +61,18 @@
     try {
       const parsed = new URL(url);
       const hadSensitiveTail = parsed.search || parsed.hash;
+      parsed.pathname = parsed.pathname
+        .split("/")
+        .map((segment) => {
+          if (!segment) return segment;
+          if (/^\d{3,4}p$/i.test(segment)) return segment;
+          if (/\.m3u8$/i.test(segment) && !HIGH_ENTROPY_PATH_SEGMENT_RE.test(segment)) return segment;
+          if (SENSITIVE_PATH_SEGMENT_RE.test(segment) || HIGH_ENTROPY_PATH_SEGMENT_RE.test(segment)) {
+            return "[redacted-path]";
+          }
+          return segment;
+        })
+        .join("/");
       parsed.search = "";
       parsed.hash = "";
       return `${parsed.toString()}${hadSensitiveTail ? "?[redacted]" : ""}`;
@@ -147,6 +161,13 @@
     const replaced = url.replace(URL_QUALITY_RE, `$1${normalizedTarget}$3`);
     if (replaced === url && normalizedTarget !== currentQuality) return null;
     return replaced;
+  }
+  function buildHighestQualityRedirectUrl(url, { targetQuality, minRedirectQuality = "100p" } = {}) {
+    const currentQuality = qualityNumber(parseQualityFromUrl(url));
+    const target = qualityNumber(targetQuality);
+    const min = qualityNumber(minRedirectQuality);
+    if (!currentQuality || !target || !min || currentQuality < min || currentQuality >= target) return null;
+    return replaceQualityInUrl(url, targetQuality);
   }
 
   // src/shared/diagnostics.js
@@ -923,18 +944,23 @@
   async function handleRequest(details) {
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default);
     let decision = shouldBootstrapSessionRule(details, quality_policy_default);
+    let redirectUrl = null;
     if (decision.ok) {
       try {
         const targetQuality = activeTargetCoversObserved(decision.tabId, decision.quality)
           ? activeTargetsByTab.get(decision.tabId)
           : await resolveHighestSupportedQuality(details, decision.quality);
         if (targetQuality) {
+          redirectUrl = buildHighestQualityRedirectUrl(details.url, {
+            minRedirectQuality: quality_policy_default.minRedirectQuality,
+            targetQuality,
+          });
           await ensureTabSessionRule(decision.tabId, targetQuality);
-          decision = { ...decision, targetQuality };
+          decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
         }
       } catch (error) {
         await reportSessionRuleError(error);
-        console.warn("[CHZZK] failed to install session redirect rule", error);
+        console.warn("[CHZZK] failed to redirect/install session redirect rule", error);
       }
     }
     if (shouldRecord) {
@@ -942,17 +968,19 @@
         console.warn("[CHZZK] diagnostics recording/reporting failed", error),
       );
     }
+    return redirectUrl ? { redirectUrl } : void 0;
   }
   api.webRequest.onBeforeRequest.addListener(
-    (details) => {
-      handleRequest(details).catch((error) =>
-        console.warn("[CHZZK] diagnostics/session bootstrap failed", error),
-      );
-    },
+    (details) =>
+      handleRequest(details).catch((error) => {
+        console.warn("[CHZZK] diagnostics/session bootstrap failed", error);
+        return void 0;
+      }),
     {
       urls: ["*://*.akamaized.net/*", "*://*.navercdn.com/*", "*://*.pstatic.net/*"],
       types: quality_policy_default.resourceTypes,
     },
+    ["blocking"],
   );
   api.runtime.onMessage?.addListener((message, sender) => {
     if (message?.type !== "chzzk.telemetry.report" || message?.scope !== TELEMETRY_SCOPE) return false;

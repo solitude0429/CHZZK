@@ -15,6 +15,12 @@ describe("background hardening invariants", () => {
     assert.ok(installIndex < recordIndex, "redirect bootstrap should not wait behind telemetry");
   });
 
+  it("uses blocking webRequest redirect so the first playlist request is not missed", () => {
+    assert.match(source, /buildHighestQualityRedirectUrl\(details\.url/);
+    assert.match(source, /return redirectUrl \? \{ redirectUrl \} : undefined/);
+    assert.match(source, /\["blocking"\]/);
+  });
+
   it("gates external telemetry through settings and timeout", () => {
     assert.match(source, /isTelemetryEventEnabled\(settings, enriched\.eventType\)/);
     assert.match(source, /TELEMETRY_POST_TIMEOUT_MS/);

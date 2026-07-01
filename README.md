@@ -6,7 +6,7 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 
 - Watches trusted CHZZK live HLS playlist requests only.
 - Probes configured quality candidates from highest to lowest.
-- Installs a tab-scoped session DNR rule that redirects numeric playlist requests below the resolved maximum to that maximum quality.
+- Redirects the current numeric playlist request and installs a tab-scoped session DNR rule for later requests below the resolved maximum.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
 - Keeps signed CDN query strings out of diagnostics and telemetry.
 

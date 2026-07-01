@@ -36,6 +36,12 @@ describe("highest-supported-quality helpers", () => {
       redactMediaUrl("https://example.test/1080p/chunklist.m3u8?Policy=example#frag"),
       "https://example.test/1080p/chunklist.m3u8?[redacted]",
     );
+    assert.equal(
+      redactMediaUrl(
+        "https://example.test/live/480p/hdntl=st%3d1%7ehmac%3dabcdefabcdefabcdefabcdef/signedtoken1234567890abcdef_chunklist.m3u8",
+      ),
+      "https://example.test/live/480p/[redacted-path]/[redacted-path]",
+    );
   });
 
   it("orders configured quality candidates by numeric quality", () => {

@@ -20,6 +20,10 @@ assert.ok(
   manifest.permissions.includes("webRequest"),
   "webRequest permission is required for local diagnostics and session-rule bootstrap",
 );
+assert.ok(
+  manifest.permissions.includes("webRequestBlocking"),
+  "webRequestBlocking permission is required to redirect the first observed HLS playlist request",
+);
 assert.ok(!manifest.permissions.includes("scripting"), "scripting permission must not be needed");
 assert.deepEqual(
   manifest.content_scripts,
