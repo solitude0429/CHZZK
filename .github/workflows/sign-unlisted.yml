@@ -91,6 +91,44 @@ jobs:
             console.log(JSON.stringify({ name, status: response.status, ok: response.ok, detail }, null, 2));
           }
 
+          async function inspectExistingVersion(payload) {
+            const jwt = signJwt(payload, apiSecret);
+            const manifest = require("./manifest.json");
+            const addonId = manifest.browser_specific_settings.gecko.id;
+            const version = manifest.version;
+            const url = `https://addons.mozilla.org/api/v5/addons/addon/${encodeURIComponent(addonId)}/versions/${encodeURIComponent(version)}/`;
+            const response = await fetch(url, {
+              headers: {
+                Authorization: `JWT ${jwt}`,
+                Accept: "application/json",
+                "User-Agent": "chzzk-amo-auth-diagnostics",
+              },
+            });
+            let parsed = null;
+            try {
+              parsed = await response.json();
+            } catch {
+              parsed = null;
+            }
+            const file = parsed && parsed.file ? parsed.file : null;
+            console.log(
+              JSON.stringify(
+                {
+                  name: "existing-version-inspection",
+                  status: response.status,
+                  ok: response.ok,
+                  top_level_keys: parsed ? Object.keys(parsed).sort() : [],
+                  file_keys: file ? Object.keys(file).sort() : [],
+                  file_status: file ? file.status || null : null,
+                  file_url_present: Boolean(file && file.url),
+                  edit_url_present: Boolean(parsed && parsed.edit_url),
+                },
+                null,
+                2,
+              ),
+            );
+          }
+
           const issuerInfo = normalize(process.env.WEB_EXT_API_KEY);
           const secretInfo = normalize(process.env.WEB_EXT_API_SECRET);
           const apiKey = issuerInfo.value;
@@ -111,9 +149,11 @@ jobs:
           console.log(JSON.stringify({ local_sanity: diagnostics }, null, 2));
           if (!apiKey || !apiSecret) process.exit(0);
 
+          const docsStylePayload = { iss: apiKey, jti: crypto.randomUUID(), iat: now, exp: now + 60 };
           await probe("web-ext-style-jwt-prefix", { iss: apiKey, iat: now, exp: now + 300 }, "JWT");
-          await probe("docs-style-jti-jwt-prefix", { iss: apiKey, jti: crypto.randomUUID(), iat: now, exp: now + 60 }, "JWT");
+          await probe("docs-style-jti-jwt-prefix", docsStylePayload, "JWT");
           await probe("docs-style-jti-no-prefix", { iss: apiKey, jti: crypto.randomUUID(), iat: now, exp: now + 60 }, "");
+          await inspectExistingVersion(docsStylePayload);
           }
 
           main().catch((error) => {
