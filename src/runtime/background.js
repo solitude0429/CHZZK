@@ -15,8 +15,8 @@ import {
 } from "../shared/session-rules.js";
 import {
   isChzzkLivePageUrl,
-  isTelemetryReportSafe,
   makeTelemetryReport,
+  prepareTelemetryRequest,
   stableHash,
   TELEMETRY_ENDPOINT,
   TELEMETRY_SCOPE,
@@ -114,7 +114,6 @@ async function postTelemetryReport(report, { force = false } = {}) {
     ...extensionIdentity(),
     scope: TELEMETRY_SCOPE,
   };
-  if (!isTelemetryReportSafe(enriched)) return false;
 
   const settings = await loadSettings();
   if (!isTelemetryEventEnabled(settings, enriched.eventType)) return false;
@@ -126,14 +125,17 @@ async function postTelemetryReport(report, { force = false } = {}) {
   if (!force && previous && now - previous < REPORT_DEDUPE_TTL_MS) return false;
   if (!force && now - Number(state.lastSentAt ?? 0) < TELEMETRY_MIN_REPORT_INTERVAL_MS) return false;
 
+  const request = await prepareTelemetryRequest(enriched, { api });
+  if (!request) return false;
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TELEMETRY_POST_TIMEOUT_MS);
   try {
     const response = await fetch(TELEMETRY_ENDPOINT, {
-      body: JSON.stringify(enriched),
+      body: request.body,
       cache: "no-store",
       credentials: "omit",
-      headers: { "content-type": "application/json" },
+      headers: request.headers,
       method: "POST",
       signal: controller.signal,
     });
@@ -160,9 +162,9 @@ async function maybeReportDiagnostics(snapshot, decision) {
   const analysis = analyzeDiagnostics(snapshot, { targetQuality: policy.targetQuality });
   const interesting = Boolean(
     analysis.needsPolicyUpdate ||
-      snapshot.sessionRules?.lastError ||
-      decision?.reason === "unknown-quality-shape" ||
-      decision?.ok,
+    snapshot.sessionRules?.lastError ||
+    decision?.reason === "unknown-quality-shape" ||
+    decision?.ok,
   );
   if (!interesting) return;
   await postTelemetryReport(diagnosticsReportFromSnapshot(snapshot, "diagnostics-summary")).catch((error) => {

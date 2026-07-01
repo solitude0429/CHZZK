@@ -1,4 +1,5 @@
 node_modules/
+codex-security-scans/
 dist/
 web-ext-artifacts/
 *.zip

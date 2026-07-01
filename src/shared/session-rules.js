@@ -59,6 +59,7 @@ export function isChzzkLiveUrl(url, policy) {
   if (typeof url !== "string" || url === "") return false;
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
     if (
       !trustedInitiatorDomains(policy).some((domain) => domainMatches(parsed.hostname.toLowerCase(), domain))
     ) {

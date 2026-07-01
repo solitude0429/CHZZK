@@ -279,6 +279,7 @@
     if (typeof url !== "string" || url === "") return false;
     try {
       const parsed = new URL(url);
+      if (parsed.protocol !== "https:") return false;
       if (
         !trustedInitiatorDomains(policy).some((domain) =>
           domainMatches(parsed.hostname.toLowerCase(), domain),
@@ -379,9 +380,28 @@
   var TELEMETRY_ENDPOINT = "https://chzzk-report.alpha-apple.dedyn.io/report";
   var TELEMETRY_SCOPE = "chzzk-live";
   var TELEMETRY_SCHEMA_VERSION = 1;
+  var TELEMETRY_AUTH_SCHEME = "hmac-sha256-v1";
   var MAX_ERROR_TEXT = 300;
   var MAX_URL_TEXT = 500;
-  var SENSITIVE_QUERY_RE = /[?#].*$/;
+  var INSTALL_ID_RE = /^[A-Za-z0-9_.:@-]{1,120}$/;
+  var SENSITIVE_KEY_RE =
+    /(?:policy|signature|key-pair-id|expires|token|auth|session|secret|credential|jwt|cookie)/i;
+  var SCRIPT_ERROR_RE = /\b(referenceerror|typeerror|syntaxerror|rangeerror|evalerror)\b/i;
+  var NETWORK_ERROR_RE = /\b(network|fetch|timeout|http\s*\d{3}|connection|cors|dns)\b/i;
+  function textEncoder() {
+    return new TextEncoder();
+  }
+  function bytesToHex(bytes) {
+    return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  function extractQuality(value) {
+    const match = String(value ?? "").match(/(?:^|[^0-9])(\d{3,4}p)(?:[^0-9]|$)/i);
+    return match?.[1]?.toLowerCase() ?? null;
+  }
+  function extensionFromPath(pathname) {
+    const match = pathname.match(/\.([a-z0-9]{2,8})$/i);
+    return match?.[1]?.toLowerCase() ?? null;
+  }
   function isChzzkLivePageUrl(value) {
     if (typeof value !== "string" || value === "") return false;
     try {
@@ -396,15 +416,32 @@
     }
   }
   function stripSensitiveTail(value) {
-    return typeof value === "string"
-      ? value.slice(0, MAX_URL_TEXT).replace(SENSITIVE_QUERY_RE, "?[redacted]")
-      : "";
+    if (typeof value !== "string") return "";
+    const input = value.slice(0, MAX_URL_TEXT);
+    try {
+      const parsed = new URL(input);
+      if (!/^https?:$/.test(parsed.protocol)) return "[redacted-url]";
+      const quality = extractQuality(parsed.pathname);
+      const extension = extensionFromPath(parsed.pathname);
+      const suffix = [quality, extension].filter(Boolean).join(".");
+      return `${parsed.protocol}//${parsed.hostname.toLowerCase()}/[redacted-path]${suffix ? `/${suffix}` : ""}`;
+    } catch {
+      return input.replace(/[?#].*$/, "?[redacted]").replace(/[A-Za-z0-9_-]{24,}/g, "[redacted-token]");
+    }
   }
   function sanitizeErrorText(value) {
     if (value == null) return null;
-    return String(value)
-      .slice(0, MAX_ERROR_TEXT)
-      .replace(/https?:\/\/[^\s)]+/gi, (url) => stripSensitiveTail(url));
+    const text = String(value).slice(0, MAX_ERROR_TEXT);
+    if (/^error:[a-z0-9-]{1,80}$/.test(text)) return text;
+    if (/https?:\/\/[^\s)]+/i.test(text) && SENSITIVE_KEY_RE.test(text))
+      return "error:url-with-sensitive-material";
+    if (SENSITIVE_KEY_RE.test(text)) return "error:sensitive-material";
+    if (SCRIPT_ERROR_RE.test(text)) {
+      const kind = text.match(SCRIPT_ERROR_RE)?.[1]?.toLowerCase().replace("error", "") || "script";
+      return `error:script-${kind || "exception"}`;
+    }
+    if (NETWORK_ERROR_RE.test(text)) return "error:network";
+    return text ? "error:page-exception" : null;
   }
   function stableHash(value) {
     const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -467,12 +504,72 @@
   function isTelemetryReportSafe(report) {
     if (!report || report.schemaVersion !== TELEMETRY_SCHEMA_VERSION) return false;
     if (report.scope !== TELEMETRY_SCOPE) return false;
+    if (report.auth?.scheme !== TELEMETRY_AUTH_SCHEME) return false;
+    if (!INSTALL_ID_RE.test(String(report.installId ?? ""))) return false;
     if (!/^[a-z0-9_.@-]+$/i.test(String(report.addonId ?? ""))) return false;
     if (!/^[a-z0-9_.:-]+$/i.test(String(report.extensionVersion ?? ""))) return false;
     const serialized = JSON.stringify(report);
     if (serialized.length > 64e3) return false;
     if (/[?&](Policy|Signature|Key-Pair-Id|Expires|token|auth|session)=/i.test(serialized)) return false;
     return true;
+  }
+  async function storageGet(storageArea, keys) {
+    if (!storageArea?.get) return {};
+    try {
+      return (await storageArea.get(keys)) ?? {};
+    } catch {
+      return {};
+    }
+  }
+  async function loadTelemetryCredentials(api2) {
+    const managed = await storageGet(api2?.storage?.managed, [
+      "chzzkTelemetryHmacSecret",
+      "chzzkTelemetryInstallId",
+    ]);
+    const local = await storageGet(api2?.storage?.local, ["chzzkTelemetryInstallId"]);
+    const secret = String(managed.chzzkTelemetryHmacSecret ?? "").trim();
+    const installId = String(managed.chzzkTelemetryInstallId ?? local.chzzkTelemetryInstallId ?? "").trim();
+    if (!secret || !INSTALL_ID_RE.test(installId)) return null;
+    return { installId, secret };
+  }
+  async function signTelemetryPayload(secret, timestamp, body) {
+    if (!globalThis.crypto?.subtle) throw new Error("WebCrypto HMAC is unavailable");
+    const encoder = textEncoder();
+    const key = await globalThis.crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { hash: "SHA-256", name: "HMAC" },
+      false,
+      ["sign"],
+    );
+    const signature = await globalThis.crypto.subtle.sign(
+      "HMAC",
+      key,
+      encoder.encode(`${timestamp}.${body}`),
+    );
+    return bytesToHex(signature);
+  }
+  async function prepareTelemetryRequest(report, { api: api2 } = {}) {
+    const credentials = await loadTelemetryCredentials(api2);
+    if (!credentials) return null;
+    const authenticated = {
+      ...report,
+      auth: { scheme: TELEMETRY_AUTH_SCHEME },
+      installId: credentials.installId,
+    };
+    if (!isTelemetryReportSafe(authenticated)) return null;
+    const body = JSON.stringify(authenticated);
+    const timestamp = /* @__PURE__ */ new Date().toISOString();
+    const signature = await signTelemetryPayload(credentials.secret, timestamp, body);
+    return {
+      body,
+      headers: {
+        "content-type": "application/json",
+        "x-chzzk-telemetry-install-id": credentials.installId,
+        "x-chzzk-telemetry-signature": `v1=${signature}`,
+        "x-chzzk-telemetry-timestamp": timestamp,
+      },
+    };
   }
 
   // src/shared/settings.js
@@ -607,7 +704,6 @@
       ...extensionIdentity(),
       scope: TELEMETRY_SCOPE,
     };
-    if (!isTelemetryReportSafe(enriched)) return false;
     const settings = await loadSettings();
     if (!isTelemetryEventEnabled(settings, enriched.eventType)) return false;
     const now = Date.now();
@@ -616,14 +712,16 @@
     const previous = Number(state.sentByKey?.[key] ?? 0);
     if (!force && previous && now - previous < REPORT_DEDUPE_TTL_MS) return false;
     if (!force && now - Number(state.lastSentAt ?? 0) < TELEMETRY_MIN_REPORT_INTERVAL_MS) return false;
+    const request = await prepareTelemetryRequest(enriched, { api });
+    if (!request) return false;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TELEMETRY_POST_TIMEOUT_MS);
     try {
       const response = await fetch(TELEMETRY_ENDPOINT, {
-        body: JSON.stringify(enriched),
+        body: request.body,
         cache: "no-store",
         credentials: "omit",
-        headers: { "content-type": "application/json" },
+        headers: request.headers,
         method: "POST",
         signal: controller.signal,
       });

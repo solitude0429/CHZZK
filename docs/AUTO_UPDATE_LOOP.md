@@ -18,6 +18,8 @@ Firefox extension telemetry, opt-in only
 - systemd service: `chzzk-telemetry-collector.service`
 - local listener: `127.0.0.1:18181`
 - storage: `/var/lib/chzzk-telemetry/reports-YYYYMMDD.ndjson`
+- authentication: reports must be signed with HMAC-SHA256 using `CHZZK_TELEMETRY_HMAC_SECRET`; unsigned or stale requests are rejected
+- quotas: per-install/global minute limits, daily file-size caps, and retention cleanup are enforced by the collector
 - summary command:
 
 ```bash
@@ -49,12 +51,12 @@ Only CHZZK live scope reports are accepted:
 - extension version
 - event type
 - redacted HLS quality/decision aggregates, when diagnostics reports are enabled
-- session-rule error summary, when error reports are enabled
+- session-rule error category, not raw page error text, when error reports are enabled
 - route shape `/live/[redacted]`, when structure reports are enabled
 - tag/feature/class-token counts, when structure reports are enabled
 - structure hash, when structure reports are enabled
 
-The extension and collector reject signed CDN query values and token/auth/session-like query strings.
+The extension and collector reject signed CDN query values, token/auth/session-like material, raw URL paths, and raw page error strings. Stored reports keep a keyed `installIdHash`, not the raw install identifier.
 
 ## What is not collected
 
@@ -81,7 +83,7 @@ Safe automated actions:
 - open a PR;
 - merge only if CI passes and the change is low-risk;
 - trigger AMO unlisted signing;
-- deploy the signed XPI and `updates.json` to the internal update host;
+- deploy the signed XPI and `updates.json` to the internal update host only after GitHub artifact attestation verifies the expected source commit and signing workflow;
 - verify live URLs.
 
 Manual-review actions:

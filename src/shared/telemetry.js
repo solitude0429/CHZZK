@@ -1,13 +1,36 @@
 export const TELEMETRY_ENDPOINT = "https://chzzk-report.alpha-apple.dedyn.io/report";
 export const TELEMETRY_SCOPE = "chzzk-live";
 export const TELEMETRY_SCHEMA_VERSION = 1;
+export const TELEMETRY_AUTH_SCHEME = "hmac-sha256-v1";
 
 const MAX_CLASS_TOKENS = 80;
 const MAX_SELECTOR_SAMPLE = 120;
 const MAX_ERROR_TEXT = 300;
 const MAX_URL_TEXT = 500;
-const SENSITIVE_QUERY_RE = /[?#].*$/;
 const CLASS_TOKEN_RE = /^[A-Za-z][A-Za-z0-9_-]{0,48}$/;
+const INSTALL_ID_RE = /^[A-Za-z0-9_.:@-]{1,120}$/;
+const SENSITIVE_KEY_RE =
+  /(?:policy|signature|key-pair-id|expires|token|auth|session|secret|credential|jwt|cookie)/i;
+const SCRIPT_ERROR_RE = /\b(referenceerror|typeerror|syntaxerror|rangeerror|evalerror)\b/i;
+const NETWORK_ERROR_RE = /\b(network|fetch|timeout|http\s*\d{3}|connection|cors|dns)\b/i;
+
+function textEncoder() {
+  return new TextEncoder();
+}
+
+function bytesToHex(bytes) {
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function extractQuality(value) {
+  const match = String(value ?? "").match(/(?:^|[^0-9])(\d{3,4}p)(?:[^0-9]|$)/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function extensionFromPath(pathname) {
+  const match = pathname.match(/\.([a-z0-9]{2,8})$/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
 
 export function isChzzkLivePageUrl(value) {
   if (typeof value !== "string" || value === "") return false;
@@ -29,16 +52,33 @@ export function routeShapeForChzzkLiveUrl(value) {
 }
 
 export function stripSensitiveTail(value) {
-  return typeof value === "string"
-    ? value.slice(0, MAX_URL_TEXT).replace(SENSITIVE_QUERY_RE, "?[redacted]")
-    : "";
+  if (typeof value !== "string") return "";
+  const input = value.slice(0, MAX_URL_TEXT);
+  try {
+    const parsed = new URL(input);
+    if (!/^https?:$/.test(parsed.protocol)) return "[redacted-url]";
+    const quality = extractQuality(parsed.pathname);
+    const extension = extensionFromPath(parsed.pathname);
+    const suffix = [quality, extension].filter(Boolean).join(".");
+    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}/[redacted-path]${suffix ? `/${suffix}` : ""}`;
+  } catch {
+    return input.replace(/[?#].*$/, "?[redacted]").replace(/[A-Za-z0-9_-]{24,}/g, "[redacted-token]");
+  }
 }
 
 export function sanitizeErrorText(value) {
   if (value == null) return null;
-  return String(value)
-    .slice(0, MAX_ERROR_TEXT)
-    .replace(/https?:\/\/[^\s)]+/gi, (url) => stripSensitiveTail(url));
+  const text = String(value).slice(0, MAX_ERROR_TEXT);
+  if (/^error:[a-z0-9-]{1,80}$/.test(text)) return text;
+  if (/https?:\/\/[^\s)]+/i.test(text) && SENSITIVE_KEY_RE.test(text))
+    return "error:url-with-sensitive-material";
+  if (SENSITIVE_KEY_RE.test(text)) return "error:sensitive-material";
+  if (SCRIPT_ERROR_RE.test(text)) {
+    const kind = text.match(SCRIPT_ERROR_RE)?.[1]?.toLowerCase().replace("error", "") || "script";
+    return `error:script-${kind || "exception"}`;
+  }
+  if (NETWORK_ERROR_RE.test(text)) return "error:network";
+  return text ? "error:page-exception" : null;
 }
 
 export function stableHash(value) {
@@ -160,10 +200,70 @@ export function makeTelemetryReport({ addonId, diagnostics, eventType, extension
 export function isTelemetryReportSafe(report) {
   if (!report || report.schemaVersion !== TELEMETRY_SCHEMA_VERSION) return false;
   if (report.scope !== TELEMETRY_SCOPE) return false;
+  if (report.auth?.scheme !== TELEMETRY_AUTH_SCHEME) return false;
+  if (!INSTALL_ID_RE.test(String(report.installId ?? ""))) return false;
   if (!/^[a-z0-9_.@-]+$/i.test(String(report.addonId ?? ""))) return false;
   if (!/^[a-z0-9_.:-]+$/i.test(String(report.extensionVersion ?? ""))) return false;
   const serialized = JSON.stringify(report);
   if (serialized.length > 64_000) return false;
   if (/[?&](Policy|Signature|Key-Pair-Id|Expires|token|auth|session)=/i.test(serialized)) return false;
   return true;
+}
+
+async function storageGet(storageArea, keys) {
+  if (!storageArea?.get) return {};
+  try {
+    return (await storageArea.get(keys)) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export async function loadTelemetryCredentials(api) {
+  const managed = await storageGet(api?.storage?.managed, [
+    "chzzkTelemetryHmacSecret",
+    "chzzkTelemetryInstallId",
+  ]);
+  const local = await storageGet(api?.storage?.local, ["chzzkTelemetryInstallId"]);
+  const secret = String(managed.chzzkTelemetryHmacSecret ?? "").trim();
+  const installId = String(managed.chzzkTelemetryInstallId ?? local.chzzkTelemetryInstallId ?? "").trim();
+  if (!secret || !INSTALL_ID_RE.test(installId)) return null;
+  return { installId, secret };
+}
+
+export async function signTelemetryPayload(secret, timestamp, body) {
+  if (!globalThis.crypto?.subtle) throw new Error("WebCrypto HMAC is unavailable");
+  const encoder = textEncoder();
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { hash: "SHA-256", name: "HMAC" },
+    false,
+    ["sign"],
+  );
+  const signature = await globalThis.crypto.subtle.sign("HMAC", key, encoder.encode(`${timestamp}.${body}`));
+  return bytesToHex(signature);
+}
+
+export async function prepareTelemetryRequest(report, { api } = {}) {
+  const credentials = await loadTelemetryCredentials(api);
+  if (!credentials) return null;
+  const authenticated = {
+    ...report,
+    auth: { scheme: TELEMETRY_AUTH_SCHEME },
+    installId: credentials.installId,
+  };
+  if (!isTelemetryReportSafe(authenticated)) return null;
+  const body = JSON.stringify(authenticated);
+  const timestamp = new Date().toISOString();
+  const signature = await signTelemetryPayload(credentials.secret, timestamp, body);
+  return {
+    body,
+    headers: {
+      "content-type": "application/json",
+      "x-chzzk-telemetry-install-id": credentials.installId,
+      "x-chzzk-telemetry-signature": `v1=${signature}`,
+      "x-chzzk-telemetry-timestamp": timestamp,
+    },
+  };
 }

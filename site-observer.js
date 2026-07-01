@@ -54,8 +54,19 @@
   var MAX_SELECTOR_SAMPLE = 120;
   var MAX_ERROR_TEXT = 300;
   var MAX_URL_TEXT = 500;
-  var SENSITIVE_QUERY_RE = /[?#].*$/;
   var CLASS_TOKEN_RE = /^[A-Za-z][A-Za-z0-9_-]{0,48}$/;
+  var SENSITIVE_KEY_RE =
+    /(?:policy|signature|key-pair-id|expires|token|auth|session|secret|credential|jwt|cookie)/i;
+  var SCRIPT_ERROR_RE = /\b(referenceerror|typeerror|syntaxerror|rangeerror|evalerror)\b/i;
+  var NETWORK_ERROR_RE = /\b(network|fetch|timeout|http\s*\d{3}|connection|cors|dns)\b/i;
+  function extractQuality(value) {
+    const match = String(value ?? "").match(/(?:^|[^0-9])(\d{3,4}p)(?:[^0-9]|$)/i);
+    return match?.[1]?.toLowerCase() ?? null;
+  }
+  function extensionFromPath(pathname) {
+    const match = pathname.match(/\.([a-z0-9]{2,8})$/i);
+    return match?.[1]?.toLowerCase() ?? null;
+  }
   function isChzzkLivePageUrl(value) {
     if (typeof value !== "string" || value === "") return false;
     try {
@@ -74,15 +85,32 @@
     return "/live/[redacted]";
   }
   function stripSensitiveTail(value) {
-    return typeof value === "string"
-      ? value.slice(0, MAX_URL_TEXT).replace(SENSITIVE_QUERY_RE, "?[redacted]")
-      : "";
+    if (typeof value !== "string") return "";
+    const input = value.slice(0, MAX_URL_TEXT);
+    try {
+      const parsed = new URL(input);
+      if (!/^https?:$/.test(parsed.protocol)) return "[redacted-url]";
+      const quality = extractQuality(parsed.pathname);
+      const extension = extensionFromPath(parsed.pathname);
+      const suffix = [quality, extension].filter(Boolean).join(".");
+      return `${parsed.protocol}//${parsed.hostname.toLowerCase()}/[redacted-path]${suffix ? `/${suffix}` : ""}`;
+    } catch {
+      return input.replace(/[?#].*$/, "?[redacted]").replace(/[A-Za-z0-9_-]{24,}/g, "[redacted-token]");
+    }
   }
   function sanitizeErrorText(value) {
     if (value == null) return null;
-    return String(value)
-      .slice(0, MAX_ERROR_TEXT)
-      .replace(/https?:\/\/[^\s)]+/gi, (url) => stripSensitiveTail(url));
+    const text = String(value).slice(0, MAX_ERROR_TEXT);
+    if (/^error:[a-z0-9-]{1,80}$/.test(text)) return text;
+    if (/https?:\/\/[^\s)]+/i.test(text) && SENSITIVE_KEY_RE.test(text))
+      return "error:url-with-sensitive-material";
+    if (SENSITIVE_KEY_RE.test(text)) return "error:sensitive-material";
+    if (SCRIPT_ERROR_RE.test(text)) {
+      const kind = text.match(SCRIPT_ERROR_RE)?.[1]?.toLowerCase().replace("error", "") || "script";
+      return `error:script-${kind || "exception"}`;
+    }
+    if (NETWORK_ERROR_RE.test(text)) return "error:network";
+    return text ? "error:page-exception" : null;
   }
   function stableHash(value) {
     const text = typeof value === "string" ? value : JSON.stringify(value);

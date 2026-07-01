@@ -7,7 +7,7 @@
   "scripts": {
     "audit:deps": "npm audit --audit-level=moderate",
     "audit:package": "node scripts/verify-package.js",
-    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes docs node_modules ops package-lock.json package.json policy reg scripts src tests",
+    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans docs node_modules ops package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
     "build:update-manifest": "node scripts/build-update-manifest.js",
     "check:generated": "node scripts/check-generated.js",
@@ -15,7 +15,7 @@
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check package.json .github/workflows/*.yml .github/PULL_REQUEST_TEMPLATE/*.md",
     "lint": "eslint .",
-    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes docs node_modules ops package-lock.json package.json policy reg scripts src tests",
+    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans docs node_modules ops package-lock.json package.json policy reg scripts src tests",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
     "test:ops": "python3 -m py_compile ops/*.py && python3 ops/test_chzzk_telemetry_collector.py",
