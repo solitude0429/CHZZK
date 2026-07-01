@@ -14,6 +14,7 @@ import {
   shouldRecordDiagnostics,
 } from "../shared/session-rules.js";
 import {
+  buildHighestQualityRedirectUrl,
   normalizeQualityCandidates,
   parseQualityFromUrl,
   qualityNumber,
@@ -319,6 +320,7 @@ async function recordRequestDiagnostics(details, decision) {
 async function handleRequest(details) {
   const shouldRecord = shouldRecordDiagnostics(details, policy);
   let decision = shouldBootstrapSessionRule(details, policy);
+  let redirectUrl = null;
 
   if (decision.ok) {
     try {
@@ -326,12 +328,16 @@ async function handleRequest(details) {
         ? activeTargetsByTab.get(decision.tabId)
         : await resolveHighestSupportedQuality(details, decision.quality);
       if (targetQuality) {
+        redirectUrl = buildHighestQualityRedirectUrl(details.url, {
+          minRedirectQuality: policy.minRedirectQuality,
+          targetQuality,
+        });
         await ensureTabSessionRule(decision.tabId, targetQuality);
-        decision = { ...decision, targetQuality };
+        decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
       }
     } catch (error) {
       await reportSessionRuleError(error);
-      console.warn("[CHZZK] failed to install session redirect rule", error);
+      console.warn("[CHZZK] failed to redirect/install session redirect rule", error);
     }
   }
 
@@ -340,18 +346,21 @@ async function handleRequest(details) {
       console.warn("[CHZZK] diagnostics recording/reporting failed", error),
     );
   }
+
+  return redirectUrl ? { redirectUrl } : undefined;
 }
 
 api.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    handleRequest(details).catch((error) =>
-      console.warn("[CHZZK] diagnostics/session bootstrap failed", error),
-    );
-  },
+  (details) =>
+    handleRequest(details).catch((error) => {
+      console.warn("[CHZZK] diagnostics/session bootstrap failed", error);
+      return undefined;
+    }),
   {
     urls: ["*://*.akamaized.net/*", "*://*.navercdn.com/*", "*://*.pstatic.net/*"],
     types: policy.resourceTypes,
   },
+  ["blocking"],
 );
 
 api.runtime.onMessage?.addListener((message, sender) => {

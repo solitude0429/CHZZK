@@ -14,6 +14,8 @@ const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
 const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
 const URL_QUALITY_RE = /(.*(?:chunklist_|\/))(\d{3,4}p)(.*\.m3u8.*)/i;
+const SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
+const HIGH_ENTROPY_PATH_SEGMENT_RE = /(?:[a-z0-9_-]{24,}|[a-f0-9]{16,})/i;
 
 export function normalizeQualityLabel(value) {
   if (typeof value !== "string") return null;
@@ -54,6 +56,18 @@ export function redactMediaUrl(url) {
   try {
     const parsed = new URL(url);
     const hadSensitiveTail = parsed.search || parsed.hash;
+    parsed.pathname = parsed.pathname
+      .split("/")
+      .map((segment) => {
+        if (!segment) return segment;
+        if (/^\d{3,4}p$/i.test(segment)) return segment;
+        if (/\.m3u8$/i.test(segment) && !HIGH_ENTROPY_PATH_SEGMENT_RE.test(segment)) return segment;
+        if (SENSITIVE_PATH_SEGMENT_RE.test(segment) || HIGH_ENTROPY_PATH_SEGMENT_RE.test(segment)) {
+          return "[redacted-path]";
+        }
+        return segment;
+      })
+      .join("/");
     parsed.search = "";
     parsed.hash = "";
     return `${parsed.toString()}${hadSensitiveTail ? "?[redacted]" : ""}`;

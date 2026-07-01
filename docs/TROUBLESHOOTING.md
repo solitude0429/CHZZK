@@ -30,7 +30,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, then redirects lower numeric playlists in that tab to the highest candidate that returns a valid HLS playlist.
+The runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects the current lower numeric playlist request, then installs a tab rule for later lower numeric playlists in that tab.
 
 Check:
 
