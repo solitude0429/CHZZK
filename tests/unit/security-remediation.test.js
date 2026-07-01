@@ -28,8 +28,8 @@ const configArg = args.find((arg) => arg.startsWith("--config="));
 assert.ok(configArg, "web-ext config path is required");
 assert.equal(args.some((arg) => arg.startsWith("--api-key")), false);
 assert.equal(args.some((arg) => arg.startsWith("--api-secret")), false);
-assert.equal(process.env.WEB_EXT_API_KEY ?? "", "");
-assert.equal(process.env.WEB_EXT_API_SECRET ?? "", "");
+assert.equal(Object.hasOwn(process.env, "WEB_EXT_API_KEY"), false);
+assert.equal(Object.hasOwn(process.env, "WEB_EXT_API_SECRET"), false);
 const config = readFileSync(configArg.slice("--config=".length), "utf8");
 assert.match(config, /apiKey/);
 assert.match(config, /apiSecret/);
@@ -63,6 +63,8 @@ describe("Codex Security remediation guardrails", () => {
     assert.match(script, /mkdtempSync|writeFileSync/);
     assert.match(script, /chmodSync\([^,]+,\s*0o600\)/);
     assert.match(script, /--config=/);
+    assert.match(script, /delete\s+webExtEnv\.WEB_EXT_API_KEY/);
+    assert.match(script, /delete\s+webExtEnv\.WEB_EXT_API_SECRET/);
   });
 
   it("removes temporary AMO signing config on web-ext success and failure", () => {

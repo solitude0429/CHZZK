@@ -76,14 +76,14 @@ const args = [
   ...ignoreFiles,
 ];
 
+const webExtEnv = { ...process.env };
+delete webExtEnv.WEB_EXT_API_KEY;
+delete webExtEnv.WEB_EXT_API_SECRET;
+
 let exitCode = 1;
 try {
   const result = spawnSync("web-ext", args, {
-    env: {
-      ...process.env,
-      WEB_EXT_API_KEY: "",
-      WEB_EXT_API_SECRET: "",
-    },
+    env: webExtEnv,
     stdio: "inherit",
   });
   if (result.error) console.error(result.error.message);
