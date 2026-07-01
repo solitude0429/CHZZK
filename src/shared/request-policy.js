@@ -30,7 +30,7 @@ function trustedInitiatorDomains(policy) {
 function trustedRequestDomains(policy) {
   return asArray(policy.trustedRequestDomains).length > 0
     ? asArray(policy.trustedRequestDomains)
-    : ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"];
+    : ["akamaized.net", "chzzk.naver.com", "gscdn.net", "navercdn.com", "pstatic.net"];
 }
 
 function resourceTypes(policy) {
@@ -143,10 +143,9 @@ export function shouldRedirectRequest(details, policy, options = {}) {
 }
 
 export function configuredRequiredOrigins(policy) {
-  return [
-    ...trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`),
-    ...trustedInitiatorDomains(policy).map((domain) => `https://${domain}/live/*`),
-  ].sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
+  return trustedRequestDomains(policy)
+    .map((domain) => `https://*.${domain}/*`)
+    .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
 }
 
 function displayPermissionKey(permission) {
@@ -154,7 +153,7 @@ function displayPermissionKey(permission) {
 }
 
 export function configuredWebRequestUrls(policy) {
-  return trustedRequestDomains(policy).map((domain) => `https://*.${domain}/*`);
+  return configuredRequiredOrigins(policy);
 }
 
 export function configuredResourceTypes(policy) {

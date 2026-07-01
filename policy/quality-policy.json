@@ -16,6 +16,7 @@
   ],
   "trustedRequestDomains": [
     "akamaized.net",
+    "chzzk.naver.com",
     "gscdn.net",
     "navercdn.com",
     "pstatic.net"
@@ -44,7 +45,7 @@
     "For each trusted numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
     "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-    "Request URL, initiator, method, resource type, trusted domain, and tab context or prewarmed live-tab state all constrain redirects."
+    "Request URL, initiator, method, resource type, trusted request domain, and tab context or prewarmed live-tab state all constrain redirects; CHZZK-hosted numeric playlist URLs are covered as trusted request domains."
   ],
   "startupTargetQuality": "1080p"
 }

@@ -18,17 +18,16 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
   it("derives required install permissions from CHZZK and trusted HLS domains", () => {
     assert.deepEqual(configuredRequiredOrigins(policy), [
       "https://*.akamaized.net/*",
-      "https://chzzk.naver.com/live/*",
+      "https://*.chzzk.naver.com/*",
       "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
     ]);
-    assert.deepEqual(configuredWebRequestUrls(policy), [
-      "https://*.akamaized.net/*",
-      "https://*.gscdn.net/*",
-      "https://*.navercdn.com/*",
-      "https://*.pstatic.net/*",
-    ]);
+    assert.deepEqual(
+      configuredWebRequestUrls(policy),
+      configuredRequiredOrigins(policy),
+      "webRequest must observe every required origin so real CHZZK/livecloud playlist hosts are not missed",
+    );
     assert.deepEqual([...configuredResourceTypes(policy)].sort(), ["media", "other", "xmlhttprequest"]);
   });
 
@@ -109,6 +108,27 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     });
     assert.equal(shouldRecordDiagnostics(eligible, policy, { trustedLiveTabIds: new Set([9]) }), true);
     assert.equal(shouldRedirectRequest(eligible, policy, { trustedLiveTabIds: new Set([10]) }).ok, false);
+  });
+
+
+  it("covers CHZZK-hosted numeric playlist requests when the site serves HLS from its own domain", () => {
+    const eligible = {
+      documentUrl: undefined,
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      originUrl: undefined,
+      tabId: 11,
+      type: "xmlhttprequest",
+      url: "https://vod.chzzk.naver.com/live/chunklist_480p.m3u8?Policy=redacted",
+    };
+
+    assert.equal(shouldRecordDiagnostics(eligible, policy, { trustedLiveTabIds: new Set([11]) }), true);
+    assert.deepEqual(shouldRedirectRequest(eligible, policy, { trustedLiveTabIds: new Set([11]) }), {
+      ok: true,
+      quality: "480p",
+      reason: "eligible-chzzk-hls-quality",
+      tabId: 11,
+    });
   });
 
   it("covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests", () => {

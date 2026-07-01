@@ -14,7 +14,7 @@ assert.deepEqual(
   manifest.permissions,
   [
     "https://*.akamaized.net/*",
-    "https://chzzk.naver.com/live/*",
+    "https://*.chzzk.naver.com/*",
     "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
     "https://*.pstatic.net/*",
@@ -68,7 +68,13 @@ assert.deepEqual(
 );
 assert.equal(manifest.browser_action?.default_popup, "diagnostics.html", "diagnostics popup must be registered");
 
-assert.deepEqual(policy.trustedRequestDomains, ["akamaized.net", "gscdn.net", "navercdn.com", "pstatic.net"]);
+assert.deepEqual(policy.trustedRequestDomains, [
+  "akamaized.net",
+  "chzzk.naver.com",
+  "gscdn.net",
+  "navercdn.com",
+  "pstatic.net",
+]);
 assert.equal(policy.resourceTypes.includes("other"), true);
 
 console.log("manifest and MV2 required-permission CHZZK redirect policy are valid");
