@@ -4,9 +4,11 @@ import { describe, it } from "node:test";
 import {
   buildHighestQualityRedirectUrl,
   buildQualityRegexFilter,
+  chooseBestHlsVariant,
   lowerQualityNumberRegex,
   normalizeQualityCandidates,
   normalizeQualityLabel,
+  parseHlsMasterPlaylistVariants,
   parseQualityFromUrl,
   qualityNumber,
   redactMediaUrl,
@@ -28,6 +30,7 @@ describe("highest-supported-quality helpers", () => {
       "1080p",
     );
     assert.equal(parseQualityFromUrl("https://example.test/abc/1080p/segment.m3u8"), "1080p");
+    assert.equal(parseQualityFromUrl("https://example.test/live/chunklist_1080p_low.m3u8?token=example"), "1080p");
     assert.equal(parseQualityFromUrl("https://example.test/abc/playlist.m3u8"), null);
   });
 
@@ -116,5 +119,63 @@ describe("highest-supported-quality helpers", () => {
       replaceQualityInUrl("https://cdn.test/live/chunklist_720p.m3u8?Policy=example", "2160p"),
       "https://cdn.test/live/chunklist_2160p.m3u8?Policy=example",
     );
+  });
+
+  it("parses HLS master playlist variants with resolution, frame rate, and bitrate", () => {
+    const playlist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080,FRAME-RATE=30.00
+chunklist_1080p_low.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,AVERAGE-BANDWIDTH=7000000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p_high.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=9500000,RESOLUTION=1280x720,FRAME-RATE=60.00
+chunklist_720p_highbitrate.m3u8?Policy=redacted
+`;
+
+    assert.deepEqual(parseHlsMasterPlaylistVariants(playlist, "https://cdn.test/live/master.m3u8"), [
+      {
+        averageBandwidth: null,
+        bandwidth: 4500000,
+        frameRate: 30,
+        quality: "1080p",
+        resolution: { height: 1080, width: 1920 },
+        url: "https://cdn.test/live/chunklist_1080p_low.m3u8?Policy=redacted",
+      },
+      {
+        averageBandwidth: 7000000,
+        bandwidth: 8384000,
+        frameRate: 60,
+        quality: "1080p",
+        resolution: { height: 1080, width: 1920 },
+        url: "https://cdn.test/live/chunklist_1080p_high.m3u8?Policy=redacted",
+      },
+      {
+        averageBandwidth: null,
+        bandwidth: 9500000,
+        frameRate: 60,
+        quality: "720p",
+        resolution: { height: 720, width: 1280 },
+        url: "https://cdn.test/live/chunklist_720p_highbitrate.m3u8?Policy=redacted",
+      },
+    ]);
+  });
+
+  it("chooses the best HLS variant by resolution, then frame rate, then bitrate", () => {
+    const playlist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080,FRAME-RATE=30.00
+chunklist_1080p_low.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,AVERAGE-BANDWIDTH=7000000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p_high.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=9500000,RESOLUTION=1280x720,FRAME-RATE=60.00
+chunklist_720p_highbitrate.m3u8?Policy=redacted
+`;
+
+    assert.deepEqual(chooseBestHlsVariant(playlist, "https://cdn.test/live/master.m3u8"), {
+      averageBandwidth: 7000000,
+      bandwidth: 8384000,
+      frameRate: 60,
+      quality: "1080p",
+      resolution: { height: 1080, width: 1920 },
+      url: "https://cdn.test/live/chunklist_1080p_high.m3u8?Policy=redacted",
+    });
   });
 });

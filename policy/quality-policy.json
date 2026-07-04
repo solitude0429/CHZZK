@@ -42,10 +42,11 @@
     "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
     "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
     "The persistent background page uses blocking webRequest so eligible numeric HLS playlist requests can be redirected even if content-script prewarm is late or unavailable.",
-    "For each eligible numeric HLS playlist URL, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
+    "When a trusted HLS master playlist is observed, the runtime scores exact variants by resolution, frame rate, then bitrate, and caches the best exact variant per tab while the tab is open.",
+    "For each eligible numeric HLS playlist URL without a cached master-playlist winner, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
     "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
     "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
-    "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the highest actually available HLS quality from the first eligible playlist request instead of seeding a fixed startup quality."
+    "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality."
   ]
 }

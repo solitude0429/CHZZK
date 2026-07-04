@@ -181,6 +181,112 @@ export function replaceQualityInUrl(url, targetQuality) {
   return replacedAny ? replaced : null;
 }
 
+function splitHlsAttributeList(value) {
+  const result = [];
+  let current = "";
+  let quoted = false;
+  for (const char of String(value ?? "")) {
+    if (char === '"') quoted = !quoted;
+    if (char === "," && !quoted) {
+      result.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) result.push(current);
+  return result;
+}
+
+function parseHlsAttributeList(value) {
+  return Object.fromEntries(
+    splitHlsAttributeList(value)
+      .map((entry) => {
+        const separator = entry.indexOf("=");
+        if (separator === -1) return null;
+        const key = entry.slice(0, separator).trim().toUpperCase();
+        const rawValue = entry.slice(separator + 1).trim().replace(/^"|"$/g, "");
+        return key ? [key, rawValue] : null;
+      })
+      .filter(Boolean),
+  );
+}
+
+function numericAttribute(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function parseResolutionAttribute(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{2,5})x(\d{2,5})$/i);
+  if (!match) return null;
+  return { height: Number(match[2]), width: Number(match[1]) };
+}
+
+export function parseHlsMasterPlaylistVariants(playlistText, baseUrl = "") {
+  const lines = String(playlistText ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim());
+  const variants = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.toUpperCase().startsWith("#EXT-X-STREAM-INF:")) continue;
+
+    const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
+    const nextUri = lines.slice(index + 1).find((candidate) => candidate && !candidate.startsWith("#"));
+    if (!nextUri) continue;
+
+    const resolution = parseResolutionAttribute(attributes.RESOLUTION);
+    let url = nextUri;
+    try {
+      url = new URL(nextUri, baseUrl).toString();
+    } catch {
+      url = nextUri;
+    }
+
+    const quality = resolution ? normalizeQualityLabel(attributes.RESOLUTION) : parseQualityFromUrl(url);
+    variants.push({
+      averageBandwidth: numericAttribute(attributes["AVERAGE-BANDWIDTH"]),
+      bandwidth: numericAttribute(attributes.BANDWIDTH),
+      frameRate: numericAttribute(attributes["FRAME-RATE"]),
+      quality,
+      resolution,
+      url,
+    });
+  }
+
+  return variants;
+}
+
+function variantScore(variant) {
+  const height = variant?.resolution?.height ?? qualityNumber(variant?.quality) ?? 0;
+  return {
+    bitrate: variant?.averageBandwidth ?? variant?.bandwidth ?? 0,
+    frameRate: variant?.frameRate ?? 0,
+    height,
+    peakBandwidth: variant?.bandwidth ?? 0,
+  };
+}
+
+export function chooseBestHlsVariant(playlistText, baseUrl = "", { minRedirectQuality = "100p" } = {}) {
+  const min = qualityNumber(minRedirectQuality) ?? 0;
+  return (
+    parseHlsMasterPlaylistVariants(playlistText, baseUrl)
+      .filter((variant) => (variantScore(variant).height || 0) >= min)
+      .map((variant, index) => ({ index, score: variantScore(variant), variant }))
+      .sort((left, right) =>
+        right.score.height - left.score.height ||
+        right.score.frameRate - left.score.frameRate ||
+        right.score.bitrate - left.score.bitrate ||
+        right.score.peakBandwidth - left.score.peakBandwidth ||
+        left.index - right.index,
+      )[0]?.variant ?? null
+  );
+}
+
 export function buildHighestQualityRedirectUrl(
   url,
   { targetQuality, minRedirectQuality = "100p" } = {},
