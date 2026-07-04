@@ -27,7 +27,6 @@ const STORAGE_KEY = "chzzkDiagnostics";
 const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
 const activeLiveTabIds = new Set();
 const activeTargetsByTab = new Map();
-const bestVariantsByTab = new Map();
 const resolvedTargetsByTab = new Set();
 let diagnosticsMutationQueue = Promise.resolve();
 
@@ -135,17 +134,6 @@ function bestVariantTargetQuality(variant) {
   return variant?.quality ?? (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
 }
 
-function buildBestVariantRedirectUrl(details, variant) {
-  const targetQuality = bestVariantTargetQuality(variant);
-  const currentNumber = qualityNumber(parseQualityFromUrl(details.url));
-  const targetNumber = qualityNumber(targetQuality);
-  const minNumber = qualityNumber(policy.minRedirectQuality ?? "100p");
-  if (!currentNumber || !targetNumber || !minNumber || currentNumber < minNumber) return null;
-  if (currentNumber > targetNumber) return null;
-  if (details.url === variant?.url) return null;
-  return variant?.url ?? null;
-}
-
 async function resolveAndStoreBestVariantFromMaster(details) {
   const playlistText = await fetchPlaylistText(details.url);
   if (!playlistText) return null;
@@ -156,7 +144,6 @@ async function resolveAndStoreBestVariantFromMaster(details) {
   const targetQuality = bestVariantTargetQuality(variant);
   if (!variant?.url || !targetQuality) return null;
 
-  bestVariantsByTab.set(details.tabId, variant);
   await setTabTarget(details.tabId, targetQuality, { resolved: true });
   return variant;
 }
@@ -190,7 +177,6 @@ async function removeTabTarget(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   const hadTarget = activeTargetsByTab.delete(tabId);
   const hadLiveTab = activeLiveTabIds.delete(tabId);
-  bestVariantsByTab.delete(tabId);
   resolvedTargetsByTab.delete(tabId);
   if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
 }
@@ -198,7 +184,6 @@ async function removeTabTarget(tabId) {
 async function clearRuntimeRedirectState() {
   activeLiveTabIds.clear();
   activeTargetsByTab.clear();
-  bestVariantsByTab.clear();
   resolvedTargetsByTab.clear();
   await updateRedirectDiagnostics();
 }
@@ -224,11 +209,8 @@ async function handleRequest(details) {
 
   if (decision.ok) {
     try {
-      const bestVariant = bestVariantsByTab.get(decision.tabId);
-      let targetQuality = bestVariantTargetQuality(bestVariant) ?? activeTargetsByTab.get(decision.tabId);
-      if (bestVariant) {
-        redirectUrl = buildBestVariantRedirectUrl(details, bestVariant);
-      } else if (!targetQuality) {
+      let targetQuality = activeTargetsByTab.get(decision.tabId);
+      if (!targetQuality) {
         targetQuality = await resolveAndStoreHighestTarget(details, decision);
       } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
         resolveAndStoreHighestTarget(details, decision).catch((error) => {

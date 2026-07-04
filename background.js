@@ -16,8 +16,9 @@
       "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
       "The persistent background page uses blocking webRequest so eligible numeric HLS playlist requests can be redirected even if content-script prewarm is late or unavailable.",
-      "When a trusted HLS master playlist is observed, the runtime scores exact variants by resolution, frame rate, then bitrate, and caches the best exact variant per tab while the tab is open.",
-      "For each eligible numeric HLS playlist URL without a cached master-playlist winner, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
+      "When a trusted HLS master playlist is observed, the runtime scores variants by resolution, frame rate, then bitrate, and caches the best target quality per tab while the tab is open.",
+      "For eligible numeric HLS playlist URLs, redirects preserve the current live playlist URL shape and signed tail instead of pinning playback to a stale exact master-playlist URL.",
+      "For each eligible numeric HLS playlist URL without a cached master-playlist target, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
       "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
@@ -460,7 +461,6 @@
   var WEB_REQUEST_URLS = configuredWebRequestUrls(quality_policy_default);
   var activeLiveTabIds = /* @__PURE__ */ new Set();
   var activeTargetsByTab = /* @__PURE__ */ new Map();
-  var bestVariantsByTab = /* @__PURE__ */ new Map();
   var resolvedTargetsByTab = /* @__PURE__ */ new Set();
   var diagnosticsMutationQueue = Promise.resolve();
   async function loadDiagnostics() {
@@ -553,16 +553,6 @@
   function bestVariantTargetQuality(variant) {
     return variant?.quality ?? (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
   }
-  function buildBestVariantRedirectUrl(details, variant) {
-    const targetQuality = bestVariantTargetQuality(variant);
-    const currentNumber = qualityNumber(parseQualityFromUrl(details.url));
-    const targetNumber = qualityNumber(targetQuality);
-    const minNumber = qualityNumber(quality_policy_default.minRedirectQuality ?? "100p");
-    if (!currentNumber || !targetNumber || !minNumber || currentNumber < minNumber) return null;
-    if (currentNumber > targetNumber) return null;
-    if (details.url === variant?.url) return null;
-    return variant?.url ?? null;
-  }
   async function resolveAndStoreBestVariantFromMaster(details) {
     const playlistText = await fetchPlaylistText(details.url);
     if (!playlistText) return null;
@@ -571,7 +561,6 @@
     });
     const targetQuality = bestVariantTargetQuality(variant);
     if (!variant?.url || !targetQuality) return null;
-    bestVariantsByTab.set(details.tabId, variant);
     await setTabTarget(details.tabId, targetQuality, { resolved: true });
     return variant;
   }
@@ -600,14 +589,12 @@
     if (!isValidRedirectTabId(tabId)) return;
     const hadTarget = activeTargetsByTab.delete(tabId);
     const hadLiveTab = activeLiveTabIds.delete(tabId);
-    bestVariantsByTab.delete(tabId);
     resolvedTargetsByTab.delete(tabId);
     if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
   }
   async function clearRuntimeRedirectState() {
     activeLiveTabIds.clear();
     activeTargetsByTab.clear();
-    bestVariantsByTab.clear();
     resolvedTargetsByTab.clear();
     await updateRedirectDiagnostics();
   }
@@ -629,11 +616,8 @@
     let redirectUrl = null;
     if (decision.ok) {
       try {
-        const bestVariant = bestVariantsByTab.get(decision.tabId);
-        let targetQuality = bestVariantTargetQuality(bestVariant) ?? activeTargetsByTab.get(decision.tabId);
-        if (bestVariant) {
-          redirectUrl = buildBestVariantRedirectUrl(details, bestVariant);
-        } else if (!targetQuality) {
+        let targetQuality = activeTargetsByTab.get(decision.tabId);
+        if (!targetQuality) {
           targetQuality = await resolveAndStoreHighestTarget(details, decision);
         } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
           resolveAndStoreHighestTarget(details, decision).catch((error) => {
