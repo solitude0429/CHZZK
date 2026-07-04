@@ -7,7 +7,7 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-async function loadBackground({ availableQualities = new Set(), existingLiveTabs = [] } = {}) {
+async function loadBackground({ availableQualities = new Set(), existingLiveTabs = [], responsesByUrl = new Map() } = {}) {
   const listeners = {};
   const storage = {};
   const fetches = [];
@@ -27,8 +27,12 @@ async function loadBackground({ availableQualities = new Set(), existingLiveTabs
     clearTimeout,
     console,
     fetch: async (url) => {
-      fetches.push(String(url));
-      const ok = [...availableQualities].some((quality) => String(url).includes(quality));
+      const stringUrl = String(url);
+      fetches.push(stringUrl);
+      if (responsesByUrl.has(stringUrl)) {
+        return { ok: true, text: async () => responsesByUrl.get(stringUrl) };
+      }
+      const ok = [...availableQualities].some((quality) => stringUrl.includes(quality));
       return { ok, text: async () => (ok ? "#EXTM3U\n#EXT-X-VERSION:3\n" : "not found") };
     },
     globalThis: null,
@@ -181,5 +185,50 @@ describe("background runtime quality resolution", () => {
       redirect.redirectUrl,
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
     );
+  });
+
+  it("caches the best master-playlist variant and redirects lower requests to its exact URL", async () => {
+    const masterUrl = "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/master.m3u8?Policy=redacted";
+    const bestUrl = "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/chunklist_1080p_high.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080,FRAME-RATE=30.00
+chunklist_1080p_low.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p_high.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=9500000,RESOLUTION=1280x720,FRAME-RATE=60.00
+chunklist_720p_highbitrate.m3u8?Policy=redacted
+`;
+    const { listeners, storage } = await loadBackground({ responsesByUrl: new Map([[masterUrl, masterPlaylist]]) });
+
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: 43 } });
+    await waitForDiagnosticsQueue();
+
+    const masterRedirect = await listeners.onBeforeRequest({
+      documentUrl: undefined,
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      originUrl: undefined,
+      tabId: 43,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    });
+    assert.equal(masterRedirect, undefined, "master playlist requests are fetched for scoring but not redirected");
+
+    const low1080Redirect = plain(
+      await listeners.onBeforeRequest({
+        ...firstLowQualityRequest(43),
+        url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/chunklist_1080p_low.m3u8?Policy=redacted",
+      }),
+    );
+    assert.equal(low1080Redirect.redirectUrl, bestUrl);
+
+    const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(43)));
+    assert.equal(redirect.redirectUrl, bestUrl);
+
+    await waitForDiagnosticsQueue();
+    const diagnostics = plain(storage.chzzkDiagnostics);
+    assert.deepEqual(diagnostics.runtimeRedirects.targetsByTab, { 43: "1080p" });
+    assert.equal(diagnostics.decisions.at(-1).targetQuality, "1080p");
+    assert.equal(diagnostics.decisions.at(-1).redirectedCurrentRequest, true);
   });
 });

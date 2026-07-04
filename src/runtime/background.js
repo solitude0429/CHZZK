@@ -15,6 +15,7 @@ import {
 } from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
+  chooseBestHlsVariant,
   normalizeQualityCandidates,
   parseQualityFromUrl,
   qualityNumber,
@@ -26,6 +27,7 @@ const STORAGE_KEY = "chzzkDiagnostics";
 const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
 const activeLiveTabIds = new Set();
 const activeTargetsByTab = new Map();
+const bestVariantsByTab = new Map();
 const resolvedTargetsByTab = new Set();
 let diagnosticsMutationQueue = Promise.resolve();
 
@@ -83,7 +85,7 @@ function isLikelyHlsPlaylist(text) {
   return /^\s*#EXTM3U/m.test(String(text ?? ""));
 }
 
-async function fetchLooksLikeHlsPlaylist(url) {
+async function fetchPlaylistText(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), probeTimeoutMs());
   try {
@@ -93,13 +95,18 @@ async function fetchLooksLikeHlsPlaylist(url) {
       redirect: "follow",
       signal: controller.signal,
     });
-    if (!response.ok) return false;
-    return isLikelyHlsPlaylist(await response.text());
+    if (!response.ok) return null;
+    const text = await response.text();
+    return isLikelyHlsPlaylist(text) ? text : null;
   } catch {
-    return false;
+    return null;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchLooksLikeHlsPlaylist(url) {
+  return Boolean(await fetchPlaylistText(url));
 }
 
 async function resolveHighestSupportedQuality(details, observedQuality) {
@@ -122,6 +129,36 @@ async function resolveHighestSupportedQuality(details, observedQuality) {
   }
 
   return observedQuality;
+}
+
+function bestVariantTargetQuality(variant) {
+  return variant?.quality ?? (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
+}
+
+function buildBestVariantRedirectUrl(details, variant) {
+  const targetQuality = bestVariantTargetQuality(variant);
+  const currentNumber = qualityNumber(parseQualityFromUrl(details.url));
+  const targetNumber = qualityNumber(targetQuality);
+  const minNumber = qualityNumber(policy.minRedirectQuality ?? "100p");
+  if (!currentNumber || !targetNumber || !minNumber || currentNumber < minNumber) return null;
+  if (currentNumber > targetNumber) return null;
+  if (details.url === variant?.url) return null;
+  return variant?.url ?? null;
+}
+
+async function resolveAndStoreBestVariantFromMaster(details) {
+  const playlistText = await fetchPlaylistText(details.url);
+  if (!playlistText) return null;
+
+  const variant = chooseBestHlsVariant(playlistText, details.url, {
+    minRedirectQuality: policy.minRedirectQuality,
+  });
+  const targetQuality = bestVariantTargetQuality(variant);
+  if (!variant?.url || !targetQuality) return null;
+
+  bestVariantsByTab.set(details.tabId, variant);
+  await setTabTarget(details.tabId, targetQuality, { resolved: true });
+  return variant;
 }
 
 async function updateRedirectDiagnostics(lastError = null) {
@@ -153,6 +190,7 @@ async function removeTabTarget(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   const hadTarget = activeTargetsByTab.delete(tabId);
   const hadLiveTab = activeLiveTabIds.delete(tabId);
+  bestVariantsByTab.delete(tabId);
   resolvedTargetsByTab.delete(tabId);
   if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
 }
@@ -160,6 +198,7 @@ async function removeTabTarget(tabId) {
 async function clearRuntimeRedirectState() {
   activeLiveTabIds.clear();
   activeTargetsByTab.clear();
+  bestVariantsByTab.clear();
   resolvedTargetsByTab.clear();
   await updateRedirectDiagnostics();
 }
@@ -185,8 +224,11 @@ async function handleRequest(details) {
 
   if (decision.ok) {
     try {
-      let targetQuality = activeTargetsByTab.get(decision.tabId);
-      if (!targetQuality) {
+      const bestVariant = bestVariantsByTab.get(decision.tabId);
+      let targetQuality = bestVariantTargetQuality(bestVariant) ?? activeTargetsByTab.get(decision.tabId);
+      if (bestVariant) {
+        redirectUrl = buildBestVariantRedirectUrl(details, bestVariant);
+      } else if (!targetQuality) {
         targetQuality = await resolveAndStoreHighestTarget(details, decision);
       } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
         resolveAndStoreHighestTarget(details, decision).catch((error) => {
@@ -194,16 +236,25 @@ async function handleRequest(details) {
           console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
         });
       }
-      if (targetQuality) {
+      if (!redirectUrl && targetQuality) {
         redirectUrl = buildHighestQualityRedirectUrl(details.url, {
           minRedirectQuality: policy.minRedirectQuality,
           targetQuality,
         });
+      }
+      if (targetQuality) {
         decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
       }
     } catch (error) {
       await reportRedirectError(error);
       console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+    }
+  } else if (shouldRecord && decision.reason === "unknown-quality-shape") {
+    try {
+      await resolveAndStoreBestVariantFromMaster(details);
+    } catch (error) {
+      await reportRedirectError(error);
+      console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
     }
   }
 

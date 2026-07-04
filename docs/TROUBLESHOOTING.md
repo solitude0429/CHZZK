@@ -31,7 +31,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime treats prewarm as a supporting signal only. On each eligible numeric HLS playlist request, it probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and caches the per-tab target for later lower numeric playlists in that tab.
+The runtime treats prewarm as a supporting signal only. When a trusted HLS master playlist is observed, it parses `#EXT-X-STREAM-INF` variants and scores them by resolution, frame rate, then bitrate. Lower or same-resolution non-best variant requests redirect to the exact best variant URL. If no master playlist has been scored yet, the runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and caches the per-tab target for later lower numeric playlists in that tab.
 
 Check:
 
@@ -40,8 +40,9 @@ Check:
 3. Confirm the tested media URL contains a numeric quality segment in one of the supported shapes:
    - `chunklist_<quality>.m3u8`
    - `/<quality>/...m3u8`
-4. Confirm the candidate quality is listed in `policy/quality-policy.json`.
-5. If CHZZK introduces a new URL shape, add a fixture/test and update `src/shared/quality.js` / `src/shared/request-policy.js`.
+4. If a master playlist was observed, inspect its `RESOLUTION`, `FRAME-RATE`, `BANDWIDTH`, and `AVERAGE-BANDWIDTH` attributes.
+5. If fallback probing was used, confirm the candidate quality is listed in `policy/quality-policy.json`.
+6. If CHZZK introduces a new URL shape or HLS attribute shape, add a fixture/test and update `src/shared/quality.js` / `src/shared/request-policy.js`.
 
 ## A higher quality appears later
 
