@@ -31,7 +31,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime treats prewarm as a supporting signal only. When a trusted HLS master playlist is observed, it parses `#EXT-X-STREAM-INF` variants and scores them by resolution, frame rate, then bitrate. Lower or same-resolution non-best variant requests redirect to the exact best variant URL. If no master playlist has been scored yet, the runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and caches the per-tab target for later lower numeric playlists in that tab.
+The runtime treats prewarm as a supporting signal only. When a trusted HLS master playlist is observed, it parses `#EXT-X-STREAM-INF` variants and scores them by resolution, frame rate, then bitrate. The runtime caches the best target quality but redirects lower numeric playlist requests by preserving the current live playlist URL shape and signed tail. This avoids pinning playback refreshes to a stale exact master-playlist URL. If no master playlist has been scored yet, the runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and caches the per-tab target for later lower numeric playlists in that tab.
 
 Check:
 

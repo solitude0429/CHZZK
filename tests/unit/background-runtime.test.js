@@ -187,14 +187,11 @@ describe("background runtime quality resolution", () => {
     );
   });
 
-  it("caches the best master-playlist variant and redirects lower requests to its exact URL", async () => {
+  it("uses master-playlist scoring to choose the target quality while preserving live playlist URL shape", async () => {
     const masterUrl = "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/master.m3u8?Policy=redacted";
-    const bestUrl = "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/chunklist_1080p_high.m3u8?Policy=redacted";
     const masterPlaylist = `#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080,FRAME-RATE=30.00
-chunklist_1080p_low.m3u8?Policy=redacted
 #EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
-chunklist_1080p_high.m3u8?Policy=redacted
+chunklist_1080p.m3u8?Policy=redacted
 #EXT-X-STREAM-INF:BANDWIDTH=9500000,RESOLUTION=1280x720,FRAME-RATE=60.00
 chunklist_720p_highbitrate.m3u8?Policy=redacted
 `;
@@ -214,16 +211,21 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     });
     assert.equal(masterRedirect, undefined, "master playlist requests are fetched for scoring but not redirected");
 
-    const low1080Redirect = plain(
-      await listeners.onBeforeRequest({
-        ...firstLowQualityRequest(43),
-        url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/chunklist_1080p_low.m3u8?Policy=redacted",
-      }),
+    const liveUpdateAtTargetQuality = await listeners.onBeforeRequest({
+      ...firstLowQualityRequest(43),
+      url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?_HLS_msn=42&Policy=redacted",
+    });
+    assert.equal(
+      liveUpdateAtTargetQuality,
+      undefined,
+      "do not redirect same-quality live playlist refreshes to a stale exact master URL",
     );
-    assert.equal(low1080Redirect.redirectUrl, bestUrl);
 
     const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(43)));
-    assert.equal(redirect.redirectUrl, bestUrl);
+    assert.equal(
+      redirect.redirectUrl,
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
+    );
 
     await waitForDiagnosticsQueue();
     const diagnostics = plain(storage.chzzkDiagnostics);

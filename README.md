@@ -7,7 +7,7 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 - Watches trusted CHZZK live HLS playlist requests only.
 - Parses trusted HLS master playlists when available and scores variants by resolution, then frame rate, then bitrate.
 - Falls back to probing configured quality candidates from highest to lowest when only a numeric variant playlist URL is available.
-- Prewarms CHZZK live tabs at `document_start` without choosing a quality, then resolves and caches the best actual playlist variant per tab while the tab is open.
+- Prewarms CHZZK live tabs at `document_start` without choosing a quality, then resolves and caches the best supported quality label per tab while the tab is open.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
 - Keeps signed CDN query strings out of local diagnostics.
 
@@ -20,7 +20,7 @@ Example with supported `1440p`:
 1440p playlist  -> unchanged
 ```
 
-If `1440p` is not available but `1080p` is, the tab target becomes `1080p`. When multiple variants share the same resolution, the runtime prefers the higher frame-rate and then higher-bitrate variant. The extension does not create qualities NAVER does not serve.
+If `1440p` is not available but `1080p` is, the tab target becomes `1080p`. Master playlist scoring can use frame-rate and bitrate to choose the best target quality, but redirects preserve the live playlist request shape instead of pinning playback to a stale exact playlist URL. The extension does not create qualities NAVER does not serve.
 
 ## Policy
 
