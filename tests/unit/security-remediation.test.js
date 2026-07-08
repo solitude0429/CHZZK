@@ -181,12 +181,16 @@ assert sanitized == "https://media.example:8443/[redacted-path]/1080p.m3u8", san
     const deploy = read("scripts/deploy-internal-updates.js");
 
     assert.match(deploy, /run\("gh",\s*\[\s*"attestation",\s*"verify"/);
+    assert.match(deploy, /"release",\s*"view",\s*releaseTag/);
+    assert.match(deploy, /targetCommitish/);
     assert.match(deploy, /CHZZK_SOURCE_COMMIT/);
     assert.match(deploy, /sourceDigest|sourceRepository|workflowRef/);
     assert.match(deploy, /const signerWorkflow = `\$\{sourceRepository\}\/\$\{workflowRef\}`/);
     assert.match(deploy, /"release",\s*"download",\s*tag,\s*"--repo",\s*sourceRepository/);
     assert.match(deploy, /git",\s*\["status",\s*"--porcelain"\]/);
     assert.match(deploy, /releasesDir|releaseDir/);
+    assert.match(deploy, /chmodSync\(releasesDir,\s*0o755\)/);
+    assert.match(deploy, /chmodSync\(stagingDir,\s*0o755\)/);
   });
 
   it("ignores local secrets and release artifacts outside dist", () => {
