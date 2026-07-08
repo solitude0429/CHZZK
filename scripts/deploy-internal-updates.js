@@ -135,11 +135,14 @@ run("node", ["scripts/validate-update-manifest.js"], {
 });
 
 mkdirSync(targetDir, { recursive: true });
+chmodSync(targetDir, 0o755);
 const releasesDir = join(targetDir, "releases");
 mkdirSync(releasesDir, { recursive: true });
+chmodSync(releasesDir, 0o755);
 const releaseDir = join(releasesDir, version);
 assert.equal(existsSync(releaseDir), false, `release directory already exists: ${releaseDir}`);
 const stagingDir = mkdtempSync(join(releasesDir, `${version}.tmp-`));
+chmodSync(stagingDir, 0o755);
 
 try {
   for (const file of ["index.html", "provenance.json", releaseXpi, releaseZip, "updates.json"]) {
