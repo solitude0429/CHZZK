@@ -46,12 +46,22 @@ function assertCleanWorktree() {
   assert.equal(status, "", "deploy requires a clean working tree; commit or stash local changes first");
 }
 
-function currentGitCommit() {
-  return capture("git", ["rev-parse", "HEAD"]);
-}
-
 function currentGitHubRepository() {
   return capture("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+}
+
+function releaseTargetCommit(repository, releaseTag) {
+  return capture("gh", [
+    "release",
+    "view",
+    releaseTag,
+    "--repo",
+    repository,
+    "--json",
+    "targetCommitish",
+    "--jq",
+    ".targetCommitish",
+  ]);
 }
 
 function publishAtomicSymlink(sourcePath, targetPath) {
@@ -63,8 +73,8 @@ function publishAtomicSymlink(sourcePath, targetPath) {
 
 assertCleanWorktree();
 
-const sourceDigest = process.env.CHZZK_SOURCE_COMMIT ?? currentGitCommit();
 const sourceRepository = process.env.CHZZK_SOURCE_REPOSITORY ?? currentGitHubRepository();
+const sourceDigest = process.env.CHZZK_SOURCE_COMMIT ?? releaseTargetCommit(sourceRepository, tag);
 const workflowRef = process.env.CHZZK_SIGNING_WORKFLOW_REF ?? ".github/workflows/sign-unlisted.yml";
 const signerWorkflow = `${sourceRepository}/${workflowRef}`;
 
