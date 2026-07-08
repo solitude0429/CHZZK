@@ -35,7 +35,6 @@ describe("background hardening invariants", () => {
     assert.match(source, /\["blocking"\]/);
   });
 
-
   it("keeps diagnostics local-only without external telemetry collector code", () => {
     assert.equal(source.includes("TELEMETRY_ENDPOINT"), false);
     assert.equal(source.includes("postTelemetryReport"), false);

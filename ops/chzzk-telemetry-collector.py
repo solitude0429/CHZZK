@@ -108,9 +108,10 @@ def is_client_rate_limited(
 
 
 def client_key(handler: BaseHTTPRequestHandler) -> str:
-    forwarded = handler.headers.get("x-forwarded-for") or ""
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:120]
+    if getattr(handler.server, "trust_proxy", False):
+        forwarded = handler.headers.get("x-forwarded-for") or ""
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()[:120]
     host, _port = handler.client_address
     return str(host)[:120]
 
@@ -438,6 +439,12 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("CHZZK_TELEMETRY_PORT", DEFAULT_PORT)))
     parser.add_argument("--retention-days", type=int, default=int(os.environ.get("CHZZK_TELEMETRY_RETENTION_DAYS", RETENTION_DAYS)))
     parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("CHZZK_TELEMETRY_STATE_DIR", DEFAULT_STATE_DIR)))
+    parser.add_argument(
+        "--trust-proxy",
+        action="store_true",
+        default=os.environ.get("CHZZK_TELEMETRY_TRUST_PROXY", "0") == "1",
+        help="trust reverse-proxy supplied X-Forwarded-For for per-client rate limiting",
+    )
     args = parser.parse_args()
 
     args.state_dir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +460,7 @@ def main() -> int:
     httpd.rate_lock = threading.Lock()  # type: ignore[attr-defined]
     httpd.retention_days = args.retention_days  # type: ignore[attr-defined]
     httpd.state_dir = args.state_dir  # type: ignore[attr-defined]
+    httpd.trust_proxy = args.trust_proxy  # type: ignore[attr-defined]
     httpd.write_lock = threading.Lock()  # type: ignore[attr-defined]
     print(
         f"listening on {args.bind}:{args.port}; state_dir={args.state_dir}; "

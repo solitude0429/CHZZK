@@ -6,3 +6,22 @@ web-ext-artifacts/
 .hermes/
 __pycache__/
 *.pyc
+
+# local secrets
+.env
+.env.*
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.crt
+
+# signed/release artifacts outside dist
+*.xpi
+updates.json
+provenance.json
+
+# local tool state
+.npmrc.local
+.tmp-chzzk-sign-test-*

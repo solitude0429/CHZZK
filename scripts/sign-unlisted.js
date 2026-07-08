@@ -169,8 +169,12 @@ function singleSignedXpiPath() {
   return join("dist", "signed", files[0]);
 }
 
+function isAmoDownloadHost(hostname) {
+  return hostname === "addons.mozilla.org" || hostname.endsWith(".addons.mozilla.org");
+}
+
 async function downloadExistingSignedVersionIfPresent() {
-  if (process.env.CHZZK_REUSE_EXISTING_AMO_VERSION === "0") return false;
+  if (process.env.CHZZK_REUSE_EXISTING_AMO_VERSION !== "1") return false;
 
   const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
   const addonId = manifest.browser_specific_settings?.gecko?.id;
@@ -198,7 +202,7 @@ async function downloadExistingSignedVersionIfPresent() {
   }
 
   const fileUrl = new URL(file.url, "https://addons.mozilla.org");
-  if (fileUrl.protocol !== "https:" || !fileUrl.hostname.endsWith("addons.mozilla.org")) {
+  if (fileUrl.protocol !== "https:" || !isAmoDownloadHost(fileUrl.hostname)) {
     throw new Error("Existing AMO signed XPI URL is not on addons.mozilla.org.");
   }
 
@@ -244,10 +248,11 @@ const args = [
 const webExtEnv = { ...process.env };
 delete webExtEnv.WEB_EXT_API_KEY;
 delete webExtEnv.WEB_EXT_API_SECRET;
+const webExtBin = process.env.CHZZK_WEB_EXT_BIN || "web-ext";
 
 let exitCode = 1;
 try {
-  const result = spawnSync("web-ext", args, {
+  const result = spawnSync(webExtBin, args, {
     env: webExtEnv,
     stdio: "inherit",
   });

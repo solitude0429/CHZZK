@@ -49,7 +49,10 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       tabId: 7,
     });
     assert.deepEqual(
-      shouldRedirectRequest({ ...eligible, url: "https://example.pstatic.net/live/chunklist_1440p.m3u8" }, policy),
+      shouldRedirectRequest(
+        { ...eligible, url: "https://example.pstatic.net/live/chunklist_1440p.m3u8" },
+        policy,
+      ),
       {
         ok: true,
         quality: "1440p",
@@ -140,8 +143,40 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     });
     assert.equal(shouldRecordDiagnostics(eligible, policy, { trustedLiveTabIds: new Set([9]) }), true);
     assert.equal(shouldRedirectRequest(eligible, policy, { trustedLiveTabIds: new Set([10]) }).ok, false);
+
+    assert.deepEqual(
+      shouldRedirectRequest(
+        { ...eligible, url: "http://example.pstatic.net/live/chunklist_480p.m3u8?Policy=redacted" },
+        policy,
+        { trustedLiveTabIds: new Set([9]) },
+      ),
+      { ok: false, reason: "non-https-request-url", tabId: 9 },
+      "request URL protocol must be checked inside the policy, not only by manifest filters",
+    );
+    assert.equal(
+      shouldRecordDiagnostics(
+        { ...eligible, url: "http://example.pstatic.net/live/chunklist_480p.m3u8?Policy=redacted" },
+        policy,
+        { trustedLiveTabIds: new Set([9]) },
+      ),
+      false,
+    );
   });
 
+  it("does not trust generic livecloud-looking CDN HLS outside CHZZK request context", () => {
+    const request = {
+      documentUrl: undefined,
+      initiator: undefined,
+      method: "GET",
+      originUrl: undefined,
+      tabId: 12,
+      type: "media",
+      url: "https://example-livecloud.pstatic.net/live/chunklist_720p.m3u8?Policy=redacted",
+    };
+
+    assert.equal(shouldRedirectRequest(request, policy).ok, false);
+    assert.equal(shouldRecordDiagnostics(request, policy), false);
+  });
 
   it("covers CHZZK-hosted numeric playlist requests when the site serves HLS from its own domain", () => {
     const eligible = {

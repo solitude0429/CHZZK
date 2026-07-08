@@ -30,7 +30,11 @@ describe("highest-supported-quality helpers", () => {
       "1080p",
     );
     assert.equal(parseQualityFromUrl("https://example.test/abc/1080p/segment.m3u8"), "1080p");
-    assert.equal(parseQualityFromUrl("https://example.test/live/chunklist_1080p_low.m3u8?token=example"), "1080p");
+    assert.equal(
+      parseQualityFromUrl("https://example.test/live/chunklist_1080p_low.m3u8?token=example"),
+      "1080p",
+    );
+    assert.equal(parseQualityFromUrl("https://example.test/asset/foo-1080p-preview/chunklist.m3u8"), null);
     assert.equal(parseQualityFromUrl("https://example.test/abc/playlist.m3u8"), null);
   });
 
@@ -71,7 +75,6 @@ describe("highest-supported-quality helpers", () => {
     assert.doesNotMatch("https://cdn.test/live/chunklist_2160p.m3u8", new RegExp(filter));
   });
 
-
   it("rewrites every lower quality marker in observed CHZZK multi-quality HLS paths", () => {
     const url =
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/cflexnmss2u0003/360p/segment/chunklist_480p.m3u8?Policy=redacted";
@@ -85,9 +88,12 @@ describe("highest-supported-quality helpers", () => {
   it("rewrites any lower numeric HLS quality to the resolved maximum while preserving signed tails", () => {
     for (const quality of ["144p", "270p", "360p", "480p", "540p", "720p", "900p", "1000p", "1080p"]) {
       assert.equal(
-        buildHighestQualityRedirectUrl(`https://cdn.test/live/chunklist_${quality}.m3u8?Policy=example#frag`, {
-          targetQuality: "1440p",
-        }),
+        buildHighestQualityRedirectUrl(
+          `https://cdn.test/live/chunklist_${quality}.m3u8?Policy=example#frag`,
+          {
+            targetQuality: "1440p",
+          },
+        ),
         "https://cdn.test/live/chunklist_1440p.m3u8?Policy=example#frag",
       );
       assert.equal(
@@ -155,6 +161,27 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
         quality: "720p",
         resolution: { height: 720, width: 1280 },
         url: "https://cdn.test/live/chunklist_720p_highbitrate.m3u8?Policy=redacted",
+      },
+    ]);
+  });
+
+  it("skips malformed HLS master variants when another tag appears before the URI", () => {
+    const playlist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=4500000,RESOLUTION=1920x1080,FRAME-RATE=30.00
+#EXT-X-DISCONTINUITY
+chunklist_1080p.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,FRAME-RATE=30.00
+chunklist_720p.m3u8?Policy=redacted
+`;
+
+    assert.deepEqual(parseHlsMasterPlaylistVariants(playlist, "https://cdn.test/live/master.m3u8"), [
+      {
+        averageBandwidth: null,
+        bandwidth: 3000000,
+        frameRate: 30,
+        quality: "720p",
+        resolution: { height: 720, width: 1280 },
+        url: "https://cdn.test/live/chunklist_720p.m3u8?Policy=redacted",
       },
     ]);
   });

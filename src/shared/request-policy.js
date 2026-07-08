@@ -8,12 +8,12 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function canonicalDomainFromUrl(value) {
-  if (typeof value !== "string" || value === "") return null;
+export function isHttpsUrl(value) {
+  if (typeof value !== "string" || value === "") return false;
   try {
-    return new URL(value).hostname.toLowerCase();
+    return new URL(value).protocol === "https:";
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -56,7 +56,7 @@ export function isValidRedirectTabId(tabId) {
 }
 
 export function isTrustedRequestDomain(url, policy) {
-  const hostname = canonicalDomainFromUrl(url);
+  const hostname = canonicalHttpsDomainFromUrl(url);
   if (!hostname) return false;
   return trustedRequestDomains(policy).some((domain) => domainMatches(hostname, domain));
 }
@@ -81,6 +81,17 @@ function isNumericHlsPlaylistUrl(url) {
   return typeof url === "string" && /\.m3u8(?:[?#]|$)/i.test(url) && Boolean(parseQualityFromUrl(url));
 }
 
+function knownChzzkHlsHost(hostname) {
+  const knownSuffixes = ["livecloud.pstatic.net.live.gscdn.net", "nvelop-livecloud.pstatic.net"];
+  return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+}
+
+function knownChzzkHlsPath(pathname) {
+  const normalized = String(pathname ?? "").toLowerCase();
+  if (!/(^|\/)chzzk(\/|$)/.test(normalized)) return false;
+  return /(?:^|\/)\d{3,4}p(?:\/|$)/.test(normalized) || /(?:^|\/)chunklist_\d{3,4}p/i.test(normalized);
+}
+
 function isKnownChzzkHlsUrl(url, policy) {
   if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
 
@@ -92,9 +103,8 @@ function isKnownChzzkHlsUrl(url, policy) {
     const pathname = parsed.pathname.toLowerCase();
 
     if (trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain))) return true;
-    if (hostname.includes("chzzk")) return true;
-    if (pathname === "/chzzk" || pathname.startsWith("/chzzk/") || pathname.includes("/chzzk/")) return true;
-    if (hostname.includes("livecloud")) return true;
+    if (knownChzzkHlsHost(hostname)) return true;
+    if (knownChzzkHlsPath(pathname)) return true;
   } catch {
     return false;
   }
@@ -111,7 +121,7 @@ export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = nul
   const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
   const hasTrustedInitiator = Boolean(
     initiatorDomain &&
-      trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
+    trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
   );
 
   if (hasTrustedInitiator && isNumericHlsPlaylistUrl(details.url)) return true;
@@ -119,6 +129,7 @@ export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = nul
 }
 
 export function shouldRecordDiagnostics(details, policy, options = {}) {
+  if (!isHttpsUrl(details?.url)) return false;
   if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
   if (!isValidRedirectTabId(details.tabId)) return false;
   if (!isTrustedRequestDomain(details.url, policy)) return false;
@@ -127,6 +138,9 @@ export function shouldRecordDiagnostics(details, policy, options = {}) {
 
 export function shouldRedirectRequest(details, policy, options = {}) {
   const tabId = details?.tabId;
+  if (!isHttpsUrl(details?.url)) {
+    return { ok: false, reason: "non-https-request-url", tabId: tabId ?? null };
+  }
   if (!isValidRedirectTabId(tabId)) {
     return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
   }
@@ -166,7 +180,9 @@ export function shouldRedirectRequest(details, policy, options = {}) {
 export function configuredRequiredOrigins(policy) {
   return trustedRequestDomains(policy)
     .map((domain) =>
-      trustedInitiatorDomains(policy).includes(domain) ? `https://*.${domain}/live/*` : `https://*.${domain}/*`,
+      trustedInitiatorDomains(policy).includes(domain)
+        ? `https://*.${domain}/live/*`
+        : `https://*.${domain}/*`,
     )
     .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
 }
