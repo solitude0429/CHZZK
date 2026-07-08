@@ -6,7 +6,11 @@ const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.me
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const policy = JSON.parse(await readFile(new URL("../policy/quality-policy.json", import.meta.url), "utf8"));
 
-assert.equal(manifest.manifest_version, 2, "manifest_version must be 2 for Firefox required host permissions");
+assert.equal(
+  manifest.manifest_version,
+  2,
+  "manifest_version must be 2 for Firefox required host permissions",
+);
 assert.equal(manifest.name, "CHZZK", "extension name must be CHZZK");
 assert.equal(manifest.description, undefined, "manifest description should be omitted from about:addons");
 assert.equal(manifest.version, packageJson.version, "manifest version must match package.json");
@@ -32,8 +36,16 @@ assert.deepEqual(
   [{ js: ["site-observer.js"], matches: ["https://*.chzzk.naver.com/live/*"], run_at: "document_start" }],
   "MV2 content script must be required install-time CHZZK live access for first-request prewarm only",
 );
-assert.equal(manifest.optional_permissions, undefined, "optional permissions must not be used for core functionality");
-assert.equal(manifest.optional_host_permissions, undefined, "optional host permissions must not be used for core functionality");
+assert.equal(
+  manifest.optional_permissions,
+  undefined,
+  "optional permissions must not be used for core functionality",
+);
+assert.equal(
+  manifest.optional_host_permissions,
+  undefined,
+  "optional host permissions must not be used for core functionality",
+);
 assert.equal(
   manifest.declarative_net_request,
   undefined,
@@ -66,7 +78,16 @@ assert.deepEqual(
   { 32: "icon-32.png", 48: "icon-48.png", 96: "icon-96.png", 128: "icon.png" },
   "browser_action icon sizes must use size-matched CHZZK favicon PNGs",
 );
-assert.equal(manifest.browser_action?.default_popup, "diagnostics.html", "diagnostics popup must be registered");
+assert.equal(
+  manifest.browser_action?.default_popup,
+  "diagnostics.html",
+  "diagnostics popup must be registered",
+);
+assert.equal(
+  manifest.content_security_policy,
+  "script-src 'self'; object-src 'none'; base-uri 'none';",
+  "manifest must explicitly lock extension page CSP",
+);
 
 assert.deepEqual(policy.trustedRequestDomains, [
   "akamaized.net",
@@ -76,5 +97,7 @@ assert.deepEqual(policy.trustedRequestDomains, [
   "pstatic.net",
 ]);
 assert.equal(policy.resourceTypes.includes("other"), true);
+assert.equal(policy.probeMaxBytes, 256000);
+assert.equal(policy.maxPendingDiagnosticsMutations, 50);
 
 console.log("manifest and MV2 required-permission CHZZK redirect policy are valid");

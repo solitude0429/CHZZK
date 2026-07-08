@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",
@@ -13,7 +13,7 @@
     "check:generated": "node scripts/check-generated.js",
     "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
-    "format:check": "prettier --check package.json .github/workflows/*.yml .github/PULL_REQUEST_TEMPLATE/*.md",
+    "format:check": "prettier --check \"**/*.{js,json,md,yml}\" --ignore-path .prettierignore",
     "lint": "eslint .",
     "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans docs node_modules ops package-lock.json package.json policy reg scripts src tests",
     "sign:unlisted": "node scripts/sign-unlisted.js",
@@ -22,11 +22,13 @@
     "validate:manifest": "node scripts/validate-manifest.js",
     "validate:project": "node scripts/validate-project-cleanliness.js",
     "validate:update-manifest": "node scripts/validate-update-manifest.js",
-    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run lint && npm run lint:webext && npm run test && npm run test:ops && npm run audit:deps && npm run build && npm run audit:package"
+    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:ops && npm run audit:deps && npm run build && npm run audit:package",
+    "validate:workflows": "node scripts/validate-workflows.js"
   },
   "devDependencies": {
     "esbuild": "^0.28.1",
     "eslint": "^8.57.1",
+    "jszip": "3.10.1",
     "prettier": "^3.3.3",
     "web-ext": "^10.4.0"
   }

@@ -1,16 +1,7 @@
 export const QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
-export const DEFAULT_QUALITY_CANDIDATES = [
-  "2160p",
-  "1440p",
-  "1080p",
-  "720p",
-  "480p",
-  "360p",
-  "270p",
-  "144p",
-];
+export const DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
 
-const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
+const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
 const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
 const SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
@@ -46,7 +37,7 @@ export function parseQualityFromUrl(url) {
   }
 
   const pathQuality = pathname.match(PATH_QUALITY_RE);
-  return pathQuality ? normalizeQualityLabel(pathQuality[1]) : normalizeQualityLabel(pathname);
+  return pathQuality ? normalizeQualityLabel(pathQuality[1]) : null;
 }
 
 export function redactMediaUrl(url) {
@@ -171,12 +162,15 @@ export function replaceQualityInUrl(url, targetQuality) {
   if (typeof url !== "string" || !normalizedTarget || !target || !currentQuality) return null;
 
   let replacedAny = false;
-  const replaced = url.replace(/(chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/gi, (match, prefix, quality) => {
-    const current = qualityNumber(quality);
-    if (!current || current >= target) return match;
-    replacedAny = true;
-    return `${prefix}${normalizedTarget}`;
-  });
+  const replaced = url.replace(
+    /(chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/gi,
+    (match, prefix, quality) => {
+      const current = qualityNumber(quality);
+      if (!current || current >= target) return match;
+      replacedAny = true;
+      return `${prefix}${normalizedTarget}`;
+    },
+  );
 
   return replacedAny ? replaced : null;
 }
@@ -205,7 +199,10 @@ function parseHlsAttributeList(value) {
         const separator = entry.indexOf("=");
         if (separator === -1) return null;
         const key = entry.slice(0, separator).trim().toUpperCase();
-        const rawValue = entry.slice(separator + 1).trim().replace(/^"|"$/g, "");
+        const rawValue = entry
+          .slice(separator + 1)
+          .trim()
+          .replace(/^"|"$/g, "");
         return key ? [key, rawValue] : null;
       })
       .filter(Boolean),
@@ -236,8 +233,10 @@ export function parseHlsMasterPlaylistVariants(playlistText, baseUrl = "") {
     if (!line.toUpperCase().startsWith("#EXT-X-STREAM-INF:")) continue;
 
     const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
-    const nextUri = lines.slice(index + 1).find((candidate) => candidate && !candidate.startsWith("#"));
-    if (!nextUri) continue;
+    let uriIndex = index + 1;
+    while (uriIndex < lines.length && !lines[uriIndex]) uriIndex += 1;
+    const nextUri = lines[uriIndex];
+    if (!nextUri || nextUri.startsWith("#")) continue;
 
     const resolution = parseResolutionAttribute(attributes.RESOLUTION);
     let url = nextUri;
@@ -277,20 +276,18 @@ export function chooseBestHlsVariant(playlistText, baseUrl = "", { minRedirectQu
     parseHlsMasterPlaylistVariants(playlistText, baseUrl)
       .filter((variant) => (variantScore(variant).height || 0) >= min)
       .map((variant, index) => ({ index, score: variantScore(variant), variant }))
-      .sort((left, right) =>
-        right.score.height - left.score.height ||
-        right.score.frameRate - left.score.frameRate ||
-        right.score.bitrate - left.score.bitrate ||
-        right.score.peakBandwidth - left.score.peakBandwidth ||
-        left.index - right.index,
+      .sort(
+        (left, right) =>
+          right.score.height - left.score.height ||
+          right.score.frameRate - left.score.frameRate ||
+          right.score.bitrate - left.score.bitrate ||
+          right.score.peakBandwidth - left.score.peakBandwidth ||
+          left.index - right.index,
       )[0]?.variant ?? null
   );
 }
 
-export function buildHighestQualityRedirectUrl(
-  url,
-  { targetQuality, minRedirectQuality = "100p" } = {},
-) {
+export function buildHighestQualityRedirectUrl(url, { targetQuality, minRedirectQuality = "100p" } = {}) {
   const currentQuality = qualityNumber(parseQualityFromUrl(url));
   const target = qualityNumber(targetQuality);
   const min = qualityNumber(minRedirectQuality);

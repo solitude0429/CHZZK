@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, cpSync, chmodSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { mkdtempSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 
 const packageJson = JSON.parse(
   await import("node:fs").then(({ readFileSync }) =>
@@ -31,6 +41,11 @@ function capture(command, args, options = {}) {
   return result.stdout.trim();
 }
 
+function assertCleanWorktree() {
+  const status = capture("git", ["status", "--porcelain"]);
+  assert.equal(status, "", "deploy requires a clean working tree; commit or stash local changes first");
+}
+
 function currentGitCommit() {
   return capture("git", ["rev-parse", "HEAD"]);
 }
@@ -38,6 +53,15 @@ function currentGitCommit() {
 function currentGitHubRepository() {
   return capture("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
 }
+
+function publishAtomicSymlink(sourcePath, targetPath) {
+  const temporaryLink = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  rmSync(temporaryLink, { force: true });
+  symlinkSync(relative(dirname(targetPath), sourcePath), temporaryLink);
+  renameSync(temporaryLink, targetPath);
+}
+
+assertCleanWorktree();
 
 const sourceDigest = process.env.CHZZK_SOURCE_COMMIT ?? currentGitCommit();
 const sourceRepository = process.env.CHZZK_SOURCE_REPOSITORY ?? currentGitHubRepository();
@@ -52,7 +76,19 @@ assert.equal(
   "workflowRef must be the signing workflow path",
 );
 
-run("gh", ["release", "download", tag, "-p", releaseXpi, "-p", releaseZip, "-D", workDir]);
+run("gh", [
+  "release",
+  "download",
+  tag,
+  "--repo",
+  sourceRepository,
+  "-p",
+  releaseXpi,
+  "-p",
+  releaseZip,
+  "-D",
+  workDir,
+]);
 
 const signedXpiPath = join(workDir, releaseXpi);
 const releaseZipPath = join(workDir, releaseZip);
@@ -99,9 +135,26 @@ run("node", ["scripts/validate-update-manifest.js"], {
 });
 
 mkdirSync(targetDir, { recursive: true });
-for (const file of ["index.html", "provenance.json", releaseXpi, releaseZip, "updates.json"]) {
-  cpSync(join(workDir, file), join(targetDir, file));
-  chmodSync(join(targetDir, file), 0o644);
+const releasesDir = join(targetDir, "releases");
+mkdirSync(releasesDir, { recursive: true });
+const releaseDir = join(releasesDir, version);
+assert.equal(existsSync(releaseDir), false, `release directory already exists: ${releaseDir}`);
+const stagingDir = mkdtempSync(join(releasesDir, `${version}.tmp-`));
+
+try {
+  for (const file of ["index.html", "provenance.json", releaseXpi, releaseZip, "updates.json"]) {
+    cpSync(join(workDir, file), join(stagingDir, file));
+    chmodSync(join(stagingDir, file), 0o644);
+  }
+  renameSync(stagingDir, releaseDir);
+
+  for (const file of ["index.html", "provenance.json", releaseXpi, releaseZip]) {
+    publishAtomicSymlink(join(releaseDir, file), join(targetDir, file));
+  }
+  publishAtomicSymlink(join(releaseDir, "updates.json"), join(targetDir, "updates.json"));
+} catch (error) {
+  rmSync(stagingDir, { force: true, recursive: true });
+  throw error;
 }
 
 console.log(`deployed CHZZK ${version} update files to ${targetDir}`);

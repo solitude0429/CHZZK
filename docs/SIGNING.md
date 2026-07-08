@@ -34,7 +34,7 @@ npm run sign:unlisted
 4. push trigger 또는 `publish_release`가 켜진 수동 실행이면 해당 버전의 GitHub Release가 생성/갱신됩니다.
 5. 내부 update host 배포가 필요하면 VPS에서 `npm run deploy:updates:internal`을 실행합니다.
 
-Workflow는 `firefox-signing` GitHub Environment에서 실행되며, default branch 또는 `v*` protected tag가 아니면 AMO secret 사용 전에 실패합니다. Release asset은 재사용하지 않고 매번 현재 verified source에서 새로 서명한 뒤 GitHub artifact attestation을 생성합니다.
+Workflow는 `firefox-signing` GitHub Environment에서 실행되며, default branch 또는 `v*` protected tag가 아니면 AMO secret 사용 전에 실패합니다. Release asset은 재사용하지 않고 매번 현재 verified source에서 새로 서명한 뒤 GitHub artifact attestation을 생성합니다. 로컬에서 이미 AMO에 공개된 동일 버전 XPI를 source-match 검증 후 재사용해야 하는 특수 상황에서는 `CHZZK_REUSE_EXISTING_AMO_VERSION=1`을 명시적으로 설정해야 합니다.
 
 ## 주의
 

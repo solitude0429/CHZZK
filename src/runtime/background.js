@@ -9,6 +9,7 @@ import {
   configuredResourceTypes,
   configuredWebRequestUrls,
   isChzzkLiveUrl,
+  isTrustedRequestDomain,
   isValidRedirectTabId,
   shouldRecordDiagnostics,
   shouldRedirectRequest,
@@ -27,12 +28,38 @@ const STORAGE_KEY = "chzzkDiagnostics";
 const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
 const activeLiveTabIds = new Set();
 const activeTargetsByTab = new Map();
+const liveContextByTab = new Map();
 const resolvedTargetsByTab = new Set();
 let diagnosticsMutationQueue = Promise.resolve();
+let diagnosticsMutationQueueDepth = 0;
+
+function normalizeDiagnostics(value) {
+  const empty = createEmptyDiagnostics({ maxSamples: policy.maxDiagnosticsSamples });
+  if (!value || typeof value !== "object") return empty;
+  const runtimeRedirects = value.runtimeRedirects && typeof value.runtimeRedirects === "object" ? value.runtimeRedirects : {};
+  return {
+    ...empty,
+    ...value,
+    decisions: Array.isArray(value.decisions) ? value.decisions : [],
+    maxSamples: Number.isSafeInteger(value.maxSamples) && value.maxSamples > 0 ? value.maxSamples : empty.maxSamples,
+    qualities: value.qualities && typeof value.qualities === "object" && !Array.isArray(value.qualities) ? value.qualities : {},
+    runtimeRedirects: {
+      ...empty.runtimeRedirects,
+      ...runtimeRedirects,
+      activeTabIds: Array.isArray(runtimeRedirects.activeTabIds) ? runtimeRedirects.activeTabIds : [],
+      targetsByTab:
+        runtimeRedirects.targetsByTab && typeof runtimeRedirects.targetsByTab === "object" && !Array.isArray(runtimeRedirects.targetsByTab)
+          ? runtimeRedirects.targetsByTab
+          : {},
+    },
+    samples: Array.isArray(value.samples) ? value.samples : [],
+    totalHlsRequests: Number.isFinite(Number(value.totalHlsRequests)) ? Number(value.totalHlsRequests) : 0,
+  };
+}
 
 async function loadDiagnostics() {
   const stored = await api.storage.local.get(STORAGE_KEY);
-  return stored?.[STORAGE_KEY] ?? createEmptyDiagnostics({ maxSamples: policy.maxDiagnosticsSamples });
+  return normalizeDiagnostics(stored?.[STORAGE_KEY]);
 }
 
 async function saveDiagnostics(diagnostics) {
@@ -46,8 +73,21 @@ async function mutateDiagnostics(mutator) {
   return { diagnostics, result };
 }
 
+function diagnosticsQueueLimit() {
+  const configured = Number(policy.maxPendingDiagnosticsMutations ?? 50);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : 50;
+}
+
 async function enqueueDiagnosticsMutation(mutator) {
-  const operation = diagnosticsMutationQueue.then(() => mutateDiagnostics(mutator));
+  if (diagnosticsMutationQueueDepth >= diagnosticsQueueLimit()) {
+    return { diagnostics: null, dropped: true, result: false };
+  }
+  diagnosticsMutationQueueDepth += 1;
+  const operation = diagnosticsMutationQueue
+    .then(() => mutateDiagnostics(mutator))
+    .finally(() => {
+      diagnosticsMutationQueueDepth = Math.max(0, diagnosticsMutationQueueDepth - 1);
+    });
   diagnosticsMutationQueue = operation.catch((error) => {
     console.warn("[CHZZK] diagnostics mutation failed", error);
   });
@@ -80,8 +120,60 @@ function probeTimeoutMs() {
   return Number.isFinite(configured) && configured > 0 ? configured : 1500;
 }
 
+function probeMaxBytes() {
+  const configured = Number(policy.probeMaxBytes ?? 256_000);
+  return Number.isFinite(configured) && configured > 0 ? configured : 256_000;
+}
+
 function isLikelyHlsPlaylist(text) {
   return /^\s*#EXTM3U/m.test(String(text ?? ""));
+}
+
+function responseHeader(response, name) {
+  return response?.headers?.get?.(name) ?? null;
+}
+
+function responseContentLength(response) {
+  const value = Number(responseHeader(response, "content-length") ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function readResponseTextWithLimit(response, maxBytes) {
+  const declaredLength = responseContentLength(response);
+  if (declaredLength > maxBytes) return null;
+
+  if (!response?.body?.getReader) {
+    const text = await response.text();
+    return text.length > maxBytes ? null : text;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    let done = false;
+    while (!done) {
+      const chunk = await reader.read();
+      done = chunk.done;
+      if (done) break;
+      const { value } = chunk;
+      totalBytes += value.byteLength ?? value.length ?? 0;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } catch {
+    return null;
+  }
+}
+
+function finalResponseUrl(response, requestedUrl) {
+  return typeof response?.url === "string" && response.url ? response.url : requestedUrl;
 }
 
 async function fetchPlaylistText(url) {
@@ -95,7 +187,8 @@ async function fetchPlaylistText(url) {
       signal: controller.signal,
     });
     if (!response.ok) return null;
-    const text = await response.text();
+    if (!isTrustedRequestDomain(finalResponseUrl(response, url), policy)) return null;
+    const text = await readResponseTextWithLimit(response, probeMaxBytes());
     return isLikelyHlsPlaylist(text) ? text : null;
   } catch {
     return null;
@@ -158,11 +251,28 @@ async function reportRedirectError(error) {
   await updateRedirectDiagnostics(String(error?.message ?? error));
 }
 
-async function prewarmLiveTab(tabId) {
+function liveContextKey(url) {
+  if (!isChzzkLiveUrl(url, policy)) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.replace(/\/+$/, "") || "/live";
+  } catch {
+    return null;
+  }
+}
+
+async function prewarmLiveTab(tabId, url = null) {
   if (!isValidRedirectTabId(tabId)) return;
+  const nextContext = liveContextKey(url);
+  const previousContext = liveContextByTab.get(tabId);
+  const hadTarget = Boolean(nextContext && previousContext && previousContext !== nextContext && activeTargetsByTab.delete(tabId));
+  if (nextContext && previousContext && previousContext !== nextContext) {
+    resolvedTargetsByTab.delete(tabId);
+  }
+  if (nextContext) liveContextByTab.set(tabId, nextContext);
   const previousSize = activeLiveTabIds.size;
   activeLiveTabIds.add(tabId);
-  if (activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
+  if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
 }
 
 async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
@@ -177,13 +287,15 @@ async function removeTabTarget(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   const hadTarget = activeTargetsByTab.delete(tabId);
   const hadLiveTab = activeLiveTabIds.delete(tabId);
+  const hadContext = liveContextByTab.delete(tabId);
   resolvedTargetsByTab.delete(tabId);
-  if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
+  if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
 }
 
 async function clearRuntimeRedirectState() {
   activeLiveTabIds.clear();
   activeTargetsByTab.clear();
+  liveContextByTab.clear();
   resolvedTargetsByTab.clear();
   await updateRedirectDiagnostics();
 }
@@ -283,7 +395,7 @@ function liveTabQueryUrls() {
 async function prewarmExistingLiveTabs() {
   if (typeof api.tabs?.query !== "function") return;
   const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
-  await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id)));
+  await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
 }
 
 async function resetAndPrewarmRuntimeState() {
@@ -294,7 +406,7 @@ async function resetAndPrewarmRuntimeState() {
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (!changeInfo?.url) return;
   if (isChzzkLiveUrl(changeInfo.url, policy)) {
-    prewarmLiveTab(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm live tab from URL update", error));
+    prewarmLiveTab(tabId, changeInfo.url).catch((error) => console.warn("[CHZZK] failed to prewarm live tab from URL update", error));
     return;
   }
   removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to clear tab target", error));

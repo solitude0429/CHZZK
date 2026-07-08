@@ -34,7 +34,9 @@ describe("personal CHZZK extension policy", () => {
       "no page script should be packaged",
     );
     assert.equal(
-      readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8").includes("querySelector"),
+      readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8").includes(
+        "querySelector",
+      ),
       false,
       "site observer must not query or control the player DOM",
     );
@@ -69,7 +71,6 @@ describe("personal CHZZK extension policy", () => {
     assert.equal(runtimeText.includes("with CHZZK GRID"), false);
     assert.equal(runtimeText.includes("pzp-setting-quality-pane"), false);
   });
-
 
   it("declares CHZZK and HLS origins as required MV2 permissions", () => {
     assert.deepEqual(manifest.permissions, [

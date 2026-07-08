@@ -11,6 +11,8 @@
     urlQualityPrefixes: ["chunklist_", "/"],
     mediaExtensions: ["m3u8"],
     maxDiagnosticsSamples: 200,
+    maxPendingDiagnosticsMutations: 50,
+    probeMaxBytes: 256e3,
     probeTimeoutMs: 1500,
     notes: [
       "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
@@ -23,13 +25,14 @@
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
       "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
+      "Probe responses are accepted only from trusted final HLS domains and are capped by probeMaxBytes to avoid redirecting from oversized or cross-origin playlist probes.",
     ],
   };
 
   // src/shared/quality.js
   var QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
   var DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
-  var PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/i;
+  var PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i;
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
   var SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
@@ -57,7 +60,7 @@
       pathname = url.split("?")[0].split("#")[0];
     }
     const pathQuality = pathname.match(PATH_QUALITY_RE);
-    return pathQuality ? normalizeQualityLabel(pathQuality[1]) : normalizeQualityLabel(pathname);
+    return pathQuality ? normalizeQualityLabel(pathQuality[1]) : null;
   }
   function redactMediaUrl(url) {
     if (typeof url !== "string" || url === "") return "";
@@ -166,8 +169,10 @@
       const line = lines[index];
       if (!line.toUpperCase().startsWith("#EXT-X-STREAM-INF:")) continue;
       const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
-      const nextUri = lines.slice(index + 1).find((candidate) => candidate && !candidate.startsWith("#"));
-      if (!nextUri) continue;
+      let uriIndex = index + 1;
+      while (uriIndex < lines.length && !lines[uriIndex]) uriIndex += 1;
+      const nextUri = lines[uriIndex];
+      if (!nextUri || nextUri.startsWith("#")) continue;
       const resolution = parseResolutionAttribute(attributes.RESOLUTION);
       let url = nextUri;
       try {
@@ -303,12 +308,12 @@
   function asArray(value) {
     return Array.isArray(value) ? value : [];
   }
-  function canonicalDomainFromUrl(value) {
-    if (typeof value !== "string" || value === "") return null;
+  function isHttpsUrl(value) {
+    if (typeof value !== "string" || value === "") return false;
     try {
-      return new URL(value).hostname.toLowerCase();
+      return new URL(value).protocol === "https:";
     } catch {
-      return null;
+      return false;
     }
   }
   function canonicalHttpsDomainFromUrl(value) {
@@ -345,7 +350,7 @@
     return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
   }
   function isTrustedRequestDomain(url, policy) {
-    const hostname = canonicalDomainFromUrl(url);
+    const hostname = canonicalHttpsDomainFromUrl(url);
     if (!hostname) return false;
     return trustedRequestDomains(policy).some((domain) => domainMatches(hostname, domain));
   }
@@ -369,6 +374,15 @@
   function isNumericHlsPlaylistUrl(url) {
     return typeof url === "string" && /\.m3u8(?:[?#]|$)/i.test(url) && Boolean(parseQualityFromUrl(url));
   }
+  function knownChzzkHlsHost(hostname) {
+    const knownSuffixes = ["livecloud.pstatic.net.live.gscdn.net", "nvelop-livecloud.pstatic.net"];
+    return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+  }
+  function knownChzzkHlsPath(pathname) {
+    const normalized = String(pathname ?? "").toLowerCase();
+    if (!/(^|\/)chzzk(\/|$)/.test(normalized)) return false;
+    return /(?:^|\/)\d{3,4}p(?:\/|$)/.test(normalized) || /(?:^|\/)chunklist_\d{3,4}p/i.test(normalized);
+  }
   function isKnownChzzkHlsUrl(url, policy) {
     if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
     try {
@@ -377,10 +391,8 @@
       const hostname = parsed.hostname.toLowerCase();
       const pathname = parsed.pathname.toLowerCase();
       if (trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain))) return true;
-      if (hostname.includes("chzzk")) return true;
-      if (pathname === "/chzzk" || pathname.startsWith("/chzzk/") || pathname.includes("/chzzk/"))
-        return true;
-      if (hostname.includes("livecloud")) return true;
+      if (knownChzzkHlsHost(hostname)) return true;
+      if (knownChzzkHlsPath(pathname)) return true;
     } catch {
       return false;
     }
@@ -400,6 +412,7 @@
     return isKnownChzzkHlsUrl(details.url, policy);
   }
   function shouldRecordDiagnostics(details, policy, options = {}) {
+    if (!isHttpsUrl(details?.url)) return false;
     if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
     if (!isValidRedirectTabId(details.tabId)) return false;
     if (!isTrustedRequestDomain(details.url, policy)) return false;
@@ -407,6 +420,9 @@
   }
   function shouldRedirectRequest(details, policy, options = {}) {
     const tabId = details?.tabId;
+    if (!isHttpsUrl(details?.url)) {
+      return { ok: false, reason: "non-https-request-url", tabId: tabId ?? null };
+    }
     if (!isValidRedirectTabId(tabId)) {
       return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
     }
@@ -461,14 +477,43 @@
   var WEB_REQUEST_URLS = configuredWebRequestUrls(quality_policy_default);
   var activeLiveTabIds = /* @__PURE__ */ new Set();
   var activeTargetsByTab = /* @__PURE__ */ new Map();
+  var liveContextByTab = /* @__PURE__ */ new Map();
   var resolvedTargetsByTab = /* @__PURE__ */ new Set();
   var diagnosticsMutationQueue = Promise.resolve();
+  var diagnosticsMutationQueueDepth = 0;
+  function normalizeDiagnostics(value) {
+    const empty = createEmptyDiagnostics({ maxSamples: quality_policy_default.maxDiagnosticsSamples });
+    if (!value || typeof value !== "object") return empty;
+    const runtimeRedirects =
+      value.runtimeRedirects && typeof value.runtimeRedirects === "object" ? value.runtimeRedirects : {};
+    return {
+      ...empty,
+      ...value,
+      decisions: Array.isArray(value.decisions) ? value.decisions : [],
+      maxSamples:
+        Number.isSafeInteger(value.maxSamples) && value.maxSamples > 0 ? value.maxSamples : empty.maxSamples,
+      qualities:
+        value.qualities && typeof value.qualities === "object" && !Array.isArray(value.qualities)
+          ? value.qualities
+          : {},
+      runtimeRedirects: {
+        ...empty.runtimeRedirects,
+        ...runtimeRedirects,
+        activeTabIds: Array.isArray(runtimeRedirects.activeTabIds) ? runtimeRedirects.activeTabIds : [],
+        targetsByTab:
+          runtimeRedirects.targetsByTab &&
+          typeof runtimeRedirects.targetsByTab === "object" &&
+          !Array.isArray(runtimeRedirects.targetsByTab)
+            ? runtimeRedirects.targetsByTab
+            : {},
+      },
+      samples: Array.isArray(value.samples) ? value.samples : [],
+      totalHlsRequests: Number.isFinite(Number(value.totalHlsRequests)) ? Number(value.totalHlsRequests) : 0,
+    };
+  }
   async function loadDiagnostics() {
     const stored = await api.storage.local.get(STORAGE_KEY);
-    return (
-      stored?.[STORAGE_KEY] ??
-      createEmptyDiagnostics({ maxSamples: quality_policy_default.maxDiagnosticsSamples })
-    );
+    return normalizeDiagnostics(stored?.[STORAGE_KEY]);
   }
   async function saveDiagnostics(diagnostics) {
     await api.storage.local.set({ [STORAGE_KEY]: diagnostics });
@@ -479,8 +524,20 @@
     await saveDiagnostics(diagnostics);
     return { diagnostics, result };
   }
+  function diagnosticsQueueLimit() {
+    const configured = Number(quality_policy_default.maxPendingDiagnosticsMutations ?? 50);
+    return Number.isSafeInteger(configured) && configured > 0 ? configured : 50;
+  }
   async function enqueueDiagnosticsMutation(mutator) {
-    const operation = diagnosticsMutationQueue.then(() => mutateDiagnostics(mutator));
+    if (diagnosticsMutationQueueDepth >= diagnosticsQueueLimit()) {
+      return { diagnostics: null, dropped: true, result: false };
+    }
+    diagnosticsMutationQueueDepth += 1;
+    const operation = diagnosticsMutationQueue
+      .then(() => mutateDiagnostics(mutator))
+      .finally(() => {
+        diagnosticsMutationQueueDepth = Math.max(0, diagnosticsMutationQueueDepth - 1);
+      });
     diagnosticsMutationQueue = operation.catch((error) => {
       console.warn("[CHZZK] diagnostics mutation failed", error);
     });
@@ -508,8 +565,53 @@
     const configured = Number(quality_policy_default.probeTimeoutMs ?? 1500);
     return Number.isFinite(configured) && configured > 0 ? configured : 1500;
   }
+  function probeMaxBytes() {
+    const configured = Number(quality_policy_default.probeMaxBytes ?? 256e3);
+    return Number.isFinite(configured) && configured > 0 ? configured : 256e3;
+  }
   function isLikelyHlsPlaylist(text) {
     return /^\s*#EXTM3U/m.test(String(text ?? ""));
+  }
+  function responseHeader(response, name) {
+    return response?.headers?.get?.(name) ?? null;
+  }
+  function responseContentLength(response) {
+    const value = Number(responseHeader(response, "content-length") ?? 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+  async function readResponseTextWithLimit(response, maxBytes) {
+    const declaredLength = responseContentLength(response);
+    if (declaredLength > maxBytes) return null;
+    if (!response?.body?.getReader) {
+      const text = await response.text();
+      return text.length > maxBytes ? null : text;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const chunks = [];
+    let totalBytes = 0;
+    try {
+      let done = false;
+      while (!done) {
+        const chunk = await reader.read();
+        done = chunk.done;
+        if (done) break;
+        const { value } = chunk;
+        totalBytes += value.byteLength ?? value.length ?? 0;
+        if (totalBytes > maxBytes) {
+          await reader.cancel();
+          return null;
+        }
+        chunks.push(decoder.decode(value, { stream: true }));
+      }
+      chunks.push(decoder.decode());
+      return chunks.join("");
+    } catch {
+      return null;
+    }
+  }
+  function finalResponseUrl(response, requestedUrl) {
+    return typeof response?.url === "string" && response.url ? response.url : requestedUrl;
   }
   async function fetchPlaylistText(url) {
     const controller = new AbortController();
@@ -522,7 +624,8 @@
         signal: controller.signal,
       });
       if (!response.ok) return null;
-      const text = await response.text();
+      if (!isTrustedRequestDomain(finalResponseUrl(response, url), quality_policy_default)) return null;
+      const text = await readResponseTextWithLimit(response, probeMaxBytes());
       return isLikelyHlsPlaylist(text) ? text : null;
     } catch {
       return null;
@@ -572,11 +675,29 @@
   async function reportRedirectError(error) {
     await updateRedirectDiagnostics(String(error?.message ?? error));
   }
-  async function prewarmLiveTab(tabId) {
+  function liveContextKey(url) {
+    if (!isChzzkLiveUrl(url, quality_policy_default)) return null;
+    try {
+      const parsed = new URL(url);
+      return parsed.pathname.replace(/\/+$/, "") || "/live";
+    } catch {
+      return null;
+    }
+  }
+  async function prewarmLiveTab(tabId, url = null) {
     if (!isValidRedirectTabId(tabId)) return;
+    const nextContext = liveContextKey(url);
+    const previousContext = liveContextByTab.get(tabId);
+    const hadTarget = Boolean(
+      nextContext && previousContext && previousContext !== nextContext && activeTargetsByTab.delete(tabId),
+    );
+    if (nextContext && previousContext && previousContext !== nextContext) {
+      resolvedTargetsByTab.delete(tabId);
+    }
+    if (nextContext) liveContextByTab.set(tabId, nextContext);
     const previousSize = activeLiveTabIds.size;
     activeLiveTabIds.add(tabId);
-    if (activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
+    if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
   }
   async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
     if (!isValidRedirectTabId(tabId) || !targetQuality) return;
@@ -589,12 +710,14 @@
     if (!isValidRedirectTabId(tabId)) return;
     const hadTarget = activeTargetsByTab.delete(tabId);
     const hadLiveTab = activeLiveTabIds.delete(tabId);
+    const hadContext = liveContextByTab.delete(tabId);
     resolvedTargetsByTab.delete(tabId);
-    if (hadTarget || hadLiveTab) await updateRedirectDiagnostics();
+    if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
   }
   async function clearRuntimeRedirectState() {
     activeLiveTabIds.clear();
     activeTargetsByTab.clear();
+    liveContextByTab.clear();
     resolvedTargetsByTab.clear();
     await updateRedirectDiagnostics();
   }
@@ -684,7 +807,7 @@
   async function prewarmExistingLiveTabs() {
     if (typeof api.tabs?.query !== "function") return;
     const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
-    await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id)));
+    await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
   }
   async function resetAndPrewarmRuntimeState() {
     await clearRuntimeRedirectState();
@@ -693,7 +816,7 @@
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     if (!changeInfo?.url) return;
     if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
-      prewarmLiveTab(tabId).catch((error) =>
+      prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
         console.warn("[CHZZK] failed to prewarm live tab from URL update", error),
       );
       return;

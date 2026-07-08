@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: firefox-signing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Enforce protected signing ref
         run: |
           set -euo pipefail
@@ -42,7 +42,7 @@ jobs:
             echo "Signing ref must be protected before AMO credentials are used." >&2
             exit 1
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -63,6 +63,7 @@ jobs:
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          CHZZK_REUSE_EXISTING_AMO_VERSION: "0"
       - name: Normalize signed XPI name and checksum
         id: signed_xpi
         run: |
@@ -79,7 +80,7 @@ jobs:
       - run: npm run build:update-manifest
       - run: npm run validate:update-manifest
       - name: Attest release provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
             dist/chzzk-${{ steps.package.outputs.version }}.zip
@@ -128,11 +129,11 @@ jobs:
               --notes-file release-notes.md \
               --latest
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chzzk-signed-xpi
           path: dist/chzzk-${{ steps.package.outputs.version }}-signed.xpi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chzzk-update-site
           path: dist/update-site

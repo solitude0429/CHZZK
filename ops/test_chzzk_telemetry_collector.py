@@ -81,6 +81,25 @@ class CollectorTests(unittest.TestCase):
         self.assertTrue(collector.is_client_rate_limited("127.0.0.1", now=12, window_seconds=60, max_reports=2))
         self.assertFalse(collector.is_client_rate_limited("127.0.0.1", now=80, window_seconds=60, max_reports=2))
 
+    def test_client_key_trusts_x_forwarded_for_only_when_proxy_mode_is_enabled(self) -> None:
+        class Headers:
+            def get(self, key: str, default: str | None = None) -> str | None:
+                values = {"x-forwarded-for": "203.0.113.10, 198.51.100.20"}
+                return values.get(key.lower(), default)
+
+        class Server:
+            trust_proxy = False
+
+        class Handler:
+            client_address = ("127.0.0.1", 12345)
+            headers = Headers()
+            server = Server()
+
+        handler = Handler()
+        self.assertEqual(collector.client_key(handler), "127.0.0.1")
+        handler.server.trust_proxy = True
+        self.assertEqual(collector.client_key(handler), "203.0.113.10")
+
     def test_atomic_append_writes_single_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "reports.ndjson"

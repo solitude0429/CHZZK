@@ -1,42 +1,16 @@
 {
   "mode": "highest-supported-grid-quality",
-  "qualityCandidates": [
-    "2160p",
-    "1440p",
-    "1080p",
-    "720p",
-    "480p",
-    "360p",
-    "270p",
-    "144p"
-  ],
+  "qualityCandidates": ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"],
   "minRedirectQuality": "100p",
-  "trustedInitiatorDomains": [
-    "chzzk.naver.com"
-  ],
-  "trustedRequestDomains": [
-    "akamaized.net",
-    "chzzk.naver.com",
-    "gscdn.net",
-    "navercdn.com",
-    "pstatic.net"
-  ],
-  "resourceTypes": [
-    "media",
-    "other",
-    "xmlhttprequest"
-  ],
-  "requestMethods": [
-    "get"
-  ],
-  "urlQualityPrefixes": [
-    "chunklist_",
-    "/"
-  ],
-  "mediaExtensions": [
-    "m3u8"
-  ],
+  "trustedInitiatorDomains": ["chzzk.naver.com"],
+  "trustedRequestDomains": ["akamaized.net", "chzzk.naver.com", "gscdn.net", "navercdn.com", "pstatic.net"],
+  "resourceTypes": ["media", "other", "xmlhttprequest"],
+  "requestMethods": ["get"],
+  "urlQualityPrefixes": ["chunklist_", "/"],
+  "mediaExtensions": ["m3u8"],
   "maxDiagnosticsSamples": 200,
+  "maxPendingDiagnosticsMutations": 50,
+  "probeMaxBytes": 256000,
   "probeTimeoutMs": 1500,
   "notes": [
     "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
@@ -48,6 +22,7 @@
     "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
     "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
-    "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality."
+    "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
+    "Probe responses are accepted only from trusted final HLS domains and are capped by probeMaxBytes to avoid redirecting from oversized or cross-origin playlist probes."
   ]
 }
