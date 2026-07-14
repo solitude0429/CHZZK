@@ -194,14 +194,17 @@ export async function signPreparedAddon({
   if (!validation.valid) throw new Error("AMO rejected the prepared extension archive");
 
   const submission = await readJsonResponse(
-    await authorizedFetch(new URL(`addons/addon/${encodeURIComponent(metadata.addOnId)}/`, AMO_API_ROOT), {
-      body: JSON.stringify({ version: { upload: upload.uuid } }),
-      headers: { "Content-Type": "application/json" },
-      method: "PUT",
-    }),
+    await authorizedFetch(
+      new URL(`addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`, AMO_API_ROOT),
+      {
+        body: JSON.stringify({ upload: upload.uuid }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    ),
     "submission",
   );
-  const versionId = submission?.version?.id;
+  const versionId = submission?.id ?? submission?.version?.id;
   if (!Number.isSafeInteger(versionId) && typeof versionId !== "string") {
     throw new Error("AMO submission response omitted its version ID");
   }

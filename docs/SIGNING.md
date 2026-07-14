@@ -34,7 +34,7 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repos
 
 1. prepared ZIP SHA-256 검증
 2. AMO upload/validation 제출
-3. unlisted version 생성과 승인 상태 polling
+3. `POST /api/v5/addons/addon/<add-on id>/versions/`에 top-level upload UUID를 보내 unlisted version 생성 후 승인 상태 polling
 4. 허용된 `addons.mozilla.org` HTTPS download URL과 각 redirect hop 검증
 5. 다운로드 요청에는 AMO JWT를 보내지 않고 signed XPI를 mode `0600`으로 원자적 저장
 

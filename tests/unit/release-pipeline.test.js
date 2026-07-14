@@ -210,12 +210,16 @@ describe("minimal AMO signing client", () => {
         validationPolls += 1;
         return Response.json({ processed: true, uuid: "synthetic-upload", valid: true, validation: {} });
       }
-      if (path.includes("/addons/addon/") && options.method === "PUT") {
+      if (
+        path.endsWith(`/addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`) &&
+        options.method === "POST"
+      ) {
         const submitted = JSON.parse(options.body);
-        assert.equal(submitted.version.upload, "synthetic-upload");
+        assert.deepEqual(submitted, { upload: "synthetic-upload" });
         return Response.json({
-          guid: metadata.addOnId,
-          version: { edit_url: "https://addons.mozilla.org/developers/addon/synthetic", id: 1234 },
+          edit_url: "https://addons.mozilla.org/developers/addon/synthetic",
+          id: 1234,
+          version: metadata.version,
         });
       }
       if (path.endsWith("/versions/1234/")) {
