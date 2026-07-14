@@ -1,35 +1,43 @@
 {
   "name": "chzzk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solitude0429/CHZZK.git"
+  },
   "scripts": {
     "audit:deps": "npm audit --audit-level=moderate",
     "audit:package": "node scripts/verify-package.js",
-    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans docs node_modules ops package-lock.json package.json policy reg scripts src tests",
+    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs node_modules package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
     "build:update-manifest": "node scripts/build-update-manifest.js",
     "check:generated": "node scripts/check-generated.js",
     "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
-    "format:check": "prettier --check \"**/*.{js,json,md,yml}\" --ignore-path .prettierignore",
+    "format:check": "prettier --check \"**/*.{js,mjs,json,md,yml}\" --ignore-path .prettierignore",
     "lint": "eslint .",
-    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans docs node_modules ops package-lock.json package.json policy reg scripts src tests",
+    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs node_modules package-lock.json package.json policy reg scripts src tests",
+    "prepare:release": "node scripts/prepare-release.js",
+    "setup:firefox-e2e": "node scripts/setup-firefox-e2e.js",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
-    "test:ops": "python3 -m py_compile ops/*.py && python3 ops/test_chzzk_telemetry_collector.py",
+    "test:firefox-e2e": "node tests/e2e/firefox-update-playback.mjs",
     "validate:manifest": "node scripts/validate-manifest.js",
     "validate:project": "node scripts/validate-project-cleanliness.js",
     "validate:update-manifest": "node scripts/validate-update-manifest.js",
-    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:ops && npm run audit:deps && npm run build && npm run audit:package",
-    "validate:workflows": "node scripts/validate-workflows.js"
+    "validate:workflows": "node scripts/validate-workflows.js",
+    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run audit:deps && npm run build && npm run audit:package",
+    "verify:signed-release": "node scripts/verify-signed-release.js"
   },
   "devDependencies": {
-    "esbuild": "^0.28.1",
-    "eslint": "^8.57.1",
+    "esbuild": "0.28.1",
+    "eslint": "8.57.1",
     "jszip": "3.10.1",
-    "prettier": "^3.3.3",
-    "web-ext": "^10.4.0"
+    "prettier": "3.9.4",
+    "web-ext": "10.4.0",
+    "yaml": "2.9.0"
   }
 }

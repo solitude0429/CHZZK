@@ -1,81 +1,97 @@
 # Firefox 자동 업데이트
 
-이 저장소는 self-distributed/unlisted Firefox 확장을 내부 HTTPS update host로 업데이트합니다. 최신 확장 런타임은 외부 telemetry collector를 사용하지 않고, CHZZK live HLS 요청에서 생성한 redacted diagnostics를 브라우저 로컬 확장 저장소에만 보관합니다.
+이 저장소는 AMO unlisted signed Firefox 확장을 내부 HTTPS update host로 self-distribute합니다. 확장 진단은 브라우저 로컬 저장소에만 남고 외부 collector를 사용하지 않습니다.
 
-## 구조
+## 신뢰 체인
 
-- 확장 `manifest.json`의 `browser_specific_settings.gecko.update_url`:
-  - `https://chzzk-updates.alpha-apple.dedyn.io/updates.json`
-- `updates.json`과 signed XPI는 VPS nginx의 `/var/www/chzzk-updates/`에서 제공됩니다.
-- GitHub Release는 서명 산출물의 원본 보관소입니다.
-- `Sign and publish Firefox add-on` workflow가 signed XPI, source zip, update-site artifact를 생성하고 GitHub Release를 생성/갱신합니다.
-- VPS 배포 스크립트가 private GitHub Release에서 signed XPI/source ZIP을 내려받고, GitHub artifact attestation이 예상 source commit과 signing workflow에 묶여 있는지 검증한 뒤 내부 update host에 복사합니다.
-- `updates.json`에는 signed XPI의 `sha256` 해시가 함께 들어갑니다.
+1. `prepare` job이 protected `main` source commit에서 정확한 runtime allowlist만 mode `0700` staging에 복사합니다.
+2. staging에서 결정적 unsigned ZIP과 `release-metadata.json`을 생성합니다. metadata에는 add-on ID, 버전, 최소 Firefox 버전, runtime file digest, source commit, source repository가 들어갑니다.
+3. 최소 권한 `sign` job이 ZIP/metadata/signer digest를 다시 확인한 뒤 AMO secret으로 exact ZIP만 제출합니다.
+4. 별도 read-only job이 signed XPI의 runtime을 prepared ZIP과 바이트 단위로 검증합니다. `META-INF/` 서명 파일 외의 추가 파일은 허용하지 않습니다.
+5. 별도 attestation job이 source ZIP, metadata, signed XPI를 같은 source commit과 signing workflow에 묶습니다.
+6. publish job이 세 asset을 draft에서 재검증한 뒤 immutable GitHub Release로 공개합니다.
+7. VPS deploy client가 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
 
-## 데이터/진단
+## Update host 구조
 
-- 확장 popup은 active tab rule, last decision, redacted HLS samples, observed qualities만 보여줍니다.
-- 외부 collector 전송 UI와 manifest data collection consent는 제거되었습니다.
-- Firefox manifest는 `data_collection_permissions.required: ["none"]`을 선언합니다.
-- 과거 collector 운영 스크립트가 저장소에 남아 있더라도, 최신 확장 런타임/manifest/package에는 collector endpoint permission이 포함되지 않습니다.
-
-## 첫 설치 주의
-
-자동 업데이트는 `update_url`이 들어 있는 버전부터 동작합니다. 기존 설치본에 `update_url`이 없었다면 signed XPI를 한 번 수동 설치해야 합니다.
-
-이전에 더 높은 번호의 실험 버전을 설치했다면 Firefox 업데이트 경로로 `0.0.x`가 들어가지 않습니다. 그 경우 기존 확장을 제거한 뒤 최신 signed XPI를 설치하세요.
-
-## 버전 규칙
-
-이 프로젝트는 Semantic Versioning 기반 `a.b.c` 규칙을 사용합니다.
-
-- `a` / MAJOR: 저장 파일/데이터 형식, 함수/API 사용법, 설정 구조 등 기존 사용자가 그대로 쓸 수 없는 비호환 변경.
-- `b` / MINOR: 기존 방식과 호환되는 새 기능 추가.
-- `c` / PATCH: 기존 방식과 호환되는 버그 수정만 포함.
-
-새 프로젝트는 `0.0.1`에서 시작하고, `0.y.z`는 초기 개발 단계로 취급합니다. 첫 안정 공개 시점에 `1.0.0`으로 전환합니다.
-
-## 릴리즈 절차
-
-1. 변경 사항이 MAJOR/MINOR/PATCH 중 어디에 해당하는지 먼저 판단한 뒤 버전을 올립니다.
-
-```bash
-npm version patch --no-git-tag-version  # bug fix
-npm version minor --no-git-tag-version  # backward-compatible feature
-npm version major --no-git-tag-version  # incompatible change
-```
-
-2. 변경 사항을 PR로 병합합니다.
-3. `main`에 `manifest.json`, `package.json`, `package-lock.json`, 또는 `.github/workflows/sign-unlisted.yml` 변경이 push되면 `Sign and publish Firefox add-on` workflow가 실행됩니다. 수동 실행이 필요하면 Actions → `Sign and publish Firefox add-on` → Run workflow를 사용합니다.
-4. workflow가 다음을 수행합니다.
-   - `npm run verify`
-   - protected ref / `firefox-signing` environment gate 확인
-   - AMO unlisted signing
-   - signed XPI 파일명 정규화
-   - GitHub artifact attestation 생성
-   - GitHub Release 생성/갱신
-   - update-site artifact 생성
-5. VPS에서 내부 update host를 배포합니다.
-
-배포 host의 GitHub CLI는 `gh attestation verify`를 지원해야 합니다. 배포 시 기본값은 현재 checkout commit을 source digest로 사용하며, 필요하면 `CHZZK_SOURCE_COMMIT`, `CHZZK_SOURCE_REPOSITORY`, `CHZZK_SIGNING_WORKFLOW_REF`로 명시합니다.
-
-```bash
-npm run deploy:updates:internal
-```
-
-## 검증
-
-배포 후 다음 URL이 열려야 합니다.
+`manifest.json`의 고정 update URL:
 
 ```text
 https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 ```
 
-로컬에서 update manifest를 만들고 검증하려면 signed XPI가 필요합니다.
+배포 layout:
 
-```bash
-npm run build:update-manifest
-npm run validate:update-manifest
+```text
+/var/www/chzzk-updates/
+├── current -> releases/<version>
+├── index.html -> current/index.html
+├── provenance.json -> current/provenance.json
+├── updates.json -> current/updates.json
+└── releases/<version>/
+    ├── chzzk-<version>.zip
+    ├── chzzk-<version>-release-metadata.json
+    ├── chzzk-<version>-signed.xpi
+    ├── index.html
+    ├── provenance.json
+    └── updates.json
 ```
 
-Firefox는 기본적으로 주기적으로 확장 업데이트를 확인합니다. 수동 확인은 실행 중인 Firefox를 종료하지 않고 `about:addons` → 톱니바퀴 메뉴 → 업데이트 확인에서 해야 합니다. 검증 목적으로 profile의 XPI를 직접 덮어쓰거나 Firefox를 재시작하지 마세요. 그러면 self-hosted update manifest 경로가 실제로 동작하는지 검증되지 않습니다.
+`updates.json`의 `update_link`는 immutable version directory의 signed XPI를 가리킵니다. `current` symlink 하나를 원자적으로 전환하므로 stable manifest와 versioned XPI가 섞이지 않습니다. 기존 target/releases directory mode는 변경하지 않습니다. 활성화 중 오류가 나면 모든 live symlink를 이전 상태로 복구하고 새 release directory를 제거합니다.
+
+## 버전 규칙
+
+Semantic Versioning `a.b.c`를 사용합니다.
+
+- MAJOR: 기존 사용자에게 비호환인 변경
+- MINOR: 하위 호환 기능 추가
+- PATCH: 하위 호환 버그/보안 수정
+
+```bash
+npm version patch --no-git-tag-version
+npm version minor --no-git-tag-version
+npm version major --no-git-tag-version
+npm run build:runtime
+npm run verify
+```
+
+## 릴리스와 배포
+
+1. 버전 변경과 생성 파일을 PR에 포함합니다.
+2. CI의 unit/security/package gate와 실제 Firefox temporary-profile E2E를 통과시킵니다.
+3. PR을 `main`에 병합합니다.
+4. Actions에서 **Sign and publish unlisted Firefox release** workflow를 수동 실행합니다.
+5. workflow가 성공한 뒤 clean `main` checkout에서 명시적으로 배포합니다.
+
+```bash
+CHZZK_VERSION="<version>" \
+CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
+npm run deploy:updates:internal
+```
+
+Deploy client는 로컬 `package.json`이나 `manifest.json`으로 `updates.json`을 만들지 않습니다. attested Release metadata와 signed XPI bytes만 사용하며, tag commit과 metadata source digest가 다르면 실패합니다.
+
+## 검증
+
+배포 후 다음을 모두 확인합니다.
+
+- `updates.json`: HTTP 200, `application/json`
+- `update_link`: HTTP 200, `application/x-xpinstall`
+- `update_hash`: hosted signed XPI SHA-256과 동일
+- add-on ID, version, `strict_min_version`: release metadata/signed manifest와 동일
+- update link path: `/releases/<version>/chzzk-<version>-signed.xpi`
+
+실제 Firefox 엔진의 synthetic E2E:
+
+```bash
+npm run setup:firefox-e2e
+FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
+GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
+npm run test:firefox-e2e
+```
+
+이 테스트는 격리된 Developer Edition profile에서 실제 `webRequestBlocking` 재생 redirect와 `AddonManager.findUpdates` 업데이트를 검증합니다. fixture XPI는 테스트 전용 unsigned artifact이므로 해당 profile에서만 signature/update certificate 검사를 끕니다. 실제 배포 artifact는 AMO 서명과 attestation 검증을 반드시 통과해야 합니다.
+
+## 첫 설치와 사용자 확인
+
+`update_url`이 없는 매우 오래된 설치본은 signed XPI를 한 번 수동 설치해야 합니다. 이후에는 실행 중인 Firefox에서 `about:addons`의 업데이트 확인을 사용합니다. 검증을 위해 profile XPI를 직접 덮어쓰거나 Firefox를 종료하지 않습니다.

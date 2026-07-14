@@ -1,27 +1,35 @@
-name: Scorecard
+name: OpenSSF Scorecard
 
 on:
-  workflow_dispatch:
+  branch_protection_rule:
+  push:
+    branches: ["main"]
   schedule:
-    - cron: "0 4 * * 1"
+    - cron: "31 3 * * 2"
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: scorecard-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   scorecard:
+    permissions:
+      contents: read
+      security-events: write
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@62b2cac7ed8198b15735ed49ab1e5cf35480ba46 # v2.4.0
+      - uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
         with:
-          results_file: scorecard.sarif
-          results_format: sarif
           publish_results: false
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          results_file: results.sarif
+          results_format: sarif
+      - uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
         with:
-          name: scorecard-sarif
-          path: scorecard.sarif
+          sarif_file: results.sarif

@@ -3,34 +3,54 @@ name: CI
 on:
   pull_request:
   push:
-    branches: ["feat/**", "main"]
+    branches: ["feat/**", "fix/**", "main"]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
           cache: npm
+          node-version: 22
       - run: npm ci
-      - run: npm run format:check
-      - run: npm run check:generated
-      - run: npm run validate:manifest
-      - run: npm run validate:project
-      - run: npm run validate:workflows
-      - run: npm run lint
-      - run: npm run lint:webext
-      - run: npm run test
-      - run: npm run test:ops
-      - run: npm run audit:deps
-      - run: npm run build
-      - run: npm run audit:package
+      - run: npm run verify
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: chzzk-extension
+          if-no-files-found: error
+          name: chzzk-extension-${{ github.sha }}
           path: dist/*.zip
+          retention-days: 7
+
+  firefox-e2e:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - run: npm run setup:firefox-e2e
+      - run: npm run test:firefox-e2e
+        env:
+          FIREFOX_BINARY: ${{ github.workspace }}/dist/e2e-tools/firefox/firefox
+          GECKODRIVER_BINARY: ${{ github.workspace }}/dist/e2e-tools/geckodriver

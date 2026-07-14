@@ -1,5 +1,6 @@
 dist
 node_modules
+codex-security-scans
 NOTICE
 ops/*.py
 background.js

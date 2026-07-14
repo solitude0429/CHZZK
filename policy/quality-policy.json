@@ -10,19 +10,22 @@
   "mediaExtensions": ["m3u8"],
   "maxDiagnosticsSamples": 200,
   "maxPendingDiagnosticsMutations": 50,
+  "blockingProbeBudgetMs": 150,
   "probeMaxBytes": 256000,
+  "probeResolutionBudgetMs": 3000,
   "probeTimeoutMs": 1500,
   "notes": [
     "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
     "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
-    "The persistent background page uses blocking webRequest so eligible numeric HLS playlist requests can be redirected even if content-script prewarm is late or unavailable.",
-    "When a trusted HLS master playlist is observed, the runtime scores variants by resolution, frame rate, then bitrate, and caches the best target quality per tab while the tab is open.",
-    "For eligible numeric HLS playlist URLs, redirects preserve the current live playlist URL shape and signed tail instead of pinning playback to a stale exact master-playlist URL.",
-    "For each eligible numeric HLS playlist URL without a cached master-playlist target, the runtime probes configured quality candidates from highest to lowest and caches the highest candidate per tab while the tab is open.",
+    "The persistent background page uses blocking webRequest, but an unresolved candidate search can delay a request only for blockingProbeBudgetMs before failing open while one shared per-tab/context resolution continues in the background.",
+    "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token is current.",
+    "Numeric quality replacement changes pathname markers only and preserves signed query strings and fragments byte-for-byte.",
+    "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; concurrent requests share the same in-flight resolution.",
     "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
     "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
-    "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime must resolve the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
-    "Probe responses are accepted only from trusted final HLS domains and are capped by probeMaxBytes to avoid redirecting from oversized or cross-origin playlist probes."
+    "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
+    "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies are capped by probeMaxBytes, and numeric/master evidence must prove the requested candidate before it can seed a target.",
+    "Navigation and tab close abort pending probes and invalidate their context token before clearing state so stale completions cannot restore a target."
   ]
 }

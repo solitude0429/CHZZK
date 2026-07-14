@@ -1,6 +1,5 @@
 import { parseQualityFromUrl, qualityNumber } from "./quality.js";
 
-export const REDIRECT_TAB_ID_RANGE = 100_000;
 const DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
 const DEFAULT_REQUEST_METHODS = ["get"];
 
@@ -52,7 +51,7 @@ function requestMethods(policy) {
 }
 
 export function isValidRedirectTabId(tabId) {
-  return Number.isSafeInteger(tabId) && tabId >= 0 && tabId < REDIRECT_TAB_ID_RANGE;
+  return Number.isSafeInteger(tabId) && tabId >= 0;
 }
 
 export function isTrustedRequestDomain(url, policy) {
@@ -77,8 +76,17 @@ export function isChzzkLiveUrl(url, policy) {
   }
 }
 
+export function isHlsPlaylistUrl(value) {
+  if (typeof value !== "string" || value === "") return false;
+  try {
+    return /\.m3u8$/i.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
+
 function isNumericHlsPlaylistUrl(url) {
-  return typeof url === "string" && /\.m3u8(?:[?#]|$)/i.test(url) && Boolean(parseQualityFromUrl(url));
+  return isHlsPlaylistUrl(url) && Boolean(parseQualityFromUrl(url));
 }
 
 function knownChzzkHlsHost(hostname) {
@@ -128,9 +136,24 @@ export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = nul
   return isKnownChzzkHlsUrl(details.url, policy);
 }
 
+export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTabIds = null } = {}) {
+  if (!details || !isValidRedirectTabId(details.tabId) || !isHttpsUrl(details.url)) return false;
+  if (!isHlsPlaylistUrl(details.url) || parseQualityFromUrl(details.url)) return false;
+  if (details.type && !resourceTypes(policy).includes(details.type)) return false;
+  const method = String(details.method ?? "GET").toLowerCase();
+  if (!requestMethods(policy).includes(method) || !isTrustedRequestDomain(details.url, policy)) return false;
+  if (trustedLiveTabIds?.has?.(details.tabId)) return true;
+  if (isChzzkLiveUrl(details.documentUrl, policy) || isChzzkLiveUrl(details.originUrl, policy)) return true;
+  const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
+  return Boolean(
+    initiatorDomain &&
+    trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
+  );
+}
+
 export function shouldRecordDiagnostics(details, policy, options = {}) {
   if (!isHttpsUrl(details?.url)) return false;
-  if (!details?.url || !/\.m3u8(?:[?#]|$)/i.test(details.url)) return false;
+  if (!isHlsPlaylistUrl(details?.url)) return false;
   if (!isValidRedirectTabId(details.tabId)) return false;
   if (!isTrustedRequestDomain(details.url, policy)) return false;
   return isTrustedChzzkContext(details, policy, options);
@@ -143,6 +166,9 @@ export function shouldRedirectRequest(details, policy, options = {}) {
   }
   if (!isValidRedirectTabId(tabId)) {
     return { ok: false, reason: "invalid-tab", tabId: tabId ?? null };
+  }
+  if (!isHlsPlaylistUrl(details.url)) {
+    return { ok: false, reason: "non-playlist-path", tabId };
   }
 
   const allowedTypes = resourceTypes(policy);

@@ -9,6 +9,7 @@ import {
   configuredResourceTypes,
   configuredWebRequestUrls,
   isChzzkLiveUrl,
+  isTrustedMasterPlaylistRequest,
   isTrustedRequestDomain,
   isValidRedirectTabId,
   shouldRecordDiagnostics,
@@ -18,6 +19,7 @@ import {
   buildHighestQualityRedirectUrl,
   chooseBestHlsVariant,
   normalizeQualityCandidates,
+  parseHlsMasterPlaylistVariants,
   parseQualityFromUrl,
   qualityNumber,
   replaceQualityInUrl,
@@ -29,7 +31,9 @@ const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
 const activeLiveTabIds = new Set();
 const activeTargetsByTab = new Map();
 const liveContextByTab = new Map();
+const resolutionByTab = new Map();
 const resolvedTargetsByTab = new Set();
+const tabContextTokenByTab = new Map();
 let diagnosticsMutationQueue = Promise.resolve();
 let diagnosticsMutationQueueDepth = 0;
 
@@ -120,6 +124,16 @@ function probeTimeoutMs() {
   return Number.isFinite(configured) && configured > 0 ? configured : 1500;
 }
 
+function blockingProbeBudgetMs() {
+  const configured = Number(policy.blockingProbeBudgetMs ?? 150);
+  return Number.isFinite(configured) && configured > 0 ? configured : 150;
+}
+
+function probeResolutionBudgetMs() {
+  const configured = Number(policy.probeResolutionBudgetMs ?? 3000);
+  return Number.isFinite(configured) && configured > 0 ? configured : 3000;
+}
+
 function probeMaxBytes() {
   const configured = Number(policy.probeMaxBytes ?? 256_000);
   return Number.isFinite(configured) && configured > 0 ? configured : 256_000;
@@ -172,36 +186,54 @@ async function readResponseTextWithLimit(response, maxBytes) {
   }
 }
 
-function finalResponseUrl(response, requestedUrl) {
-  return typeof response?.url === "string" && response.url ? response.url : requestedUrl;
-}
-
-async function fetchPlaylistText(url) {
+async function fetchPlaylistEvidence(url, { signal = null } = {}) {
+  if (!isTrustedRequestDomain(url, policy)) return null;
   const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener?.("abort", abortFromParent, { once: true });
   const timeout = setTimeout(() => controller.abort(), probeTimeoutMs());
+
   try {
     const response = await fetch(url, {
       cache: "no-store",
       credentials: "omit",
-      redirect: "follow",
+      redirect: "error",
       signal: controller.signal,
     });
     if (!response.ok) return null;
-    if (!isTrustedRequestDomain(finalResponseUrl(response, url), policy)) return null;
+    const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
+    if (!isTrustedRequestDomain(finalUrl, policy) || finalUrl !== url) return null;
     const text = await readResponseTextWithLimit(response, probeMaxBytes());
-    return isLikelyHlsPlaylist(text) ? text : null;
+    return isLikelyHlsPlaylist(text) ? { finalUrl, text } : null;
   } catch {
     return null;
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener?.("abort", abortFromParent);
   }
 }
 
-async function fetchLooksLikeHlsPlaylist(url) {
-  return Boolean(await fetchPlaylistText(url));
+async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
+  const evidence = await fetchPlaylistEvidence(url, { signal });
+  if (!evidence) return false;
+  const variants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl);
+  if (variants.length > 0 || /#EXT-X-STREAM-INF:/i.test(evidence.text)) {
+    return variants.some((variant) => {
+      const variantQuality = bestVariantTargetQuality(variant);
+      return (
+        variantQuality === expectedQuality &&
+        typeof variant.url === "string" &&
+        isTrustedRequestDomain(variant.url, policy) &&
+        parseQualityFromUrl(variant.url) === expectedQuality
+      );
+    });
+  }
+
+  return parseQualityFromUrl(evidence.finalUrl) === expectedQuality;
 }
 
-async function resolveHighestSupportedQuality(details, observedQuality) {
+async function resolveHighestSupportedQuality(details, observedQuality, { signal = null } = {}) {
   const observedNumber = qualityNumber(observedQuality);
   if (!observedNumber) return null;
 
@@ -211,34 +243,34 @@ async function resolveHighestSupportedQuality(details, observedQuality) {
   });
 
   for (const candidate of candidates) {
+    if (signal?.aborted) return null;
     const candidateNumber = qualityNumber(candidate);
     if (!candidateNumber || candidateNumber < observedNumber) continue;
 
     const candidateUrl = replaceQualityInUrl(details.url, candidate);
     if (!candidateUrl) continue;
     if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) return candidate;
-    if (await fetchLooksLikeHlsPlaylist(candidateUrl)) return candidate;
+    if (await fetchSupportsExpectedQuality(candidateUrl, candidate, { signal })) return candidate;
   }
 
-  return observedQuality;
+  return signal?.aborted ? null : observedQuality;
 }
 
 function bestVariantTargetQuality(variant) {
   return variant?.quality ?? (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
 }
 
-async function resolveAndStoreBestVariantFromMaster(details) {
-  const playlistText = await fetchPlaylistText(details.url);
-  if (!playlistText) return null;
+async function resolveBestVariantFromMaster(details, { signal = null } = {}) {
+  const evidence = await fetchPlaylistEvidence(details.url, { signal });
+  if (!evidence || signal?.aborted) return null;
 
-  const variant = chooseBestHlsVariant(playlistText, details.url, {
+  const variant = chooseBestHlsVariant(evidence.text, evidence.finalUrl, {
     minRedirectQuality: policy.minRedirectQuality,
   });
   const targetQuality = bestVariantTargetQuality(variant);
-  if (!variant?.url || !targetQuality) return null;
-
-  await setTabTarget(details.tabId, targetQuality, { resolved: true });
-  return variant;
+  if (!variant?.url || !targetQuality || !isTrustedRequestDomain(variant.url, policy)) return null;
+  if (parseQualityFromUrl(variant.url) !== targetQuality) return null;
+  return targetQuality;
 }
 
 async function updateRedirectDiagnostics(lastError = null) {
@@ -251,6 +283,12 @@ async function reportRedirectError(error) {
   await updateRedirectDiagnostics(String(error?.message ?? error));
 }
 
+function scheduleRedirectDiagnostics(lastError = null) {
+  updateRedirectDiagnostics(lastError).catch((error) =>
+    console.warn("[CHZZK] failed to persist redirect diagnostics", error),
+  );
+}
+
 function liveContextKey(url) {
   if (!isChzzkLiveUrl(url, policy)) return null;
   try {
@@ -261,12 +299,172 @@ function liveContextKey(url) {
   }
 }
 
+function requestLiveContext(details) {
+  return liveContextKey(details?.documentUrl) ?? liveContextKey(details?.originUrl);
+}
+
+function registerRequestContext(details) {
+  const tabId = details?.tabId;
+  if (!isValidRedirectTabId(tabId)) return false;
+  const requestContext = requestLiveContext(details);
+  if (!requestContext) return true;
+  const knownContext = liveContextByTab.get(tabId);
+  if (knownContext && knownContext !== requestContext) {
+    invalidateTabResolution(tabId);
+    activeTargetsByTab.delete(tabId);
+    resolvedTargetsByTab.delete(tabId);
+    liveContextByTab.delete(tabId);
+    activeLiveTabIds.delete(tabId);
+    scheduleRedirectDiagnostics();
+    return false;
+  }
+  if (!knownContext) {
+    currentTabContextToken(tabId);
+    liveContextByTab.set(tabId, requestContext);
+    activeLiveTabIds.add(tabId);
+  }
+  return true;
+}
+
+function currentTabContextToken(tabId) {
+  if (!tabContextTokenByTab.has(tabId)) tabContextTokenByTab.set(tabId, {});
+  return tabContextTokenByTab.get(tabId);
+}
+
+function invalidateTabResolution(tabId, { dropToken = false } = {}) {
+  const activeResolution = resolutionByTab.get(tabId);
+  activeResolution?.controller.abort();
+  resolutionByTab.delete(tabId);
+  tabContextTokenByTab.set(tabId, {});
+  if (dropToken) tabContextTokenByTab.delete(tabId);
+}
+
+function resolutionContextKey(details) {
+  return (
+    liveContextByTab.get(details.tabId) ??
+    liveContextKey(details.documentUrl) ??
+    liveContextKey(details.originUrl) ??
+    "trusted-request"
+  );
+}
+
+function resolutionContextIsCurrent(tabId, contextKey) {
+  const adoptedContext = liveContextByTab.get(tabId);
+  return contextKey === "trusted-request" ? !adoptedContext : adoptedContext === contextKey;
+}
+
+function resolutionIsCurrent(tabId, state) {
+  return (
+    tabContextTokenByTab.get(tabId) === state.token &&
+    resolutionByTab.get(tabId) === state &&
+    resolutionContextIsCurrent(tabId, state.contextKey)
+  );
+}
+
+async function setTabTarget(
+  tabId,
+  targetQuality,
+  { contextKey = null, resolved = false, token = null } = {},
+) {
+  if (!isValidRedirectTabId(tabId) || !targetQuality) return false;
+  if (token && tabContextTokenByTab.get(tabId) !== token) return false;
+  if (contextKey && !resolutionContextIsCurrent(tabId, contextKey)) return false;
+  const previous = activeTargetsByTab.get(tabId);
+  activeTargetsByTab.set(tabId, targetQuality);
+  if (resolved) resolvedTargetsByTab.add(tabId);
+  if (previous !== targetQuality || resolved) scheduleRedirectDiagnostics();
+  return true;
+}
+
+function startTabResolution(details, resolver, resolverKind) {
+  const tabId = details.tabId;
+  const contextKey = resolutionContextKey(details);
+  let token = currentTabContextToken(tabId);
+  const existing = resolutionByTab.get(tabId);
+  if (existing?.token === token && existing.contextKey === contextKey) {
+    if (resolverKind !== "master" || existing.resolverKind === "master") return existing.promise;
+    invalidateTabResolution(tabId);
+    token = currentTabContextToken(tabId);
+  } else {
+    existing?.controller.abort();
+  }
+
+  const controller = new AbortController();
+  const resolutionTimeout = setTimeout(() => controller.abort(), probeResolutionBudgetMs());
+  const state = { contextKey, controller, promise: null, resolverKind, token };
+  state.promise = Promise.resolve()
+    .then(() => resolver({ signal: controller.signal }))
+    .then(async (targetQuality) => {
+      if (!targetQuality || !resolutionIsCurrent(tabId, state)) return null;
+      const stored = await setTabTarget(tabId, targetQuality, {
+        contextKey,
+        resolved: true,
+        token,
+      });
+      return stored ? targetQuality : null;
+    })
+    .catch((error) => {
+      if (controller.signal.aborted) return null;
+      throw error;
+    })
+    .finally(() => {
+      clearTimeout(resolutionTimeout);
+      if (resolutionByTab.get(tabId) === state) resolutionByTab.delete(tabId);
+    });
+  resolutionByTab.set(tabId, state);
+  return state.promise;
+}
+
+async function waitForBlockingResolution(promise) {
+  const timedOut = Symbol("blocking-probe-timeout");
+  let timeout;
+  try {
+    const result = await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve(timedOut), blockingProbeBudgetMs());
+      }),
+    ]);
+    return result === timedOut ? null : result;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function startHighestTargetResolution(details, decision) {
+  return startTabResolution(
+    details,
+    ({ signal }) => resolveHighestSupportedQuality(details, decision.quality, { signal }),
+    "numeric",
+  );
+}
+
+function startMasterTargetResolution(details) {
+  return startTabResolution(
+    details,
+    ({ signal }) => resolveBestVariantFromMaster(details, { signal }),
+    "master",
+  );
+}
+
 async function prewarmLiveTab(tabId, url = null) {
   if (!isValidRedirectTabId(tabId)) return;
+  currentTabContextToken(tabId);
   const nextContext = liveContextKey(url);
   const previousContext = liveContextByTab.get(tabId);
-  const hadTarget = Boolean(nextContext && previousContext && previousContext !== nextContext && activeTargetsByTab.delete(tabId));
-  if (nextContext && previousContext && previousContext !== nextContext) {
+  const activeResolution = resolutionByTab.get(tabId);
+  const hasUnboundState =
+    !previousContext &&
+    (activeResolution?.contextKey === "trusted-request" ||
+      activeTargetsByTab.has(tabId) ||
+      resolvedTargetsByTab.has(tabId));
+  const contextChanged = Boolean(
+    nextContext && ((previousContext && previousContext !== nextContext) || hasUnboundState),
+  );
+  let hadTarget = false;
+  if (contextChanged) {
+    hadTarget = activeTargetsByTab.delete(tabId);
+    invalidateTabResolution(tabId);
     resolvedTargetsByTab.delete(tabId);
   }
   if (nextContext) liveContextByTab.set(tabId, nextContext);
@@ -275,16 +473,9 @@ async function prewarmLiveTab(tabId, url = null) {
   if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
 }
 
-async function setTabTarget(tabId, targetQuality, { resolved = false } = {}) {
-  if (!isValidRedirectTabId(tabId) || !targetQuality) return;
-  const previous = activeTargetsByTab.get(tabId);
-  activeTargetsByTab.set(tabId, targetQuality);
-  if (resolved) resolvedTargetsByTab.add(tabId);
-  if (previous !== targetQuality || resolved) await updateRedirectDiagnostics();
-}
-
 async function removeTabTarget(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
+  invalidateTabResolution(tabId, { dropToken: true });
   const hadTarget = activeTargetsByTab.delete(tabId);
   const hadLiveTab = activeLiveTabIds.delete(tabId);
   const hadContext = liveContextByTab.delete(tabId);
@@ -293,10 +484,13 @@ async function removeTabTarget(tabId) {
 }
 
 async function clearRuntimeRedirectState() {
+  for (const state of resolutionByTab.values()) state.controller.abort();
   activeLiveTabIds.clear();
   activeTargetsByTab.clear();
   liveContextByTab.clear();
+  resolutionByTab.clear();
   resolvedTargetsByTab.clear();
+  tabContextTokenByTab.clear();
   await updateRedirectDiagnostics();
 }
 
@@ -307,13 +501,8 @@ async function recordRequestDiagnostics(details, decision) {
   });
 }
 
-async function resolveAndStoreHighestTarget(details, decision) {
-  const targetQuality = await resolveHighestSupportedQuality(details, decision.quality);
-  if (targetQuality) await setTabTarget(decision.tabId, targetQuality, { resolved: true });
-  return targetQuality;
-}
-
 async function handleRequest(details) {
+  if (!registerRequestContext(details)) return undefined;
   const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
   const shouldRecord = shouldRecordDiagnostics(details, policy, redirectOptions);
   let decision = shouldRedirectRequest(details, policy, redirectOptions);
@@ -323,9 +512,9 @@ async function handleRequest(details) {
     try {
       let targetQuality = activeTargetsByTab.get(decision.tabId);
       if (!targetQuality) {
-        targetQuality = await resolveAndStoreHighestTarget(details, decision);
+        targetQuality = await waitForBlockingResolution(startHighestTargetResolution(details, decision));
       } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
-        resolveAndStoreHighestTarget(details, decision).catch((error) => {
+        startHighestTargetResolution(details, decision).catch((error) => {
           reportRedirectError(error).catch(() => {});
           console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
         });
@@ -340,16 +529,14 @@ async function handleRequest(details) {
         decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
       }
     } catch (error) {
-      await reportRedirectError(error);
+      scheduleRedirectDiagnostics(String(error?.message ?? error));
       console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
     }
-  } else if (shouldRecord && decision.reason === "unknown-quality-shape") {
-    try {
-      await resolveAndStoreBestVariantFromMaster(details);
-    } catch (error) {
-      await reportRedirectError(error);
+  } else if (isTrustedMasterPlaylistRequest(details, policy, redirectOptions)) {
+    startMasterTargetResolution(details).catch((error) => {
+      reportRedirectError(error).catch(() => {});
       console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
-    }
+    });
   }
 
   if (shouldRecord) {
@@ -374,15 +561,22 @@ api.webRequest.onBeforeRequest.addListener(
   ["blocking"],
 );
 
+async function prewarmMessageTab(tabId) {
+  if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return;
+  const currentTab = await api.tabs.get(tabId);
+  if (currentTab?.id !== tabId || !isChzzkLiveUrl(currentTab.url, policy)) return;
+  await prewarmLiveTab(tabId, currentTab.url);
+}
+
 api.runtime.onMessage?.addListener((message, sender) => {
   if (message?.type !== "chzzk.live-page-ready") return undefined;
   const tabId = sender?.tab?.id;
   if (!isValidRedirectTabId(tabId)) return undefined;
-  // The sender is the packaged MV2 content script, whose manifest match is limited to
-  // https://*.chzzk.naver.com/live/*. Firefox can omit sender URL fields, so requiring
-  // them here would drop the prewarm before the first HLS playlist request. Prewarm only
-  // trusts the tab context; it must not seed a fixed target quality.
-  prewarmLiveTab(tabId).catch((error) => console.warn("[CHZZK] failed to prewarm live tab", error));
+  // A delayed message can outlive its document. Query the current tab and prewarm only
+  // when its authoritative URL is still a CHZZK live page.
+  prewarmMessageTab(tabId).catch((error) =>
+    console.warn("[CHZZK] failed to validate and prewarm live tab", error),
+  );
   return undefined;
 });
 

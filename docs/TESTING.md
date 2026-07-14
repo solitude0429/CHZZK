@@ -1,19 +1,20 @@
 # Testing CHZZK
 
-## Automated checks
+## Standard gates
 
 ```bash
 npm ci
 npm run verify
 ```
 
-`verify` runs generated-runtime drift checks, MV2 required-permission manifest validation, ESLint, web-ext lint with warnings as errors, unit tests, dependency audit, packaging, and package-content audit.
+`verify` runs formatting, generated-runtime drift checks, manifest/project/workflow validation, ESLint, web-ext lint, unit and security behavior tests, dependency audit, deterministic packaging, and package-content audit.
 
-## Individual gates
+Useful individual gates:
 
 ```bash
 npm run check:generated
 npm run validate:manifest
+npm run validate:workflows
 npm run lint
 npm run lint:webext
 npm test
@@ -22,38 +23,55 @@ npm run build
 npm run audit:package
 ```
 
-## Manual Firefox test
+## Real Firefox E2E
 
-Use a temporary profile instead of the main Firefox profile:
+The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts.
+
+```bash
+npm run setup:firefox-e2e
+FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
+GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
+npm run test:firefox-e2e
+```
+
+The test exercises real Firefox rather than a VM mock:
+
+1. Installs synthetic version `0.1.3` through geckodriver.
+2. Opens a CHZZK-shaped live fixture and issues a `480p` HLS request.
+3. Confirms the extension probes candidates and Firefox requests the available `1080p` URL.
+4. Confirms the signed-style query remains byte-for-byte unchanged.
+5. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.
+6. Calls `AddonManager.findUpdates` and confirms the installed version becomes `0.1.4`.
+
+The fixture XPIs are unsigned and exist only in the disposable Developer Edition profile, so signature/update certificate checks are disabled only for this test. Production Release artifacts must remain AMO-signed and attested.
+
+## Manual Firefox smoke test
+
+Use a temporary profile instead of the user's main profile:
 
 ```bash
 npx web-ext run --source-dir . --firefox-profile /tmp/chzzk-firefox-profile
 ```
 
-Manual checklist:
+Checklist:
 
 1. Remove or disable NAVER Live Streaming Connector/NLiveConnector on the test PC.
 2. Open a CHZZK live page.
-3. Open the extension popup and confirm the CHZZK tab can appear in `activeTabIds` while `targetsByTab` remains empty before the first numeric HLS request. Prewarm must not seed `1080p` or any other fixed target.
-4. Start playback and select any numeric quality, such as 360p, 480p, 720p, or 1080p.
-5. Reopen the popup and confirm:
-   - `lastDecision: ok / eligible-chzzk-hls-quality / tab <id>` appears, or
-   - a clear blocked reason appears if the request is not eligible.
-6. Confirm the quality menu is not relabeled; there should be no fake `1080p with CHZZK GRID™` item.
-7. Confirm DevTools Network shows the first trusted numeric playlist request and subsequent same-tab lower playlist requests redirected to the resolved maximum supported quality, for example `chunklist_1440p.m3u8` when 1440p is available or `chunklist_1080p.m3u8` only when 1080p is the maximum actually served.
-8. Confirm synthetic/future qualities such as `540p`, `900p`, and `1439p` are covered by unit tests, not by hand-added redirect alternatives.
-9. Confirm diagnostics show only redacted HLS URLs and quality counters.
-10. Confirm no cookies, signed URL queries, or tokens are copied into logs or issue reports.
+3. Confirm the popup can show the tab in `activeTabIds` while `targetsByTab` is empty before a numeric HLS request. Prewarm must not seed a fixed quality.
+4. Start playback and choose any numeric quality.
+5. Confirm the popup shows `eligible-chzzk-hls-quality` or a clear fail-closed reason.
+6. Confirm the player menu is not relabeled.
+7. Confirm subsequent lower playlist requests use the highest available target while keeping the original URL path shape and signed query/hash.
+8. Confirm diagnostics contain only an allowlisted host, quality, structured media shape, and local counters.
 
 ## Regression fixtures
 
 When CHZZK changes URL shapes:
 
-1. Export diagnostics from the popup.
-2. Remove every query string, fragment, account identifier, session value, and key-like value.
-3. Add a minimal redacted fixture or unit test covering the new shape.
-4. Watch the test fail.
-5. Fix `src/shared/quality.js` or `src/shared/request-policy.js`.
-6. Run `npm run verify`.
+1. Export local diagnostics.
+2. Remove every query, fragment, account/session identifier, key-like value, UUID, and connection identifier.
+3. Add the smallest synthetic failing fixture first.
+4. Fix `src/shared/quality.js`, `src/shared/request-policy.js`, or runtime state handling.
+5. Run `npm run verify` and the Firefox E2E.
 
-Do not paste full signed media URLs into GitHub issues, commits, or chat.
+Never paste complete signed media URLs into issues, commits, or chat.

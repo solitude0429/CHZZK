@@ -1,45 +1,62 @@
 # Firefox 서명/정식 설치
 
-Firefox Release/Beta에서 일반 프로그램처럼 설치하려면 Mozilla 서명이 필요합니다. 개인용으로 공개 목록에 올리지 않으려면 AMO의 **unlisted** 채널로 서명합니다.
+Firefox Release/Beta에서 일반 확장처럼 설치하려면 Mozilla 서명이 필요합니다. 개인용으로 AMO 검색 목록에 공개하지 않을 때는 **unlisted** 채널로 서명합니다. 이 서명은 Firefox 설치 허가이며 NAVER 공식 승인을 뜻하지 않습니다.
 
-중요: AMO unlisted signing은 Firefox가 설치를 허용하도록 하는 Mozilla 서명입니다. 네이버가 공식 승인한 프로그램이라는 의미는 아닙니다.
+## 자격 증명
 
-## 필요한 것
+Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repository secret으로 저장합니다.
 
-1. Mozilla Add-ons 계정
-2. Add-ons API credentials
-   - JWT issuer → GitHub secret `AMO_JWT_ISSUER`
-   - JWT secret → GitHub secret `AMO_JWT_SECRET`
+- `JWT issuer` 값 → `AMO_JWT_ISSUER`
+- `JWT secret` 값 → `AMO_JWT_SECRET`
+
+라벨, 따옴표, `NAME=value` 형태가 아니라 값만 저장합니다. 자격 증명은 argv, 파일, artifact, 로그에 기록하지 않습니다.
+
+## 릴리스 workflow
+
+1. 버전을 올린 PR을 `main`에 병합합니다.
+2. Actions → **Sign and publish unlisted Firefox release** → **Run workflow**를 선택합니다.
+3. workflow는 `main` protected ref인지 확인한 뒤 다음 권한 경계를 유지합니다.
+   - `prepare`: read-only checkout, `npm ci`, 전체 검증, 결정적 unsigned ZIP과 release metadata 생성
+   - `sign`: checkout과 npm 실행 없이 검증된 artifact만 내려받고, `firefox-signing` environment의 AMO secret만 사용
+   - `verify-signed`: secret 없이 signed XPI의 런타임 파일을 prepared ZIP/metadata와 바이트 단위로 비교
+   - `attest`: AMO secret/checkout 없이 세 release asset에 provenance attestation 생성
+   - `publish`: checkout/npm/secret 없이 `contents: write`만 사용해 immutable Release 게시
+4. Release에는 정확히 다음 세 asset만 게시됩니다.
+   - `chzzk-<version>.zip`
+   - `chzzk-<version>-release-metadata.json`
+   - `chzzk-<version>-signed.xpi`
+
+같은 tag가 이미 있으면 source commit, 세 asset, signed contents, attestation이 모두 동일한 경우에만 verified no-op으로 성공합니다. 한 바이트라도 다르면 실패하며 `--clobber`로 덮어쓰지 않습니다. 새 Release는 draft 상태에서 asset을 다시 내려받아 비교한 뒤에만 공개됩니다.
+
+## Native AMO client
+
+`sign` job은 `web-ext`, `npm`, 프로젝트 build를 실행하지 않습니다. `scripts/sign-unlisted.js`와 `scripts/lib/amo-client.js`가 Node 내장 API만 사용해 다음을 수행합니다.
+
+1. prepared ZIP SHA-256 검증
+2. AMO upload/validation 제출
+3. unlisted version 생성과 승인 상태 polling
+4. 허용된 `addons.mozilla.org` HTTPS download URL과 각 redirect hop 검증
+5. 다운로드 요청에는 AMO JWT를 보내지 않고 signed XPI를 mode `0600`으로 원자적 저장
+
+AMO 자격 증명은 signer step의 환경에만 주입되고 즉시 `process.env`에서 제거됩니다. 파생 JWT를 사용하는 `https://addons.mozilla.org/api/v5/` 요청은 redirect를 거부하고, signed XPI 다운로드와 그 redirect hop은 별도의 무인증 요청으로 처리됩니다.
 
 ## 로컬 서명
 
+일반 릴리스에는 GitHub workflow를 사용합니다. AMO API를 진단해야 할 때만 별도 버전으로 로컬 서명을 수행합니다. `prepare:release`는 지정한 source digest가 현재 `HEAD`와 같고 tracked worktree/index가 깨끗할 때만 실행됩니다.
+
 ```bash
-export WEB_EXT_API_KEY='<AMO JWT issuer>'
-export WEB_EXT_API_SECRET='<AMO JWT secret>'
+npm ci
 npm run verify
+CHZZK_SOURCE_DIGEST="$(git rev-parse HEAD)" \
+CHZZK_SOURCE_REPOSITORY="solitude0429/CHZZK" \
+npm run prepare:release
+
+AMO_API_KEY="$AMO_JWT_ISSUER" \
+AMO_API_SECRET="$AMO_JWT_SECRET" \
+CHZZK_RELEASE_METADATA="dist/release/chzzk-<version>-release-metadata.json" \
+CHZZK_UNSIGNED_XPI="dist/release/chzzk-<version>.zip" \
+CHZZK_SIGNED_OUTPUT_DIR="dist/signed" \
 npm run sign:unlisted
 ```
 
-서명된 XPI는 `dist/signed/` 아래에 생성됩니다.
-
-## GitHub Actions 서명
-
-1. repository Settings → Secrets and variables → Actions에 다음 secrets를 추가합니다.
-   - `AMO_JWT_ISSUER`
-   - `AMO_JWT_SECRET`
-2. 다음 중 하나로 `Sign and publish Firefox add-on` workflow를 실행합니다.
-   - version bump가 포함된 `manifest.json`, `package.json`, `package-lock.json` 변경을 `main`에 push
-   - Actions → `Sign and publish Firefox add-on` → Run workflow
-3. workflow artifact `chzzk-signed-xpi`를 내려받아 Firefox에 설치합니다.
-4. push trigger 또는 `publish_release`가 켜진 수동 실행이면 해당 버전의 GitHub Release가 생성/갱신됩니다.
-5. 내부 update host 배포가 필요하면 VPS에서 `npm run deploy:updates:internal`을 실행합니다.
-
-Workflow는 `firefox-signing` GitHub Environment에서 실행되며, default branch 또는 `v*` protected tag가 아니면 AMO secret 사용 전에 실패합니다. Release asset은 재사용하지 않고 매번 현재 verified source에서 새로 서명한 뒤 GitHub artifact attestation을 생성합니다. 로컬에서 이미 AMO에 공개된 동일 버전 XPI를 source-match 검증 후 재사용해야 하는 특수 상황에서는 `CHZZK_REUSE_EXISTING_AMO_VERSION=1`을 명시적으로 설정해야 합니다.
-
-## 주의
-
-- API secret은 저장소 파일, issue, 로그, README, 채팅에 적지 마세요.
-- `npm run verify`가 통과한 artifact만 서명합니다.
-- unlisted 서명은 개인 설치용이며 AMO 검색 목록에 공개하지 않습니다.
-- signing workflow는 secrets가 없으면 실패하도록 되어 있습니다. secret 값을 출력하지 않습니다.
-- signing wrapper는 AMO credential을 `web-ext` command line에 싣지 않고, 권한 `0600` 임시 config 파일로 전달한 뒤 즉시 삭제합니다.
+동일 버전을 AMO에 반복 제출하지 않습니다. 이미 게시된 GitHub Release 재실행은 workflow의 immutable reuse 경로로만 처리합니다.

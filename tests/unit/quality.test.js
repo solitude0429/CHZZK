@@ -38,17 +38,22 @@ describe("highest-supported-quality helpers", () => {
     assert.equal(parseQualityFromUrl("https://example.test/abc/playlist.m3u8"), null);
   });
 
-  it("redacts query strings and fragments from media URLs before logging", () => {
+  it("stores only an allowlisted host, quality, and media shape in diagnostics", () => {
     assert.equal(
       redactMediaUrl("https://example.test/1080p/chunklist.m3u8?Policy=example#frag"),
-      "https://example.test/1080p/chunklist.m3u8?[redacted]",
+      "https://example.test/[redacted-path]/1080p.m3u8?[redacted]",
     );
     assert.equal(
       redactMediaUrl(
         "https://example.test/live/480p/hdntl=st%3d1%7ehmac%3dabcdefabcdefabcdefabcdef/signedtoken1234567890abcdef_chunklist.m3u8",
       ),
-      "https://example.test/live/480p/[redacted-path]/[redacted-path]",
+      "https://example.test/[redacted-path]/480p.m3u8",
     );
+    assert.equal(
+      redactMediaUrl("https://user:pass@example.test:8443/private/account/720p/chunklist.m3u8"),
+      "https://example.test:8443/[redacted-path]/720p.m3u8",
+    );
+    assert.equal(redactMediaUrl("not a URL with ?token=secret"), "[redacted-url]");
   });
 
   it("orders configured quality candidates by numeric quality", () => {
@@ -124,6 +129,16 @@ describe("highest-supported-quality helpers", () => {
     assert.equal(
       replaceQualityInUrl("https://cdn.test/live/chunklist_720p.m3u8?Policy=example", "2160p"),
       "https://cdn.test/live/chunklist_2160p.m3u8?Policy=example",
+    );
+  });
+
+  it("rewrites suffix variants in pathname only and preserves the signed tail byte-for-byte", () => {
+    const input =
+      "https://cdn.test/live/360p/chunklist_720p_highbitrate.m3u8?next=/360p/chunklist_480p.m3u8&encoded=%2F360p%2F#fragment/480p/";
+
+    assert.equal(
+      replaceQualityInUrl(input, "1080p"),
+      "https://cdn.test/live/1080p/chunklist_1080p_highbitrate.m3u8?next=/360p/chunklist_480p.m3u8&encoded=%2F360p%2F#fragment/480p/",
     );
   });
 

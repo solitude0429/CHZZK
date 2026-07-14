@@ -10,11 +10,16 @@ function plain(value) {
 async function loadBackground({
   availableQualities = new Set(),
   existingLiveTabs = [],
+  fetchImplementation = null,
+  maxInternalTimerMs = null,
   responsesByUrl = new Map(),
+  storageSetImplementation = null,
+  tabUrlsById = new Map(),
 } = {}) {
   const listeners = {};
   const storage = {};
   const fetches = [];
+  const fetchOptions = [];
   const tabQueries = [];
   const context = {
     AbortController,
@@ -30,9 +35,11 @@ async function loadBackground({
     URL,
     clearTimeout,
     console,
-    fetch: async (url) => {
+    fetch: async (url, options = {}) => {
       const stringUrl = String(url);
       fetches.push(stringUrl);
+      fetchOptions.push(options);
+      if (fetchImplementation) return fetchImplementation(stringUrl, options);
       if (responsesByUrl.has(stringUrl)) {
         const response = responsesByUrl.get(stringUrl);
         if (response && typeof response === "object") {
@@ -45,22 +52,31 @@ async function loadBackground({
               },
             },
             ok: response.ok ?? true,
+            status: response.status ?? (response.ok === false ? 404 : 200),
             text: async () => response.body ?? response.text ?? "",
             url: response.url ?? stringUrl,
           };
         }
-        return { headers: { get: () => null }, ok: true, text: async () => response, url: stringUrl };
+        return {
+          headers: { get: () => null },
+          ok: true,
+          status: 200,
+          text: async () => response,
+          url: stringUrl,
+        };
       }
       const ok = [...availableQualities].some((quality) => stringUrl.includes(quality));
       return {
         headers: { get: () => null },
         ok,
+        status: ok ? 200 : 404,
         text: async () => (ok ? "#EXTM3U\n#EXT-X-VERSION:3\n" : "not found"),
         url: stringUrl,
       };
     },
     globalThis: null,
-    setTimeout,
+    setTimeout: (callback, delay, ...args) =>
+      setTimeout(callback, maxInternalTimerMs == null ? delay : Math.min(delay, maxInternalTimerMs), ...args),
   };
   context.globalThis = context;
   context.browser = {
@@ -87,11 +103,16 @@ async function loadBackground({
           return typeof key === "string" ? { [key]: storage[key] } : { ...storage };
         },
         async set(value) {
+          if (storageSetImplementation) await storageSetImplementation(value, storage);
           Object.assign(storage, value);
         },
       },
     },
     tabs: {
+      async get(tabId) {
+        const existing = existingLiveTabs.find((tab) => tab.id === tabId);
+        return existing ?? { id: tabId, url: tabUrlsById.get(tabId) };
+      },
       async query(queryInfo) {
         tabQueries.push(queryInfo);
         return existingLiveTabs;
@@ -123,11 +144,31 @@ async function loadBackground({
     filename: "background.js",
   });
 
-  return { fetches, listeners, storage, tabQueries };
+  return { fetches, fetchOptions, listeners, storage, tabQueries };
 }
 
-async function waitForDiagnosticsQueue() {
-  await new Promise((resolve) => setTimeout(resolve, 50));
+async function waitForDiagnosticsQueue(delayMs = 50) {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function playlistResponse(url, body = "#EXTM3U\n#EXT-X-VERSION:3\n") {
+  return {
+    headers: { get: () => null },
+    ok: true,
+    status: 200,
+    text: async () => body,
+    url,
+  };
 }
 
 function firstLowQualityRequest(tabId) {
@@ -146,6 +187,7 @@ describe("background runtime quality resolution", () => {
   it("does not hard-code a startup quality and redirects the first request to the highest supported candidate", async () => {
     const { fetches, listeners, storage } = await loadBackground({
       availableQualities: new Set(["1440p", "1080p"]),
+      tabUrlsById: new Map([[42, "https://chzzk.naver.com/live/example-channel"]]),
     });
 
     listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: 42 } });
@@ -181,6 +223,207 @@ describe("background runtime quality resolution", () => {
     assert.equal(diagnostics.decisions.at(-1).redirectedCurrentRequest, true);
   });
 
+  it("shares one in-flight probe set and fails open within the blocking latency budget", async () => {
+    const pendingFetch = deferred();
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async () => pendingFetch.promise,
+    });
+    const request = firstLowQualityRequest(420);
+    const requests = Promise.all([listeners.onBeforeRequest(request), listeners.onBeforeRequest(request)]);
+    requests.catch(() => {});
+
+    const outcome = await Promise.race([
+      requests.then((values) => ({ kind: "returned", values })),
+      new Promise((resolve) => setTimeout(() => resolve({ kind: "timeout" }), 500)),
+    ]);
+
+    assert.equal(
+      outcome.kind,
+      "returned",
+      "blocking webRequest must fail open before the latency budget expires",
+    );
+    assert.equal(
+      outcome.values.every((value) => value === undefined),
+      true,
+    );
+    assert.equal(fetches.length, 1, "concurrent requests for one tab/context must share one probe set");
+  });
+
+  it("aborts the whole background resolution after a bounded total budget", async () => {
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        }),
+      maxInternalTimerMs: 20,
+    });
+
+    await listeners.onBeforeRequest(firstLowQualityRequest(424));
+    await waitForDiagnosticsQueue(100);
+
+    assert.equal(fetches.length, 1, "a total resolution timeout must stop the serial candidate loop");
+  });
+
+  it("rejects a candidate when the final playlist quality does not match the requested quality", async () => {
+    const mismatched1440 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1440p/segment/chunklist_1440p.m3u8?Policy=redacted";
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      responsesByUrl: new Map([
+        [
+          mismatched1440,
+          {
+            body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+            url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
+          },
+        ],
+      ]),
+    });
+
+    const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(421)));
+
+    assert.equal(
+      redirect.redirectUrl,
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
+    );
+  });
+
+  it("rejects a quality-marked candidate URL whose body is a lower-quality master playlist", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const lowerQualityMaster = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360
+chunklist_360p.m3u8?Policy=redacted
+`;
+    const { listeners } = await loadBackground({
+      responsesByUrl: new Map([[requested2160, lowerQualityMaster]]),
+    });
+
+    const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(426));
+    assert.equal(redirect, undefined, "candidate master evidence must contain the requested quality");
+  });
+
+  it("does not restore a stale target after navigating to another live channel", async () => {
+    const pendingFetch = deferred();
+    const { fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async () => pendingFetch.promise,
+    });
+
+    listeners.onUpdated(422, { url: "https://chzzk.naver.com/live/channel-a" });
+    const request = listeners.onBeforeRequest(firstLowQualityRequest(422));
+    await waitForDiagnosticsQueue(10);
+    listeners.onUpdated(422, { url: "https://chzzk.naver.com/live/channel-b" });
+    await waitForDiagnosticsQueue(10);
+    pendingFetch.resolve(playlistResponse(fetches[0]));
+    await request;
+    await waitForDiagnosticsQueue();
+
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+  });
+
+  it("does not restore a stale target when the first request records context before tabs.onUpdated", async () => {
+    const pendingFetch = deferred();
+    const { fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async () => pendingFetch.promise,
+    });
+    const request = listeners.onBeforeRequest({
+      ...firstLowQualityRequest(425),
+      documentUrl: "https://chzzk.naver.com/live/channel-a",
+    });
+    await waitForDiagnosticsQueue(10);
+    listeners.onUpdated(425, { url: "https://chzzk.naver.com/live/channel-b" });
+    await waitForDiagnosticsQueue(10);
+    pendingFetch.resolve(playlistResponse(fetches[0]));
+    await request;
+    await waitForDiagnosticsQueue();
+
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+  });
+
+  it("invalidates cached state when request metadata proves a different live context", async () => {
+    const pendingFetch = deferred();
+    let initialResolution = true;
+    let pendingUrl = null;
+    const { listeners, storage } = await loadBackground({
+      fetchImplementation: async (url) => {
+        if (!initialResolution) {
+          pendingUrl = url;
+          return pendingFetch.promise;
+        }
+        if (url.includes("2160p")) return new Response("not found", { status: 404 });
+        return playlistResponse(url);
+      },
+      maxInternalTimerMs: 50,
+    });
+
+    const initial = plain(
+      await listeners.onBeforeRequest({
+        ...firstLowQualityRequest(426),
+        documentUrl: "https://chzzk.naver.com/live/channel-a",
+      }),
+    );
+    assert.match(initial.redirectUrl, /1440p/);
+    initialResolution = false;
+
+    const mismatch = await listeners.onBeforeRequest({
+      ...firstLowQualityRequest(426),
+      documentUrl: "https://chzzk.naver.com/live/channel-b",
+    });
+    assert.equal(mismatch, undefined);
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+
+    const metadataPoor = await listeners.onBeforeRequest({
+      ...firstLowQualityRequest(426),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+    });
+    assert.equal(metadataPoor, undefined);
+    pendingFetch.resolve(playlistResponse(pendingUrl));
+    await waitForDiagnosticsQueue(60);
+  });
+
+  it("invalidates contextless first-request work when a concrete live context is adopted", async () => {
+    const pendingFetch = deferred();
+    const { fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async () => pendingFetch.promise,
+    });
+
+    const initialRequest = listeners.onBeforeRequest({
+      ...firstLowQualityRequest(427),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+    });
+    await initialRequest;
+    listeners.onUpdated(427, { url: "https://chzzk.naver.com/live/channel-b" });
+    await waitForDiagnosticsQueue(10);
+    pendingFetch.resolve(playlistResponse(fetches[0]));
+    await waitForDiagnosticsQueue();
+
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+  });
+
+  it("does not restore state for a closed tab when a pending probe completes", async () => {
+    const pendingFetch = deferred();
+    const { fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async () => pendingFetch.promise,
+    });
+
+    listeners.onUpdated(423, { url: "https://chzzk.naver.com/live/channel-a" });
+    const request = listeners.onBeforeRequest(firstLowQualityRequest(423));
+    await waitForDiagnosticsQueue(10);
+    listeners.onRemoved(423);
+    await waitForDiagnosticsQueue(10);
+    pendingFetch.resolve(playlistResponse(fetches[0]));
+    await request;
+    await waitForDiagnosticsQueue();
+
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+  });
+
   it("redirects the first request without content-script prewarm when Firefox only provides the CHZZK initiator", async () => {
     const { listeners } = await loadBackground({ availableQualities: new Set(["1080p"]) });
 
@@ -205,6 +448,30 @@ describe("background runtime quality resolution", () => {
       redirect.redirectUrl,
       "https://livecloud.pstatic.net.live.gscdn.net/live/chunklist_1080p.m3u8?Policy=redacted",
     );
+  });
+
+  it("does not let a delayed content-script message restore trust after non-live navigation", async () => {
+    const tabUrlsById = new Map([[512, "https://www.example.com/"]]);
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabUrlsById,
+    });
+
+    listeners.onUpdated(512, { url: "https://chzzk.naver.com/live/channel-a" });
+    listeners.onUpdated(512, { url: "https://www.example.com/" });
+    await waitForDiagnosticsQueue();
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: 512 } });
+    await waitForDiagnosticsQueue();
+
+    const redirect = await listeners.onBeforeRequest({
+      ...firstLowQualityRequest(512),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+      url: "https://example.pstatic.net/video/chunklist_480p.m3u8?Policy=redacted",
+    });
+    assert.equal(redirect, undefined);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
   });
 
   it("prewarms a live tab from tabs.onUpdated before the first HLS request when content-script timing loses the race", async () => {
@@ -252,6 +519,7 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
 `;
     const { listeners, storage } = await loadBackground({
       responsesByUrl: new Map([[masterUrl, masterPlaylist]]),
+      tabUrlsById: new Map([[43, "https://chzzk.naver.com/live/example-channel"]]),
     });
 
     listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: 43 } });
@@ -293,6 +561,43 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     assert.deepEqual(diagnostics.runtimeRedirects.targetsByTab, { 43: "1080p" });
     assert.equal(diagnostics.decisions.at(-1).targetQuality, "1080p");
     assert.equal(diagnostics.decisions.at(-1).redirectedCurrentRequest, true);
+  });
+
+  it("lets newer master-playlist evidence supersede an older numeric probe", async () => {
+    const pendingNumeric = deferred();
+    const masterUrl = "https://example.pstatic.net/chzzk/live/master.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p.m3u8?Policy=redacted
+`;
+    const { fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async (url) =>
+        url === masterUrl ? playlistResponse(url, masterPlaylist) : pendingNumeric.promise,
+    });
+    const contextUrl = "https://chzzk.naver.com/live/channel-a";
+    const numericRequest = listeners.onBeforeRequest({
+      ...firstLowQualityRequest(513),
+      documentUrl: contextUrl,
+    });
+    await waitForDiagnosticsQueue(10);
+
+    const masterRedirect = await listeners.onBeforeRequest({
+      documentUrl: contextUrl,
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      originUrl: undefined,
+      tabId: 513,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    });
+    assert.equal(masterRedirect, undefined);
+    await waitForDiagnosticsQueue(20);
+    pendingNumeric.resolve(playlistResponse(fetches[0]));
+    await numericRequest;
+    await waitForDiagnosticsQueue();
+
+    assert.equal(fetches.includes(masterUrl), true);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 513: "1080p" });
   });
 
   it("clears cached target quality when the same tab navigates to another CHZZK live channel", async () => {
@@ -352,6 +657,61 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(67));
 
     assert.equal(redirect, undefined, "cross-origin final probe URLs must fail closed");
+  });
+
+  it("fails closed on candidate redirects because Firefox cannot inspect manual redirect hops", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const redirected2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/redirected/2160p/chunklist_2160p.m3u8";
+    const { fetchOptions, fetches, listeners } = await loadBackground({
+      responsesByUrl: new Map([
+        [
+          requested2160,
+          {
+            headers: { location: redirected2160 },
+            ok: false,
+            status: 302,
+          },
+        ],
+        [redirected2160, { body: "#EXTM3U\n#EXT-X-VERSION:3\n" }],
+      ]),
+    });
+
+    const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(670));
+
+    assert.equal(redirect, undefined);
+    assert.equal(fetches[0], requested2160);
+    assert.equal(fetches.includes(redirected2160), false);
+    assert.equal(
+      fetchOptions.every((options) => options.redirect === "error"),
+      true,
+    );
+  });
+
+  it("never waits outside the blocking budget when diagnostics storage fails and error reporting stalls", async () => {
+    const stalledWrite = deferred();
+    let writes = 0;
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      storageSetImplementation: async () => {
+        writes += 1;
+        if (writes === 1) throw new Error("synthetic storage failure");
+        await stalledWrite.promise;
+      },
+    });
+
+    const outcome = await Promise.race([
+      listeners.onBeforeRequest(firstLowQualityRequest(672)).then(() => "returned"),
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 500)),
+    ]);
+    stalledWrite.resolve();
+
+    assert.equal(
+      outcome,
+      "returned",
+      "diagnostics and error reporting must never extend the blocking deadline",
+    );
   });
 
   it("normalizes corrupt stored diagnostics before mutating runtime state", async () => {

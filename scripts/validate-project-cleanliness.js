@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const legacyTerms = [
   ["bass", "9030"],
@@ -15,7 +15,9 @@ const legacyTerms = [
 
 const forbiddenPatterns = legacyTerms.map((parts) => new RegExp(parts.join(""), "i"));
 
-const list = spawnSync("git", ["ls-files"], { encoding: "utf8" });
+const list = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+  encoding: "utf8",
+});
 if (list.status !== 0) {
   process.stderr.write(list.stderr);
   process.exit(list.status ?? 1);
@@ -24,7 +26,7 @@ if (list.status !== 0) {
 const files = list.stdout
   .split(/\r?\n/)
   .map((line) => line.trim())
-  .filter(Boolean);
+  .filter((file) => file && existsSync(file));
 
 const violations = [];
 for (const file of files) {
