@@ -7,8 +7,8 @@ on:
     types: [dismissed, edited, submitted]
   pull_request_review_comment:
     types: [created, deleted, edited]
-  check_run:
-    types: [completed]
+  issue_comment:
+    types: [created, deleted, edited]
   workflow_dispatch:
     inputs:
       force_review:
@@ -25,19 +25,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number || github.event.check_run.head_sha || inputs.pr_number || github.run_id }}
+  group: review-gate-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   evaluate:
-    if: >-
-      github.event_name != 'check_run' ||
-      (github.event.check_run.app.slug == vars.AUTOMATED_REVIEW_APP_SLUG &&
-      github.event.check_run.name == vars.AUTOMATED_REVIEW_CHECK_NAME &&
-      github.event.check_run.pull_requests[0].number != null)
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
     permissions:
-      checks: read
       contents: read
+      issues: read
       pull-requests: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -52,14 +48,16 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
       - id: gate
-        name: Evaluate configured reviewer completion and review threads
+        name: Evaluate exact-head reviewer evidence and review threads
         continue-on-error: true
         env:
-          CHZZK_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.check_run.head_sha || '' }}
-          CHZZK_FORCE_REVIEW: ${{ inputs.force_review || false }}
-          CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.check_run.pull_requests[0].number }}
-          CHZZK_REVIEW_APP_SLUG: ${{ vars.AUTOMATED_REVIEW_APP_SLUG }}
-          CHZZK_REVIEW_CHECK_NAME: ${{ vars.AUTOMATED_REVIEW_CHECK_NAME }}
+          CHZZK_AUTOMATED_REVIEW_LOGIN: ${{ vars.AUTOMATED_REVIEW_LOGIN }}
+          CHZZK_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          CHZZK_FORCE_REVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.force_review || false }}
+          CHZZK_POLL_INTERVAL_SECONDS: "15"
+          CHZZK_POLL_SECONDS: ${{ github.event_name == 'pull_request_target' && (github.event.action == 'opened' || github.event.action == 'synchronize') && '180' || '0' }}
+          CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
+          CHZZK_RELEASE_OPERATOR_LOGIN: ${{ vars.RELEASE_OPERATOR_LOGIN }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-review-gate.js
 

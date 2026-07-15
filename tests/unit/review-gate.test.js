@@ -4,25 +4,45 @@ import { describe, it } from "node:test";
 import { evaluateReviewCompletion, requiresAutomatedSecurityReview } from "../../scripts/lib/review-gate.js";
 
 const headSha = "d".repeat(40);
+const staleSha = "e".repeat(40);
+const reviewerLogin = "chatgpt-codex-connector[bot]";
+const operatorLogin = "sole-owner";
+const headTimestamp = "2026-07-15T10:00:00Z";
+
+function exactReview(overrides = {}) {
+  return {
+    commit_id: headSha,
+    state: "COMMENTED",
+    submitted_at: "2026-07-15T10:01:00Z",
+    user: { login: reviewerLogin },
+    ...overrides,
+  };
+}
+
+function plusOne(overrides = {}) {
+  return {
+    content: "+1",
+    created_at: "2026-07-15T10:01:00Z",
+    user: { login: reviewerLogin },
+    ...overrides,
+  };
+}
 
 function sensitiveEvaluation(overrides = {}) {
   return {
-    checkRuns: [
-      {
-        app: { slug: "synthetic-reviewer" },
-        conclusion: "success",
-        head_sha: headSha,
-        id: 123,
-        name: "Automated security review",
-        status: "completed",
-      },
-    ],
+    automatedReviewLogin: reviewerLogin,
     expectedHeadSha: headSha,
     files: ["scripts/lib/release-artifacts.js"],
+    headCommit: {
+      commit: { committer: { date: headTimestamp } },
+      sha: headSha,
+    },
+    issueReactions: [],
     labels: [],
     pullRequest: { draft: false, head: { sha: headSha }, number: 42, state: "open" },
-    reviewAppSlug: "synthetic-reviewer",
-    reviewCheckName: "Automated security review",
+    releaseOperatorLogin: operatorLogin,
+    reviews: [exactReview()],
+    reviewRequestComments: [],
     reviewThreads: [{ isResolved: true }],
     ...overrides,
   };
@@ -53,64 +73,180 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("passes only a configured successful reviewer completion on the current head with no open thread", () => {
+  it("accepts the connector's COMMENTED review only when commit_id is the exact current head", () => {
     assert.deepEqual(evaluateReviewCompletion(sensitiveEvaluation()), {
-      description: "Automated review completed on the exact PR head; no unresolved review threads",
+      description: "Automated reviewer reviewed the exact PR head; no unresolved review threads",
       headSha,
       required: true,
       state: "success",
     });
+
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            reviews: [exactReview({ commit_id: staleSha })],
+          }),
+        ),
+      /no exact-head review|post-head \+1/i,
+    );
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            reviews: [exactReview({ state: "DISMISSED" })],
+          }),
+        ),
+      /no exact-head review|post-head \+1/i,
+    );
   });
 
-  it("fails closed for missing configuration, absent signals, stale-head checks, and unresolved threads", () => {
-    const cases = [
-      { reviewAppSlug: "", expected: /configured|app|slug/i },
-      { reviewCheckName: "", expected: /configured|check/i },
-      {
-        checkRuns: [
-          {
-            app: { slug: "github-actions" },
-            conclusion: "success",
-            head_sha: headSha,
-            id: 125,
-            name: "CHZZK review completion",
-            status: "completed",
-          },
-        ],
-        reviewAppSlug: "github-actions",
-        reviewCheckName: "CHZZK review completion",
-        expected: /self|gate|reviewer|configured/i,
-      },
-      { checkRuns: [], expected: /completion|check|signal/i },
-      {
-        checkRuns: [
-          {
-            app: { slug: "synthetic-reviewer" },
-            conclusion: "success",
-            head_sha: "e".repeat(40),
-            id: 124,
-            name: "Automated security review",
-            status: "completed",
-          },
-        ],
-        expected: /current|head|completion/i,
-      },
-      { reviewThreads: [{ isResolved: false }], expected: /unresolved|thread/i },
-    ];
-    for (const { expected, ...override } of cases) {
-      assert.throws(() => evaluateReviewCompletion(sensitiveEvaluation(override)), expected);
-    }
-  });
-
-  it("does not require the external reviewer for an ordinary PR, but still binds the reported head", () => {
+  it("accepts the connector's issue-level +1 only when it strictly postdates the head commit", () => {
     assert.deepEqual(
       evaluateReviewCompletion(
         sensitiveEvaluation({
-          checkRuns: [],
+          issueReactions: [plusOne()],
+          reviews: [],
+        }),
+      ),
+      {
+        description: "Reviewer +1 postdates the PR head commit; no unresolved review threads",
+        headSha,
+        required: true,
+        state: "success",
+      },
+    );
+
+    for (const createdAt of ["2026-07-15T09:59:59Z", headTimestamp]) {
+      assert.throws(
+        () =>
+          evaluateReviewCompletion(
+            sensitiveEvaluation({
+              issueReactions: [plusOne({ created_at: createdAt })],
+              reviews: [],
+            }),
+          ),
+        /no exact-head review|post-head \+1/i,
+      );
+    }
+  });
+
+  it("prefers a +1 bound to an operator comment containing the full exact head SHA", () => {
+    assert.deepEqual(
+      evaluateReviewCompletion(
+        sensitiveEvaluation({
+          issueReactions: [],
+          reviewRequestComments: [
+            {
+              body: `Codex review request for ${headSha}`,
+              created_at: "2026-07-15T10:00:30Z",
+              reactions: [plusOne()],
+              updated_at: "2026-07-15T10:00:30Z",
+              user: { login: operatorLogin },
+            },
+          ],
+          reviews: [],
+        }),
+      ),
+      {
+        description: "Reviewer +1 is bound to the exact-head operator request; no unresolved threads",
+        headSha,
+        required: true,
+        state: "success",
+      },
+    );
+
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            reviewRequestComments: [
+              {
+                body: `Codex review request for ${staleSha}`,
+                created_at: "2026-07-15T10:00:30Z",
+                reactions: [plusOne()],
+                updated_at: "2026-07-15T10:00:30Z",
+                user: { login: operatorLogin },
+              },
+            ],
+            reviews: [],
+          }),
+        ),
+      /no exact-head review|post-head \+1/i,
+    );
+  });
+
+  it("rejects otherwise valid evidence from the wrong actor", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            issueReactions: [plusOne({ user: { login: "different-reviewer[bot]" } })],
+            reviews: [exactReview({ user: { login: "different-reviewer[bot]" } })],
+          }),
+        ),
+      /no exact-head review|post-head \+1/i,
+    );
+  });
+
+  it("fails closed on malformed or missing evidence dates and identities", () => {
+    const cases = [
+      {
+        headCommit: { commit: { committer: { date: "not-a-date" } }, sha: headSha },
+        reviews: [],
+      },
+      { issueReactions: [plusOne({ created_at: "not-a-date" })], reviews: [] },
+      { reviews: [exactReview({ submitted_at: "not-a-date" })] },
+      { issueReactions: [plusOne({ user: null })], reviews: [] },
+      {
+        reviewRequestComments: [
+          {
+            body: `Codex review request for ${headSha}`,
+            created_at: "2026-07-15T10:00:30Z",
+            reactions: [plusOne()],
+            updated_at: "not-a-date",
+            user: { login: operatorLogin },
+          },
+        ],
+        reviews: [],
+      },
+      { automatedReviewLogin: "" },
+      { releaseOperatorLogin: "" },
+    ];
+    for (const override of cases) {
+      assert.throws(
+        () => evaluateReviewCompletion(sensitiveEvaluation(override)),
+        /missing|malformed|login|identity|timestamp/i,
+      );
+    }
+  });
+
+  it("requires zero unresolved review threads even with exact-head reviewer evidence", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({ reviewThreads: [{ isResolved: true }, { isResolved: false }] }),
+        ),
+      /unresolved|thread/i,
+    );
+    assert.throws(
+      () => evaluateReviewCompletion(sensitiveEvaluation({ reviewThreads: [{}] })),
+      /unknown|thread/i,
+    );
+  });
+
+  it("does not require reviewer evidence for an ordinary PR, but still binds the reported head", () => {
+    assert.deepEqual(
+      evaluateReviewCompletion(
+        sensitiveEvaluation({
+          automatedReviewLogin: "",
           files: ["README.md"],
-          reviewAppSlug: "",
-          reviewCheckName: "",
-          reviewThreads: [],
+          headCommit: null,
+          issueReactions: null,
+          releaseOperatorLogin: "",
+          reviews: null,
+          reviewRequestComments: null,
+          reviewThreads: null,
         }),
       ),
       {

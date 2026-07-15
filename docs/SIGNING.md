@@ -39,20 +39,26 @@ CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" npm run release:dispatch
 
 ## 저장소 review gate 설정
 
-Release/security-sensitive PR은 path 분류와 `security-review-required`/`release-review-required` label을 함께 사용합니다. gate는 현재 PR head에 대해 configured GitHub App의 정확한 check run이 completed/success이고 모든 review thread가 resolved일 때만 `CHZZK review completion` check를 성공시킵니다. required check는 아무 actor의 같은 이름 status가 아니라 GitHub Actions App ID에 고정합니다. push 후 예전 check/review는 인정하지 않습니다. review app이 authoritative completion check를 제공하지 않거나 app slug/check 이름이 비어 있으면 성공을 추정하지 않고 실패합니다.
+Release/security-sensitive PR은 path 분류와 `security-review-required`/`release-review-required` label을 함께 사용합니다. gate는 `AUTOMATED_REVIEW_LOGIN`의 정확한 계정(`chatgpt-codex-connector[bot]`)이 남긴 다음 실제 signal 중 하나와 unresolved review thread 0개를 요구합니다.
 
-관리자는 Actions 밖에서 아래 script로 설정을 먼저 검증하고, 의도적으로 적용할 때만 `--apply`를 사용합니다. script는 기존 default-branch check를 보존하면서 source-bound strict required check, stale-review dismissal, 최소 1개의 last-push approval, conversation resolution, administrator enforcement, review-bypass 없음, labels, repository variables를 적용/검증합니다. 이 저장소 작업 중에는 실행하지 않습니다.
+- dismissed되지 않은 submitted review의 `commit_id`가 현재 PR head SHA와 정확히 일치
+- reviewer의 `+1` reaction `created_at`이 현재 head commit의 `commit.committer.date`보다 엄격히 늦음
+
+두 번째 경로에서는 `RELEASE_OPERATOR_LOGIN`이 작성하고 full current head SHA를 포함한 PR issue comment의 reaction을 먼저 사용합니다. reaction timestamp는 head commit보다 늦고 comment의 `updated_at`보다 이르지 않아야 하므로, 이 comment reaction은 SHA에 직접 묶인 request anchor입니다. 실제 no-findings 동작처럼 PR 자체에 달린 issue-level `+1`만 있는 경우에는 이를 fallback으로 사용합니다. GitHub의 issue reaction에는 commit SHA가 없으므로 fallback은 timestamp에만 묶입니다. 따라서 head commit timestamp 이전 또는 같은 초의 reaction은 항상 stale로 거부되지만, 비단조적인 committer timestamp가 있는 새 head에 대해서는 과거 reaction을 SHA 차원에서 구분할 수 없다는 잔여 제약이 있습니다. 가능한 경우 operator comment에 full SHA를 넣어 review를 요청합니다. identity, SHA, state, 또는 필요한 timestamp가 없거나 malformed이면 gate는 실패합니다.
+
+workflow는 `pull_request_target`, review/review-comment, issue-comment event에서 trusted default branch만 checkout하며 PR code를 실행하지 않습니다. reaction 전용 Actions event가 없으므로 PR `opened`/`synchronize`에서는 최대 180초 동안 15초 간격으로 bounded polling하고, 그 밖에는 **Review completion gate**의 `workflow_dispatch`로 안전하게 재평가합니다. schedule과 gate check-run self-trigger는 사용하지 않습니다. 성공/실패 결과는 정확한 current head에 GitHub Actions가 만든 `CHZZK review completion` check로 게시합니다.
+
+관리자는 Actions 밖에서 아래 script의 dry-run으로 exact change plan을 확인하고, 의도적으로 적용할 때만 `--apply`를 사용합니다. script는 기존 default-branch required status check를 보존하면서 GitHub Actions App에 source-bound된 strict `CHZZK review completion`, conversation resolution, administrator enforcement, labels, `AUTOMATED_REVIEW_LOGIN`/`RELEASE_OPERATOR_LOGIN` repository variable만 적용하고 다시 검증합니다. 이미 exact한 resource는 변경하지 않으므로 반복 적용은 no-op입니다. sole owner가 자기 PR을 approve할 수 없으므로 approving-review count, last-push approval, code-owner approval 같은 approval protection은 설정하지 않습니다. 이 저장소 작업 중에는 실제 API를 호출하지 않습니다.
 
 ```bash
 export CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK"
-export CHZZK_REVIEW_APP_SLUG="<configured-review-app-slug>"
-export CHZZK_REVIEW_CHECK_NAME="<authoritative-completion-check>"
+export CHZZK_AUTOMATED_REVIEW_LOGIN="chatgpt-codex-connector[bot]"
 export CHZZK_RELEASE_OPERATOR_LOGIN="<release-operator-login>"
 npm run configure:review-gate
 npm run configure:review-gate -- --apply
 ```
 
-thread resolution 뒤 자동 event가 발생하지 않는 경우 **Review completion gate** workflow의 manual reevaluation만 사용합니다. 이 manual entry point는 release dispatch 권한이 없습니다.
+thread resolution 또는 delayed reaction 뒤 자동 event가 발생하지 않는 경우 manual reevaluation만 사용합니다. 이 entry point는 release dispatch 권한이 없습니다.
 
 ## Native AMO client
 

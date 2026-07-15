@@ -224,32 +224,49 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(transaction, /chmodSync\(targetDir|chmodSync\(releasesDir/);
   });
 
-  it("requires a trusted exact-head automated review status for release and security PRs", () => {
+  it("requires trusted exact-head reviewer evidence with sole-owner branch protection", () => {
     const gate = workflow("review-gate.yml");
     const text = read(".github/workflows/review-gate.yml");
+    const checker = read("scripts/check-review-gate.js");
     const settings = read("scripts/configure-review-gate.js");
     assert.equal(Object.hasOwn(gate.on, "pull_request_target"), true);
-    assert.equal(Object.hasOwn(gate.on, "check_run"), true);
+    assert.equal(Object.hasOwn(gate.on, "pull_request_review"), true);
+    assert.equal(Object.hasOwn(gate.on, "pull_request_review_comment"), true);
+    assert.equal(Object.hasOwn(gate.on, "issue_comment"), true);
     assert.equal(Object.hasOwn(gate.on, "workflow_dispatch"), true);
+    assert.equal(Object.hasOwn(gate.on, "check_run"), false);
     assert.deepEqual(gate.jobs.evaluate.permissions, {
-      checks: "read",
       contents: "read",
+      issues: "read",
       "pull-requests": "read",
     });
     assert.deepEqual(gate.jobs.status.permissions, { checks: "write" });
+    const checkout = gate.jobs.evaluate.steps.find((step) =>
+      String(step.uses ?? "").startsWith("actions/checkout@"),
+    );
+    assert.equal(checkout.with.ref, "${{ github.event.repository.default_branch }}");
     assert.doesNotMatch(JSON.stringify(gate.jobs.status), /actions\/checkout|node scripts\/|npm\s/);
-    assert.match(text, /AUTOMATED_REVIEW_APP_SLUG/);
-    assert.match(text, /AUTOMATED_REVIEW_CHECK_NAME/);
+    assert.match(text, /AUTOMATED_REVIEW_LOGIN/);
+    assert.match(text, /RELEASE_OPERATOR_LOGIN/);
+    assert.match(text, /CHZZK_POLL_SECONDS/);
     assert.match(text, /CHZZK review completion/);
-    assert.match(text, /check-runs/);
+    assert.match(checker, /pulls\/\$\{pullNumber\}\/reviews/);
+    assert.match(checker, /issues\/\$\{pullNumber\}\/reactions/);
+    assert.match(checker, /issues\/comments\/\$\{comment\.id\}\/reactions/);
+    assert.match(checker, /commits\/\$\{currentHeadSha\}/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
-    assert.match(settings, /dismiss_stale_reviews/);
-    assert.match(settings, /require_last_push_approval/);
     assert.match(settings, /required_conversation_resolution/);
     assert.match(settings, /protection\/enforce_admins/);
-    assert.match(settings, /Math\.max\(\s*1/);
     assert.match(settings, /--apply/);
+    assert.doesNotMatch(
+      `${text}\n${checker}\n${settings}`,
+      /AUTOMATED_REVIEW_APP_SLUG|AUTOMATED_REVIEW_CHECK_NAME/,
+    );
+    assert.doesNotMatch(
+      settings,
+      /required_approving_review_count|require_last_push_approval|required_pull_request_reviews/,
+    );
   });
 
   it("keeps extension diagnostics local-only and documented as such", () => {

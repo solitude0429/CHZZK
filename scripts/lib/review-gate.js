@@ -1,4 +1,8 @@
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
+const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/;
+const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const SUBMITTED_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
+const KNOWN_REVIEW_STATES = new Set([...SUBMITTED_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
 const PACKAGED_RUNTIME_PATHS = new Set([
   "background.js",
@@ -24,6 +28,37 @@ function isSensitivePath(path) {
     path === "package-lock.json" ||
     /^docs\/(?:HARDENING|OPERATIONS|SECURITY|SIGNING|UPDATES)\.md$/.test(path)
   );
+}
+
+function normalizeLogin(value, label) {
+  if (typeof value !== "string" || value !== value.trim() || !GITHUB_LOGIN_RE.test(value)) {
+    throw new Error(`${label} is missing or malformed`);
+  }
+  return value.toLowerCase();
+}
+
+function timestampMilliseconds(value, label) {
+  if (typeof value !== "string" || !GITHUB_TIMESTAMP_RE.test(value)) {
+    throw new Error(`${label} is missing or malformed`);
+  }
+  const milliseconds = Date.parse(value);
+  if (
+    !Number.isFinite(milliseconds) ||
+    new Date(milliseconds).toISOString() !== `${value.slice(0, -1)}.000Z`
+  ) {
+    throw new Error(`${label} is missing or malformed`);
+  }
+  return milliseconds;
+}
+
+function pending(message) {
+  const error = new Error(message);
+  error.code = "REVIEW_GATE_PENDING";
+  throw error;
+}
+
+export function isPendingReviewGateError(error) {
+  return error?.code === "REVIEW_GATE_PENDING";
 }
 
 export function requiresAutomatedSecurityReview({ files, forceReview = false, labels }) {
@@ -55,15 +90,127 @@ function assertCurrentPullRequest(pullRequest, expectedHeadSha) {
   return headSha;
 }
 
+function assertNoUnresolvedThreads(reviewThreads) {
+  if (!Array.isArray(reviewThreads)) throw new Error("Pull request review-thread response is missing");
+  if (reviewThreads.some((thread) => typeof thread?.isResolved !== "boolean")) {
+    throw new Error("Pull request review-thread completion state is unknown");
+  }
+  const unresolved = reviewThreads.filter((thread) => !thread.isResolved);
+  if (unresolved.length > 0) {
+    pending(`Pull request has ${unresolved.length} unresolved actionable review thread(s)`);
+  }
+}
+
+export function hasExactHeadReviewerReview({ automatedReviewLogin, headSha, reviews }) {
+  const reviewerLogin = normalizeLogin(automatedReviewLogin, "Automated reviewer login");
+  if (!FULL_GIT_SHA_RE.test(String(headSha ?? "").toLowerCase())) {
+    throw new Error("Review comparison head SHA is missing or malformed");
+  }
+  if (!Array.isArray(reviews)) throw new Error("Automated reviewer review response is missing");
+
+  let exactReview = false;
+  for (const review of reviews) {
+    const actorLogin = normalizeLogin(review?.user?.login, "Review actor identity");
+    if (actorLogin !== reviewerLogin) continue;
+    if (typeof review.state !== "string" || !KNOWN_REVIEW_STATES.has(review.state)) {
+      throw new Error("Automated reviewer review state is missing or malformed");
+    }
+    if (!SUBMITTED_REVIEW_STATES.has(review.state)) continue;
+    const reviewCommitId = String(review.commit_id ?? "").toLowerCase();
+    if (!FULL_GIT_SHA_RE.test(reviewCommitId)) {
+      throw new Error("Automated reviewer review commit identity is missing or malformed");
+    }
+    timestampMilliseconds(review.submitted_at, "Automated reviewer review timestamp");
+    if (reviewCommitId === headSha) exactReview = true;
+  }
+  return exactReview;
+}
+
+function headCommitTimestamp(headCommit, headSha) {
+  const commitSha = String(headCommit?.sha ?? "").toLowerCase();
+  if (commitSha !== headSha) throw new Error("Head commit timestamp response is stale or malformed");
+  return timestampMilliseconds(headCommit?.commit?.committer?.date, "Head commit timestamp");
+}
+
+function fullShaAppearsInComment(body, headSha) {
+  if (typeof body !== "string") return false;
+  const lowerBody = body.toLowerCase();
+  const index = lowerBody.indexOf(headSha);
+  if (index < 0) return false;
+  const before = lowerBody[index - 1] ?? "";
+  const after = lowerBody[index + headSha.length] ?? "";
+  return !/[a-f0-9]/.test(before) && !/[a-f0-9]/.test(after);
+}
+
+function validReviewerReaction(reaction, reviewerLogin, headTimestamp, label) {
+  const actorLogin = normalizeLogin(reaction?.user?.login, `${label} actor identity`);
+  if (actorLogin !== reviewerLogin || reaction.content !== "+1") return null;
+  const reactionTimestamp = timestampMilliseconds(reaction.created_at, `${label} timestamp`);
+  return reactionTimestamp > headTimestamp ? reactionTimestamp : null;
+}
+
+function hasBoundRequestReaction({
+  headSha,
+  headTimestamp,
+  releaseOperatorLogin,
+  reviewRequestComments,
+  reviewerLogin,
+}) {
+  const operatorLogin = normalizeLogin(releaseOperatorLogin, "Release operator login");
+  if (!Array.isArray(reviewRequestComments)) {
+    throw new Error("Operator review-request comment response is missing");
+  }
+
+  for (const comment of reviewRequestComments) {
+    const authorLogin = normalizeLogin(comment?.user?.login, "Review-request comment author identity");
+    if (authorLogin !== operatorLogin || !fullShaAppearsInComment(comment.body, headSha)) continue;
+    const commentCreatedTimestamp = timestampMilliseconds(
+      comment.created_at,
+      "Review-request comment creation timestamp",
+    );
+    const commentUpdatedTimestamp = timestampMilliseconds(
+      comment.updated_at,
+      "Review-request comment update timestamp",
+    );
+    if (commentUpdatedTimestamp < commentCreatedTimestamp) {
+      throw new Error("Review-request comment timestamps are malformed");
+    }
+    if (!Array.isArray(comment.reactions)) {
+      throw new Error("Review-request comment reaction response is missing");
+    }
+    for (const reaction of comment.reactions) {
+      const reactionTimestamp = validReviewerReaction(
+        reaction,
+        reviewerLogin,
+        headTimestamp,
+        "Review-request comment reaction",
+      );
+      if (reactionTimestamp !== null && reactionTimestamp >= commentUpdatedTimestamp) return true;
+    }
+  }
+  return false;
+}
+
+function hasIssueReaction({ headTimestamp, issueReactions, reviewerLogin }) {
+  if (!Array.isArray(issueReactions)) throw new Error("Pull request reaction response is missing");
+  return issueReactions.some(
+    (reaction) =>
+      validReviewerReaction(reaction, reviewerLogin, headTimestamp, "Pull request reaction") !== null,
+  );
+}
+
 export function evaluateReviewCompletion({
-  checkRuns,
+  automatedReviewLogin,
   expectedHeadSha = "",
   files,
   forceReview = false,
+  headCommit,
+  issueReactions,
   labels,
   pullRequest,
-  reviewAppSlug,
-  reviewCheckName,
+  releaseOperatorLogin,
+  reviews,
+  reviewRequestComments,
   reviewThreads,
 }) {
   const headSha = assertCurrentPullRequest(pullRequest, expectedHeadSha);
@@ -77,42 +224,44 @@ export function evaluateReviewCompletion({
     };
   }
 
-  if (typeof reviewAppSlug !== "string" || !reviewAppSlug.trim()) {
-    throw new Error("Automated reviewer app slug is not configured");
+  const reviewerLogin = normalizeLogin(automatedReviewLogin, "Automated reviewer login");
+  normalizeLogin(releaseOperatorLogin, "Release operator login");
+  assertNoUnresolvedThreads(reviewThreads);
+
+  if (hasExactHeadReviewerReview({ automatedReviewLogin, headSha, reviews })) {
+    return {
+      description: "Automated reviewer reviewed the exact PR head; no unresolved review threads",
+      headSha,
+      required: true,
+      state: "success",
+    };
   }
-  if (typeof reviewCheckName !== "string" || !reviewCheckName.trim()) {
-    throw new Error("Automated reviewer completion check is not configured");
-  }
-  if (reviewAppSlug === "github-actions" && reviewCheckName === "CHZZK review completion") {
-    throw new Error("Automated reviewer configuration must not trust the review gate's own check");
-  }
-  if (!Array.isArray(checkRuns)) throw new Error("Automated reviewer check-run response is missing");
-  const matchingRuns = checkRuns
-    .filter((run) => run?.app?.slug === reviewAppSlug && run?.name === reviewCheckName)
-    .sort((left, right) => Number(right.id ?? 0) - Number(left.id ?? 0));
-  const completion = matchingRuns[0];
-  if (!completion) throw new Error("Automated reviewer exposes no configured completion signal");
+
+  const headTimestamp = headCommitTimestamp(headCommit, headSha);
   if (
-    completion.head_sha !== headSha ||
-    completion.status !== "completed" ||
-    completion.conclusion !== "success"
+    hasBoundRequestReaction({
+      headSha,
+      headTimestamp,
+      releaseOperatorLogin,
+      reviewRequestComments,
+      reviewerLogin,
+    })
   ) {
-    throw new Error("Automated reviewer completion is absent, unsuccessful, or stale for the current head");
+    return {
+      description: "Reviewer +1 is bound to the exact-head operator request; no unresolved threads",
+      headSha,
+      required: true,
+      state: "success",
+    };
+  }
+  if (hasIssueReaction({ headTimestamp, issueReactions, reviewerLogin })) {
+    return {
+      description: "Reviewer +1 postdates the PR head commit; no unresolved review threads",
+      headSha,
+      required: true,
+      state: "success",
+    };
   }
 
-  if (!Array.isArray(reviewThreads)) throw new Error("Pull request review-thread response is missing");
-  if (reviewThreads.some((thread) => typeof thread?.isResolved !== "boolean")) {
-    throw new Error("Pull request review-thread completion state is unknown");
-  }
-  const unresolved = reviewThreads.filter((thread) => !thread.isResolved);
-  if (unresolved.length > 0) {
-    throw new Error(`Pull request has ${unresolved.length} unresolved actionable review thread(s)`);
-  }
-
-  return {
-    description: "Automated review completed on the exact PR head; no unresolved review threads",
-    headSha,
-    required: true,
-    state: "success",
-  };
+  pending("Automated reviewer has no exact-head review or post-head +1 reaction");
 }

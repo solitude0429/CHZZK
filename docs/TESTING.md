@@ -23,7 +23,7 @@ npm run build
 npm run audit:package
 ```
 
-The unit suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment (no validated-path reread), exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and exact-head review completion. Workflow-policy tests also require SHA-pinned actions and separated secret/write authority.
+The unit suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment (no validated-path reread), exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and exact-head review completion. Review-gate cases cover exact/stale reviews, post-head/stale `+1` reactions, wrong actors, malformed dates, unresolved threads, ordinary paths, full-SHA comment binding, and stubbed dry-run/idempotent sole-owner protection configuration. Workflow-policy tests also require SHA-pinned actions and separated secret/write authority.
 
 ## Functional-only Firefox E2E
 
