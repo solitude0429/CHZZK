@@ -1,37 +1,28 @@
-import assert from "node:assert/strict";
+#!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
-const updatesPath = process.env.UPDATE_MANIFEST ?? "dist/update-site/updates.json";
-const signedXpi = process.env.SIGNED_XPI ?? `dist/chzzk-${packageJson.version}-signed.xpi`;
+import { validateUpdateManifestDocument } from "./lib/update-manifest.js";
 
-const addonId = manifest.browser_specific_settings?.gecko?.id;
-const updateUrl = manifest.browser_specific_settings?.gecko?.update_url;
-const updates = JSON.parse(readFileSync(updatesPath, "utf8"));
-const update = updates.addons?.[addonId]?.updates?.[0];
-
-assert.equal(
-  updateUrl,
-  "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
-  "manifest update_url must be the internal HTTPS update manifest",
-);
-assert.ok(update, `updates.json must include ${addonId}`);
-assert.equal(update.version, packageJson.version, "update entry version must match package.json");
-assert.match(
-  update.update_link,
-  /^https:\/\/chzzk-updates\.alpha-apple\.dedyn\.io\/chzzk-[^/]+-signed\.xpi$/,
-  "update_link must point at the internally hosted signed XPI",
-);
-assert.equal(
-  update.update_hash,
-  `sha256:${createHash("sha256").update(readFileSync(signedXpi)).digest("hex")}`,
-);
-assert.equal(
-  update.applications?.gecko?.strict_min_version,
-  manifest.browser_specific_settings?.gecko?.strict_min_version,
-  "update manifest must preserve Firefox strict_min_version",
-);
-
-console.log("Firefox update manifest is valid");
+try {
+  if (
+    !process.env.CHZZK_RELEASE_METADATA ||
+    !process.env.CHZZK_SIGNED_XPI ||
+    !process.env.CHZZK_UPDATE_MANIFEST
+  ) {
+    throw new Error("CHZZK_RELEASE_METADATA, CHZZK_SIGNED_XPI, and CHZZK_UPDATE_MANIFEST are required");
+  }
+  const metadata = JSON.parse(readFileSync(resolve(process.env.CHZZK_RELEASE_METADATA), "utf8"));
+  const signedXpiBytes = readFileSync(resolve(process.env.CHZZK_SIGNED_XPI));
+  const document = JSON.parse(readFileSync(resolve(process.env.CHZZK_UPDATE_MANIFEST), "utf8"));
+  const expectedSignedXpiSha256 = createHash("sha256").update(signedXpiBytes).digest("hex");
+  const result = validateUpdateManifestDocument(document, {
+    expectedMetadata: metadata,
+    expectedSignedXpiSha256,
+  });
+  console.log(JSON.stringify(result));
+} catch (error) {
+  console.error(`Update manifest validation failed: ${error.message}`);
+  process.exitCode = 1;
+}

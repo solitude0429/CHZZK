@@ -7,6 +7,7 @@ import {
   configuredResourceTypes,
   configuredWebRequestUrls,
   isTrustedChzzkContext,
+  isTrustedMasterPlaylistRequest,
   shouldRecordDiagnostics,
   shouldRedirectRequest,
 } from "../../src/shared/request-policy.js";
@@ -117,10 +118,66 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       "HTTP CHZZK contexts must not bootstrap redirects",
     );
     assert.equal(shouldRedirectRequest({ ...eligible, tabId: -1 }, policy).ok, false);
-    assert.equal(shouldRedirectRequest({ ...eligible, tabId: 100_000 }, policy).ok, false);
+    assert.equal(
+      shouldRedirectRequest({ ...eligible, tabId: 100_000 }, policy).ok,
+      true,
+      "Firefox tab IDs must not be rejected by an undocumented local upper bound",
+    );
+    assert.equal(shouldRedirectRequest({ ...eligible, tabId: Number.MAX_SAFE_INTEGER }, policy).ok, true);
     assert.equal(
       shouldRedirectRequest({ ...eligible, url: "https://example.pstatic.net/live/master.m3u8" }, policy).ok,
       false,
+    );
+    assert.deepEqual(
+      shouldRedirectRequest(
+        {
+          ...eligible,
+          url: "https://example.pstatic.net/live/720p/segment.ts?next=chunklist_720p.m3u8",
+        },
+        policy,
+      ),
+      { ok: false, reason: "non-playlist-path", tabId: 7 },
+      "quality markers in non-playlist media paths must never be redirected",
+    );
+  });
+
+  it("recognizes trusted master playlists without treating numeric playlists as masters", () => {
+    const master = {
+      documentUrl: undefined,
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      originUrl: undefined,
+      tabId: 100_001,
+      type: "xmlhttprequest",
+      url: "https://example.pstatic.net/live/master.m3u8?Policy=redacted",
+    };
+
+    assert.equal(isTrustedMasterPlaylistRequest(master, policy), true);
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        { ...master, url: "https://example.pstatic.net/live/chunklist_720p.m3u8?Policy=redacted" },
+        policy,
+      ),
+      false,
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest({ ...master, initiator: "https://example.com" }, policy),
+      false,
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        { ...master, url: "http://example.pstatic.net/live/master.m3u8" },
+        policy,
+      ),
+      false,
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        { ...master, url: "https://example.pstatic.net/api/data?next=master.m3u8" },
+        policy,
+      ),
+      false,
+      "playlist-looking query parameters must not be classified as HLS requests",
     );
   });
 

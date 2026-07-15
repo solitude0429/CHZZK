@@ -1,236 +1,171 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 
-const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-function read(path) {
-  return readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+function read(relativePath) {
+  return readFileSync(join(rootDir, relativePath), "utf8");
 }
 
-function workflowFiles() {
-  return readdirSync(new URL("../../.github/workflows/", import.meta.url))
-    .filter((entry) => entry.endsWith(".yml") || entry.endsWith(".yaml"))
-    .sort();
+function workflow(name) {
+  return parse(read(`.github/workflows/${name}`));
 }
 
-function workflowText(path) {
-  return read(`.github/workflows/${path}`);
-}
+describe("release and repository security guardrails", () => {
+  it("rejects command-line delivery of AMO signing secrets and uses a dependency-free signer", () => {
+    const rejected = spawnSync(
+      process.execPath,
+      ["scripts/sign-unlisted.js", "--api-key=synthetic", "--api-secret=synthetic"],
+      { cwd: rootDir, encoding: "utf8" },
+    );
+    assert.notEqual(rejected.status, 0);
+    assert.match(`${rejected.stdout}${rejected.stderr}`, /environment variables/i);
 
-function runSignScriptWithStubbedWebExt(exitCode) {
-  const tempRoot = mkdtempSync(join(repoRoot, ".tmp-chzzk-sign-test-"));
-  const binDir = join(tempRoot, "bin");
-  const webExtPath = join(binDir, "web-ext");
-  mkdirSync(binDir);
-  writeFileSync(
-    webExtPath,
-    `#!/usr/bin/env node
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-
-const args = process.argv.slice(2);
-const configArg = args.find((arg) => arg.startsWith("--config="));
-const artifactsArg = args.find((arg) => arg.startsWith("--artifacts-dir="));
-assert.ok(configArg, "web-ext config path is required");
-assert.ok(artifactsArg, "web-ext artifacts dir is required");
-assert.equal(args.some((arg) => arg.startsWith("--api-key")), false);
-assert.equal(args.some((arg) => arg.startsWith("--api-secret")), false);
-assert.equal(args.includes("ops"), true);
-assert.equal(Object.hasOwn(process.env, "WEB_EXT_API_KEY"), false);
-assert.equal(Object.hasOwn(process.env, "WEB_EXT_API_SECRET"), false);
-const config = readFileSync(configArg.slice("--config=".length), "utf8");
-assert.match(config, /apiKey/);
-assert.match(config, /apiSecret/);
-process.exit(${exitCode});
-`,
-  );
-  chmodSync(webExtPath, 0o700);
-
-  const result = spawnSync(process.execPath, ["scripts/sign-unlisted.js"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${binDir}:${process.env.PATH}`,
-      TMPDIR: tempRoot,
-      WEB_EXT_API_KEY: "user:123:456",
-      WEB_EXT_API_SECRET: "synthetic-secret-for-cleanup-test",
-      CHZZK_REUSE_EXISTING_AMO_VERSION: "0",
-      CHZZK_SKIP_SIGNED_XPI_VERIFY: "1",
-      CHZZK_WEB_EXT_BIN: webExtPath,
-    },
-  });
-  const leftovers = readdirSync(tempRoot).filter((entry) => entry.startsWith("chzzk-web-ext-sign-"));
-  rmSync(tempRoot, { force: true, recursive: true });
-  return { leftovers, result };
-}
-
-describe("Codex Security remediation guardrails", () => {
-  it("rejects command-line delivery of AMO signing secrets", () => {
-    const script = read("scripts/sign-unlisted.js");
-
-    assert.equal(script.includes("--api-secret=${apiSecret}"), false);
-    assert.equal(script.includes("--api-key=${apiKey}"), false);
-    assert.match(script, /mkdtempSync|writeFileSync/);
-    assert.match(script, /chmodSync\([^,]+,\s*0o600\)/);
-    assert.match(script, /--config=/);
-    assert.match(script, /delete\s+webExtEnv\.WEB_EXT_API_KEY/);
-    assert.match(script, /delete\s+webExtEnv\.WEB_EXT_API_SECRET/);
+    const wrapper = read("scripts/sign-unlisted.js");
+    const client = read("scripts/lib/amo-client.js");
+    assert.doesNotMatch(`${wrapper}\n${client}`, /web-ext|source-dir|node_modules|npm\s+(?:ci|install)/i);
+    assert.match(client, /AMO_API_ROOT/);
+    assert.match(client, /hostname === AMO_DOWNLOAD_DOMAIN/);
+    assert.match(client, /url\.username/);
+    assert.match(client, /url\.password/);
+    assert.match(client, /fetchSignedXpi/);
+    assert.doesNotMatch(client, /authorizedFetch\(downloadUrl/);
   });
 
-  it("removes temporary AMO signing config on web-ext success and failure", () => {
-    for (const exitCode of [0, 7]) {
-      const { leftovers, result } = runSignScriptWithStubbedWebExt(exitCode);
-
-      assert.equal(result.status, exitCode, result.stderr || result.stdout);
-      assert.deepEqual(leftovers, []);
-    }
-  });
-
-  it("requires every size-matched runtime icon in signed XPI verification", () => {
-    const script = read("scripts/sign-unlisted.js");
-
-    for (const icon of ["icon-32.png", "icon-48.png", "icon-96.png", "icon.png"]) {
-      assert.match(script, new RegExp(`"${icon.replace(".", "\\.")}"`));
-    }
-  });
-
-  it("pins every GitHub Action reference to a full-length commit SHA", () => {
-    for (const file of workflowFiles()) {
-      const workflow = workflowText(file);
-      for (const [lineNumber, line] of workflow.split(/\r?\n/).entries()) {
-        const match = line.match(/^\s*-?\s*uses:\s*([^\s#]+)\s*(?:#.*)?$/);
-        if (!match || match[1].startsWith("./")) continue;
-        assert.match(
-          match[1],
-          /^[^@]+@[a-f0-9]{40}$/,
-          `${file}:${lineNumber + 1} must pin ${match[1]} to a full commit SHA`,
-        );
+  it("pins all actions and semantically separates build, secret, attestation, and publish authority", () => {
+    const workflowDir = join(rootDir, ".github/workflows");
+    for (const name of readdirSync(workflowDir).filter((entry) => /\.ya?ml$/.test(entry))) {
+      const text = read(`.github/workflows/${name}`);
+      for (const match of text.matchAll(/uses:\s*([^\s#]+)/g)) {
+        if (match[1].startsWith("./")) continue;
+        assert.match(match[1], /@[a-f0-9]{40}$/i, `${name} contains an unpinned action: ${match[1]}`);
       }
     }
+
+    const release = workflow("sign-unlisted.yml");
+    assert.deepEqual(release.jobs.prepare.permissions, {
+      attestations: "read",
+      contents: "read",
+    });
+    assert.deepEqual(release.jobs.sign.permissions, { actions: "read" });
+    assert.deepEqual(release.jobs.attest.permissions, {
+      actions: "read",
+      attestations: "write",
+      contents: "read",
+      "id-token": "write",
+    });
+    assert.deepEqual(release.jobs.publish.permissions, { actions: "read", contents: "write" });
+
+    const signText = JSON.stringify(release.jobs.sign);
+    const attestText = JSON.stringify(release.jobs.attest);
+    const publishText = JSON.stringify(release.jobs.publish);
+    assert.match(signText, /secrets\.AMO_JWT_ISSUER/);
+    assert.doesNotMatch(signText, /actions\/checkout|npm ci|npm install/);
+    assert.doesNotMatch(attestText, /secrets\.|actions\/checkout|npm ci|npm install|node scripts/);
+    assert.doesNotMatch(publishText, /secrets\.|actions\/checkout|npm ci|npm install|node scripts/);
+
+    const prepareSteps = release.jobs.prepare.steps;
+    const preparationIndex = prepareSteps.findIndex((step) => step.run === "npm run prepare:release");
+    const signerAnchorIndex = prepareSteps.findIndex(
+      (step) => step.name === "Anchor signer code to the protected commit",
+    );
+    assert.notEqual(preparationIndex, -1);
+    assert.equal(signerAnchorIndex > preparationIndex, true);
+    const signerAnchor = prepareSteps[signerAnchorIndex].run;
+    assert.match(signerAnchor, /git show "\$GITHUB_SHA:scripts\/sign-unlisted\.js"/);
+    assert.match(signerAnchor, /git show "\$GITHUB_SHA:scripts\/lib\/amo-client\.js"/);
+    const releasePreparation = prepareSteps.find((step) => step.id === "release").run;
+    assert.match(
+      releasePreparation,
+      /SIGNER_SHA=\$\(git show "\$GITHUB_SHA:scripts\/sign-unlisted\.js" \| sha256sum/,
+    );
+    assert.match(
+      releasePreparation,
+      /CLIENT_SHA=\$\(git show "\$GITHUB_SHA:scripts\/lib\/amo-client\.js" \| sha256sum/,
+    );
   });
 
-  it("keeps generated-file PR checks read-only and auto-commit on trusted events only", () => {
-    const workflow = workflowText("sync-generated-release-files.yml");
+  it("keeps releases immutable and treats an exact rerun as verified reuse", () => {
+    const text = read(".github/workflows/sign-unlisted.yml");
+    assert.match(text, /reuse_existing/);
+    assert.match(text, /gh release view/);
+    assert.match(text, /cmp "\$SOURCE"/);
+    assert.match(text, /--draft/);
+    assert.match(text, /gh release edit "\$TAG" --draft=false/);
+    assert.match(text, /--json isDraft/);
+    assert.match(text, /--json isPrerelease/);
+    assert.match(text, /--source-digest "\$GITHUB_SHA"/);
+    assert.match(text, /--signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/sign-unlisted\.yml"/);
+    assert.match(text, /git diff --cached --exit-code/);
+    assert.doesNotMatch(text, /--clobber|gh release upload|gh release edit "\$TAG" --target/);
+    assert.match(text, /github\.ref_protected == true/);
+    assert.match(text, /environment:\s*firefox-signing/);
 
-    assert.match(workflow, /pull_request:/);
-    assert.match(workflow, /permissions:\s*\n\s+contents: read/);
-    assert.match(workflow, /if:\s*\$\{\{ github\.event_name == 'pull_request' \}\}/);
-    assert.match(workflow, /if:\s*\$\{\{ github\.event_name != 'pull_request' \}\}/);
-    assert.match(workflow, /permissions:\s*\n\s+contents: write/);
+    const prepare = read("scripts/prepare-release.js");
+    assert.match(prepare, /--porcelain=v1/);
+    assert.match(prepare, /does not match checked-out HEAD/);
   });
 
-  it("enables baseline repository security automation", () => {
-    const dependabot = read(".github/dependabot.yml");
-    const codeql = workflowText("codeql.yml");
-    const scorecard = workflowText("scorecard.yml");
-
-    assert.match(dependabot, /package-ecosystem:\s*npm/);
-    assert.match(dependabot, /package-ecosystem:\s*github-actions/);
-    assert.match(codeql, /github\/codeql-action\/init@[a-f0-9]{40}/);
-    assert.match(codeql, /github\/codeql-action\/analyze@[a-f0-9]{40}/);
-    assert.match(scorecard, /ossf\/scorecard-action@[a-f0-9]{40}/);
+  it("removes generated-file auto-commit workflows and retired external collector code", () => {
+    assert.equal(existsSync(join(rootDir, ".github/workflows/generate-package-lock.yml")), false);
+    assert.equal(existsSync(join(rootDir, ".github/workflows/sync-generated-release-files.yml")), false);
+    assert.equal(existsSync(join(rootDir, "ops/chzzk-telemetry-collector.py")), false);
+    assert.equal(existsSync(join(rootDir, "ops/chzzk-telemetry-context.py")), false);
+    assert.equal(existsSync(join(rootDir, "ops/chzzk-telemetry-summary.py")), false);
+    assert.equal(existsSync(join(rootDir, "docs/AUTO_UPDATE_LOOP.md")), false);
   });
 
-  it("redacts URL userinfo before collector storage", () => {
-    const code = String.raw`
-import importlib.util
-from pathlib import Path
-
-module_path = Path("ops/chzzk-telemetry-collector.py")
-spec = importlib.util.spec_from_file_location("collector", module_path)
-collector = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(collector)
-sanitized = collector.sanitize_url("https://user:pass@media.example:8443/private/live/1080p/seg.m3u8?Policy=secret")
-assert "user" not in sanitized, sanitized
-assert "pass" not in sanitized, sanitized
-assert "@" not in sanitized, sanitized
-assert sanitized == "https://media.example:8443/[redacted-path]/1080p.m3u8", sanitized
-`;
-    const result = spawnSync("python3", ["-c", code], { cwd: repoRoot, encoding: "utf8" });
-
-    assert.equal(result.status, 0, result.stderr || result.stdout);
+  it("removes unnecessary Scorecard OIDC and analyzes only shipped JavaScript", () => {
+    const scorecard = read(".github/workflows/scorecard.yml");
+    const codeql = read(".github/workflows/codeql.yml");
+    assert.doesNotMatch(scorecard, /id-token/);
+    assert.match(scorecard, /publish_results:\s*false/);
+    assert.match(codeql, /languages:\s*javascript-typescript/);
+    assert.doesNotMatch(codeql, /python/i);
   });
 
-  it("requires protected signing gates, fresh AMO signing, and provenance attestation in the workflow", () => {
-    const workflow = read(".github/workflows/sign-unlisted.yml");
-
-    assert.match(workflow, /environment:\s*firefox-signing/);
-    assert.match(workflow, /attestations:\s*write/);
-    assert.match(workflow, /id-token:\s*write/);
-    assert.match(workflow, /Enforce protected signing ref/);
-    assert.match(workflow, /attest-build-provenance@[a-f0-9]{40}/);
-    assert.match(workflow, /CHZZK_REUSE_EXISTING_AMO_VERSION:\s*["']0["']/);
-    assert.equal(workflow.includes("Reuse existing release XPI"), false);
-  });
-
-  it("strictly validates AMO download hosts before reusing signed XPIs", () => {
-    const script = read("scripts/sign-unlisted.js");
-
-    assert.match(script, /hostname === "addons\.mozilla\.org"/);
-    assert.match(script, /hostname\.endsWith\("\.addons\.mozilla\.org"\)/);
-    assert.doesNotMatch(script, /hostname\.endsWith\("addons\.mozilla\.org"\)/);
-  });
-
-  it("requires update deployment provenance, explicit repo selection, and a clean worktree", () => {
-    const deploy = read("scripts/deploy-internal-updates.js");
-
-    assert.match(deploy, /run\("gh",\s*\[\s*"attestation",\s*"verify"/);
-    assert.match(deploy, /"release",\s*"view",\s*releaseTag/);
-    assert.match(deploy, /targetCommitish/);
-    assert.match(deploy, /CHZZK_SOURCE_COMMIT/);
-    assert.match(deploy, /sourceDigest|sourceRepository|workflowRef/);
-    assert.match(deploy, /const signerWorkflow = `\$\{sourceRepository\}\/\$\{workflowRef\}`/);
-    assert.match(deploy, /"release",\s*"download",\s*tag,\s*"--repo",\s*sourceRepository/);
-    assert.match(deploy, /git",\s*\["status",\s*"--porcelain"\]/);
-    assert.match(deploy, /releasesDir|releaseDir/);
-    assert.match(deploy, /chmodSync\(releasesDir,\s*0o755\)/);
-    assert.match(deploy, /chmodSync\(stagingDir,\s*0o755\)/);
-  });
-
-  it("ignores local secrets and release artifacts outside dist", () => {
-    const gitignore = read(".gitignore");
-
-    for (const pattern of [
-      ".env",
-      ".env.*",
-      "*.key",
-      "*.pem",
-      "*.p12",
-      "*.xpi",
-      "updates.json",
-      "provenance.json",
-    ]) {
-      assert.match(gitignore, new RegExp(`(^|\\n)${pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|\\n)`));
+  it("pins direct dependencies and ignores local secrets and generated release artifacts", () => {
+    const packageJson = JSON.parse(read("package.json"));
+    for (const [name, version] of Object.entries(packageJson.devDependencies)) {
+      assert.doesNotMatch(version, /^[~^]/, `${name} must be exactly pinned`);
     }
+    const ignore = read(".gitignore");
+    assert.match(ignore, /^\.env$/m);
+    assert.match(ignore, /^\.env\.\*$/m);
+    assert.match(ignore, /^web-ext-artifacts\/$/m);
+    assert.match(ignore, /^dist\/$/m);
   });
 
-  it("keeps the hardening checklist aligned with local-only diagnostics", () => {
-    const template = read(".github/PULL_REQUEST_TEMPLATE/hardening.md");
-
-    assert.match(template, /No external telemetry endpoint is added to packaged runtime/);
-    assert.match(template, /No new host permission is added without explicit review/);
-    assert.doesNotMatch(template, /Collector telemetry is opt-in/);
+  it("deploys only an attested exact release set through the transactional deployment library", () => {
+    const cli = read("scripts/deploy-internal-updates.js");
+    const transaction = read("scripts/lib/update-deployment.js");
+    assert.match(cli, /CHZZK_GITHUB_REPOSITORY/);
+    assert.match(cli, /git", \["status", "--porcelain"\]/);
+    assert.match(cli, /"attestation",\s*"verify"/);
+    assert.match(cli, /--source-digest/);
+    assert.match(cli, /release\.assets\.map/);
+    assert.match(cli, /release\.isPrerelease/);
+    assert.match(cli, /deployment client checkout must match/);
+    assert.match(transaction, /snapshotLink/);
+    assert.match(transaction, /restoreLink/);
+    assert.match(transaction, /fsyncDirectory/);
+    assert.doesNotMatch(transaction, /chmodSync\(targetDir|chmodSync\(releasesDir/);
   });
 
-  it("requires collector authentication, quotas, and operator-context sanitization", () => {
-    const collector = read("ops/chzzk-telemetry-collector.py");
-    const summary = read("ops/chzzk-telemetry-summary.py");
-    const context = read("ops/chzzk-telemetry-context.py");
-
-    assert.match(collector, /CHZZK_TELEMETRY_HMAC_SECRET/);
-    assert.match(collector, /verify_request_auth/);
-    assert.match(collector, /MAX_REPORTS_PER_MINUTE/);
-    assert.match(collector, /MAX_REPORT_FILE_BYTES/);
-    assert.match(collector, /trust_proxy/);
-    assert.match(summary, /errorCategories/);
-    assert.equal(summary.includes('"lastErrors": last_errors'), false);
-    assert.match(context, /untrusted_values_are_data_only/);
-    assert.doesNotMatch(context, /"collectorHealth"\s*:/);
+  it("keeps extension diagnostics local-only and documented as such", () => {
+    const manifest = JSON.parse(read("manifest.json"));
+    const docs = `${read("docs/HARDENING.md")}\n${read("docs/SECURITY.md")}`;
+    assert.deepEqual(manifest.browser_specific_settings.gecko.data_collection_permissions.required, ["none"]);
+    assert.equal(
+      manifest.permissions.some((permission) => permission.includes("chzzk-report")),
+      false,
+    );
+    assert.match(docs, /No external telemetry\/data collector/i);
+    assert.match(docs, /local/i);
   });
 });

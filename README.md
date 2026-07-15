@@ -6,8 +6,9 @@ Personal Firefox WebExtension for CHZZK live HLS quality redirects.
 
 - Watches trusted CHZZK live HLS playlist requests only.
 - Parses trusted HLS master playlists when available and scores variants by resolution, then frame rate, then bitrate.
-- Falls back to probing configured quality candidates from highest to lowest when only a numeric variant playlist URL is available.
-- Prewarms CHZZK live tabs at `document_start` without choosing a quality, then resolves and caches the best supported quality label per tab while the tab is open.
+- Falls back to one shared, bounded background probe set per tab/context when only a numeric variant playlist URL is available. The blocking listener waits at most the configured latency budget and fails open while resolution continues.
+- Prewarms CHZZK live tabs at `document_start` without choosing a quality, then resolves and caches the best supported quality label per tab while the tab is open. Navigation and tab-close cancellation tokens prevent stale probes from restoring old state.
+- Rewrites quality markers in the URL pathname only; signed query strings and fragments remain byte-for-byte unchanged.
 - Does not relabel the player menu, inject page scripts, or depend on CHZZK DOM selectors.
 - Keeps signed CDN query strings out of local diagnostics.
 
@@ -32,7 +33,7 @@ Current candidate order:
 2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p
 ```
 
-Runtime redirects are constrained by tab, CHZZK live context or prewarmed live-tab state, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset and no fixed startup target quality; a minimal MV2 content script only sends a live-page-ready prewarm message, and the persistent MV2 background resolves and redirects eligible playlist requests through `webRequestBlocking`.
+Runtime redirects are constrained by tab, CHZZK live context or current-URL-validated prewarmed live-tab state, trusted CDN domains, GET requests, and media/XHR/other resource types. There is no static or session DNR ruleset and no fixed startup target quality; a minimal MV2 content script only sends a live-page-ready prewarm message, the background rechecks the current tab URL, and the persistent MV2 background resolves and redirects eligible playlist requests through `webRequestBlocking`.
 
 ## Build and verify
 
@@ -50,6 +51,10 @@ npm run lint
 npm run lint:webext
 npm test
 npm run build
+npm run setup:firefox-e2e
+FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
+GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
+npm run test:firefox-e2e
 ```
 
 Generated runtime files are `background.js`, `diagnostics.js`, and `site-observer.js`. Edit `src/`, `policy/`, or tests, then run `npm run build:runtime`.
@@ -62,7 +67,7 @@ Use the signed XPI from the latest GitHub Release. Firefox automatic updates use
 https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 ```
 
-Mozilla unlisted signing is documented in `docs/SIGNING.md`. It only means the XPI is installable in Firefox; it is not NAVER approval.
+Mozilla unlisted signing and the immutable release pipeline are documented in `docs/SIGNING.md` and `docs/UPDATES.md`. The signing job receives only a checksum-verified prepared artifact and AMO environment secrets; verification, attestation, and `contents: write` publication run in separate jobs. Published assets are never overwritten. Mozilla signing only means the XPI is installable in Firefox; it is not NAVER approval.
 
 ## Diagnostics
 

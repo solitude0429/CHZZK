@@ -12,18 +12,23 @@ This extension observes CHZZK live-page HLS playlist requests only to redirect e
 ## Controls
 
 - No `scripting` permission and no page-DOM mutation.
-- `site-observer.js` is the only content script; it is scoped to CHZZK live pages (`https://*.chzzk.naver.com/live/*`), sends only a live-page-ready prewarm message, and does not mutate or query the page DOM. The background accepts that message by tab ID without requiring sender URL fields, which Firefox may omit.
+- `site-observer.js` is the only content script; it is scoped to CHZZK live pages (`https://*.chzzk.naver.com/live/*`), sends only a live-page-ready prewarm message, and does not mutate or query the page DOM. Because Firefox may omit or stale message sender URL fields, the background queries the current tab and accepts prewarm only while its current URL is still a CHZZK live page.
 - No external telemetry/data collector is used by the extension runtime.
 - The Firefox manifest declares no data collection/transmission with `data_collection_permissions.required: ["none"]`.
 - Firefox MV2 required permissions include CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and trusted HLS CDN origins needed by `webRequest`, HLS availability probes, and redirects.
 - No `host_permissions` or optional host permission surface is used for core functionality; the MV2 content script match is required install-time CHZZK live access.
 - Local diagnostics storage mutations are serialized to avoid local read-modify-write races during HLS bursts.
 - No global static or session DNR ruleset.
-- Redirect handling is constrained by tab, CHZZK live context, trusted request domains, request methods, and resource types.
-- Per-tab cached redirect targets are removed on tab close.
-- HLS diagnostics strip query strings, fragments, signed path segments, and high-entropy CDN path tokens before local storage/export.
-- The signing workflow uses a protected `firefox-signing` environment, protected ref checks, temporary non-argv AMO credential delivery, and GitHub artifact attestations for release provenance.
-- `npm run verify` includes formatting, generated-runtime refresh, manifest validation, project cleanliness validation, lint, web-ext lint, unit tests, Python ops tests, dependency audit, build, and package-content audit.
+- Redirect handling is constrained by tab, CHZZK live context, trusted request domains, request methods, resource types, and an actual `.m3u8` pathname; media segments and query-only playlist strings are ineligible.
+- The first request records its live context. Adopting a concrete live context invalidates older contextless work; navigation, tab close, or request-proven context mismatch invalidates pending work, cached targets, and tab trust. New master evidence supersedes an older numeric probe in the same context.
+- Diagnostics persistence is fire-and-forget relative to blocking requests and startup prewarming, so storage or error-reporting failures cannot extend the request deadline or prevent already-open live tabs from being prewarmed.
+- Numeric URL rewriting changes only the pathname. Signed query strings and fragments are preserved byte-for-byte, and master evidence is rejected when meaningful pathname quality markers conflict.
+- HLS diagnostics use an allowlist model: scheme/host, normalized quality, and structured media shape only. Userinfo, complete paths, query strings, fragments, signed path values, and high-entropy tokens are not persisted.
+- The release workflow separates read-only build, AMO-secret signing, signed-artifact verification, OIDC attestation, and `contents: write` publication into different jobs. The `firefox-signing` environment is reachable only from protected `main`.
+- Signing uses a dependency-free Node AMO client and an exact deterministic prepared ZIP. Secret-bearing jobs do not checkout, install packages, or hold repository/OIDC write authority; derived AMO JWTs are scoped to API-root requests, authorized requests reject redirects, and signed-XPI download hops never carry authorization.
+- Published Release assets are immutable; exact reruns are verified no-ops and mismatches fail closed.
+- Internal update deployment rejects symlink ancestors, foreign ownership, and group/world-writable managed directories. A process-bound advisory lock serializes mutation, while a private fsynced snapshot journal makes SIGKILL/reboot recovery restartable before post-activation content/link verification can commit.
+- `npm run verify` includes formatting, generated-runtime drift checks, manifest/project/semantic-workflow validation, lint, web-ext lint, unit/security behavior tests, dependency audit, deterministic build, and package-content audit. CI separately runs the real Firefox playback/update E2E.
 
 ## Sensitive data rules
 

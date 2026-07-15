@@ -1,11 +1,9 @@
 export const QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
 export const DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
 
-const PATH_QUALITY_RE = /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i;
+const QUALITY_PATH_MARKER_SOURCE = String.raw`(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)`;
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
 const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
-const SENSITIVE_PATH_SEGMENT_RE = /(?:hdntl|hmac|policy|signature|token|key|acl|exp|st)(?:=|%3d)/i;
-const HIGH_ENTROPY_PATH_SEGMENT_RE = /(?:[a-z0-9_-]{24,}|[a-f0-9]{16,})/i;
 
 export function normalizeQualityLabel(value) {
   if (typeof value !== "string") return null;
@@ -26,8 +24,8 @@ export function qualityNumber(label) {
   return match ? Number(match[1]) : null;
 }
 
-export function parseQualityFromUrl(url) {
-  if (typeof url !== "string") return null;
+export function parseQualitiesFromUrl(url) {
+  if (typeof url !== "string") return [];
   let pathname = url;
 
   try {
@@ -36,8 +34,13 @@ export function parseQualityFromUrl(url) {
     pathname = url.split("?")[0].split("#")[0];
   }
 
-  const pathQuality = pathname.match(PATH_QUALITY_RE);
-  return pathQuality ? normalizeQualityLabel(pathQuality[1]) : null;
+  return [...pathname.matchAll(new RegExp(QUALITY_PATH_MARKER_SOURCE, "gi"))]
+    .map((match) => normalizeQualityLabel(match[1]))
+    .filter(Boolean);
+}
+
+export function parseQualityFromUrl(url) {
+  return parseQualitiesFromUrl(url)[0] ?? null;
 }
 
 export function redactMediaUrl(url) {
@@ -45,24 +48,14 @@ export function redactMediaUrl(url) {
 
   try {
     const parsed = new URL(url);
-    const hadSensitiveTail = parsed.search || parsed.hash;
-    parsed.pathname = parsed.pathname
-      .split("/")
-      .map((segment) => {
-        if (!segment) return segment;
-        if (/^\d{3,4}p$/i.test(segment)) return segment;
-        if (/\.m3u8$/i.test(segment) && !HIGH_ENTROPY_PATH_SEGMENT_RE.test(segment)) return segment;
-        if (SENSITIVE_PATH_SEGMENT_RE.test(segment) || HIGH_ENTROPY_PATH_SEGMENT_RE.test(segment)) {
-          return "[redacted-path]";
-        }
-        return segment;
-      })
-      .join("/");
-    parsed.search = "";
-    parsed.hash = "";
-    return `${parsed.toString()}${hadSensitiveTail ? "?[redacted]" : ""}`;
+    if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) return "[redacted-url]";
+    const quality = parseQualityFromUrl(url);
+    const isPlaylist = /\.m3u8$/i.test(parsed.pathname);
+    const mediaShape = isPlaylist ? `/${quality ?? "playlist"}.m3u8` : quality ? `/${quality}` : "";
+    const hadSensitiveTail = Boolean(parsed.search || parsed.hash);
+    return `${parsed.protocol}//${parsed.host}/[redacted-path]${mediaShape}${hadSensitiveTail ? "?[redacted]" : ""}`;
   } catch {
-    return url.replace(/[?#].*$/, "?[redacted]");
+    return "[redacted-url]";
   }
 }
 
@@ -161,18 +154,23 @@ export function replaceQualityInUrl(url, targetQuality) {
   const currentQuality = parseQualityFromUrl(url);
   if (typeof url !== "string" || !normalizedTarget || !target || !currentQuality) return null;
 
-  let replacedAny = false;
-  const replaced = url.replace(
-    /(chunklist_|\/)(\d{3,4}p)(?=\.m3u8(?:[?#]|$)|\/)/gi,
-    (match, prefix, quality) => {
-      const current = qualityNumber(quality);
-      if (!current || current >= target) return match;
-      replacedAny = true;
-      return `${prefix}${normalizedTarget}`;
-    },
-  );
+  const urlParts = url.match(/^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)([^?#]*)([?#][\s\S]*)?$/i);
+  if (!urlParts) return null;
+  try {
+    new URL(url);
+  } catch {
+    return null;
+  }
 
-  return replacedAny ? replaced : null;
+  let replacedAny = false;
+  const replacedPath = urlParts[2].replace(new RegExp(QUALITY_PATH_MARKER_SOURCE, "gi"), (match, quality) => {
+    const current = qualityNumber(quality);
+    if (!current || current >= target) return match;
+    replacedAny = true;
+    return match.replace(quality, normalizedTarget);
+  });
+
+  return replacedAny ? `${urlParts[1]}${replacedPath}${urlParts[3] ?? ""}` : null;
 }
 
 function splitHlsAttributeList(value) {

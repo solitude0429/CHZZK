@@ -1,174 +1,133 @@
+#!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  renameSync,
-  rmSync,
-  statSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { join } from "node:path";
 
-const packageJson = JSON.parse(
-  await import("node:fs").then(({ readFileSync }) =>
-    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-  ),
-);
-const version = process.env.CHZZK_VERSION ?? packageJson.version;
-const tag = `v${version}`;
-const targetDir = process.env.CHZZK_UPDATE_DIR ?? "/var/www/chzzk-updates";
-const workDir = mkdtempSync(join(tmpdir(), "chzzk-update-deploy-"));
-const releaseXpi = `chzzk-${version}-signed.xpi`;
-const releaseZip = `chzzk-${version}.zip`;
-
-function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { stdio: "inherit", ...options });
-  if (result.status !== 0) process.exit(result.status ?? 1);
-}
+import { deployUpdateRelease } from "./lib/update-deployment.js";
 
 function capture(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
   if (result.status !== 0) {
-    process.stderr.write(result.stderr || result.stdout);
-    process.exit(result.status ?? 1);
+    throw new Error(`${command} failed: ${(result.stderr || result.stdout || "").trim()}`);
   }
   return result.stdout.trim();
 }
 
-function assertCleanWorktree() {
-  const status = capture("git", ["status", "--porcelain"]);
-  assert.equal(status, "", "deploy requires a clean working tree; commit or stash local changes first");
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, { stdio: "inherit", ...options });
+  if (result.status !== 0) throw new Error(`${command} exited with status ${result.status ?? "unknown"}`);
 }
 
-function currentGitHubRepository() {
-  return capture("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+function resolveTagCommit(repository, tag) {
+  let type = capture("gh", ["api", `repos/${repository}/git/ref/tags/${tag}`, "--jq", ".object.type"]);
+  let digest = capture("gh", ["api", `repos/${repository}/git/ref/tags/${tag}`, "--jq", ".object.sha"]);
+  if (type === "tag") {
+    type = capture("gh", ["api", `repos/${repository}/git/tags/${digest}`, "--jq", ".object.type"]);
+    digest = capture("gh", ["api", `repos/${repository}/git/tags/${digest}`, "--jq", ".object.sha"]);
+  }
+  assert.equal(type, "commit", "release tag must resolve directly to a commit");
+  assert.match(digest, /^[a-f0-9]{40}$/i, "release tag commit must be a full SHA");
+  return digest.toLowerCase();
 }
 
-function releaseTargetCommit(repository, releaseTag) {
-  return capture("gh", [
-    "release",
-    "view",
-    releaseTag,
-    "--repo",
-    repository,
-    "--json",
-    "targetCommitish",
-    "--jq",
-    ".targetCommitish",
-  ]);
-}
-
-function publishAtomicSymlink(sourcePath, targetPath) {
-  const temporaryLink = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
-  rmSync(temporaryLink, { force: true });
-  symlinkSync(relative(dirname(targetPath), sourcePath), temporaryLink);
-  renameSync(temporaryLink, targetPath);
-}
-
-assertCleanWorktree();
-
-const sourceRepository = process.env.CHZZK_SOURCE_REPOSITORY ?? currentGitHubRepository();
-const sourceDigest = process.env.CHZZK_SOURCE_COMMIT ?? releaseTargetCommit(sourceRepository, tag);
-const workflowRef = process.env.CHZZK_SIGNING_WORKFLOW_REF ?? ".github/workflows/sign-unlisted.yml";
-const signerWorkflow = `${sourceRepository}/${workflowRef}`;
-
-assert.match(sourceDigest, /^[a-f0-9]{40}$/i, "CHZZK_SOURCE_COMMIT/sourceDigest must be a full commit SHA");
-assert.match(sourceRepository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "sourceRepository must be owner/repo");
-assert.equal(
-  workflowRef,
-  ".github/workflows/sign-unlisted.yml",
-  "workflowRef must be the signing workflow path",
-);
-
-run("gh", [
-  "release",
-  "download",
-  tag,
-  "--repo",
-  sourceRepository,
-  "-p",
-  releaseXpi,
-  "-p",
-  releaseZip,
-  "-D",
-  workDir,
-]);
-
-const signedXpiPath = join(workDir, releaseXpi);
-const releaseZipPath = join(workDir, releaseZip);
-assert.equal(statSync(signedXpiPath).isFile(), true, `${releaseXpi} must exist`);
-assert.equal(statSync(releaseZipPath).isFile(), true, `${releaseZip} must exist`);
-
-for (const assetPath of [signedXpiPath, releaseZipPath]) {
-  run("gh", [
-    "attestation",
-    "verify",
-    assetPath,
-    "--repo",
-    sourceRepository,
-    "--source-digest",
-    sourceDigest,
-    "--signer-workflow",
-    signerWorkflow,
-  ]);
-}
-
-const provenance = {
-  releaseTag: tag,
-  sourceDigest,
-  sourceRepository,
-  verifiedAt: new Date().toISOString(),
-  workflowRef,
-};
-writeFileSync(join(workDir, "provenance.json"), `${JSON.stringify(provenance, null, 2)}\n`);
-
-run("node", ["scripts/build-update-manifest.js"], {
-  env: {
-    ...process.env,
-    RELEASE_BASE_URL: "https://chzzk-updates.alpha-apple.dedyn.io",
-    SIGNED_XPI: signedXpiPath,
-    UPDATE_SITE_DIR: workDir,
-  },
-});
-run("node", ["scripts/validate-update-manifest.js"], {
-  env: {
-    ...process.env,
-    SIGNED_XPI: signedXpiPath,
-    UPDATE_MANIFEST: join(workDir, "updates.json"),
-  },
-});
-
-mkdirSync(targetDir, { recursive: true });
-chmodSync(targetDir, 0o755);
-const releasesDir = join(targetDir, "releases");
-mkdirSync(releasesDir, { recursive: true });
-chmodSync(releasesDir, 0o755);
-const releaseDir = join(releasesDir, version);
-assert.equal(existsSync(releaseDir), false, `release directory already exists: ${releaseDir}`);
-const stagingDir = mkdtempSync(join(releasesDir, `${version}.tmp-`));
-chmodSync(stagingDir, 0o755);
+const version = process.env.CHZZK_VERSION;
+const sourceRepository = process.env.CHZZK_GITHUB_REPOSITORY;
+const targetDir = process.env.CHZZK_UPDATE_DIR ?? "/var/www/chzzk-updates";
+const workflowRef = ".github/workflows/sign-unlisted.yml";
+const workDir = mkdtempSync(join(tmpdir(), "chzzk-update-deploy-"));
+chmodSync(workDir, 0o700);
 
 try {
-  for (const file of ["index.html", "provenance.json", releaseXpi, releaseZip, "updates.json"]) {
-    cpSync(join(workDir, file), join(stagingDir, file));
-    chmodSync(join(stagingDir, file), 0o644);
-  }
-  renameSync(stagingDir, releaseDir);
+  assert.match(version ?? "", /^\d+\.\d+\.\d+$/, "CHZZK_VERSION is required and must be SemVer");
+  assert.match(
+    sourceRepository ?? "",
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
+    "CHZZK_GITHUB_REPOSITORY is required in owner/repository form",
+  );
+  assert.equal(
+    capture("git", ["status", "--porcelain"]),
+    "",
+    "deploy requires a clean worktree so the verified deployment client is reviewable",
+  );
 
-  for (const file of ["index.html", "provenance.json", releaseXpi, releaseZip]) {
-    publishAtomicSymlink(join(releaseDir, file), join(targetDir, file));
+  const tag = `v${version}`;
+  const release = JSON.parse(
+    capture("gh", [
+      "release",
+      "view",
+      tag,
+      "--repo",
+      sourceRepository,
+      "--json",
+      "assets,isDraft,isPrerelease,tagName",
+    ]),
+  );
+  assert.equal(release.isDraft, false, "release must be published before deployment");
+  assert.equal(release.isPrerelease, false, "prereleases cannot be deployed to the stable update channel");
+  assert.equal(release.tagName, tag, "release tag mismatch");
+  const expectedAssetNames = [
+    `chzzk-${version}-release-metadata.json`,
+    `chzzk-${version}-signed.xpi`,
+    `chzzk-${version}.zip`,
+  ].sort();
+  assert.deepEqual(
+    release.assets.map((asset) => asset.name).sort(),
+    expectedAssetNames,
+    "release must contain exactly the immutable deployment asset set",
+  );
+
+  const sourceDigest = resolveTagCommit(sourceRepository, tag);
+  assert.equal(
+    capture("git", ["rev-parse", "HEAD"]).toLowerCase(),
+    sourceDigest,
+    "deployment client checkout must match the attested release source commit",
+  );
+  run("gh", [
+    "release",
+    "download",
+    tag,
+    "--repo",
+    sourceRepository,
+    "--dir",
+    workDir,
+    "--pattern",
+    `chzzk-${version}.zip`,
+    "--pattern",
+    `chzzk-${version}-release-metadata.json`,
+    "--pattern",
+    `chzzk-${version}-signed.xpi`,
+  ]);
+
+  const metadataPath = join(workDir, `chzzk-${version}-release-metadata.json`);
+  const signedXpiPath = join(workDir, `chzzk-${version}-signed.xpi`);
+  const sourceArchivePath = join(workDir, `chzzk-${version}.zip`);
+  const signerWorkflow = `${sourceRepository}/${workflowRef}`;
+  for (const assetPath of [metadataPath, signedXpiPath, sourceArchivePath]) {
+    run("gh", [
+      "attestation",
+      "verify",
+      assetPath,
+      "--repo",
+      sourceRepository,
+      "--source-digest",
+      sourceDigest,
+      "--signer-workflow",
+      signerWorkflow,
+    ]);
   }
-  publishAtomicSymlink(join(releaseDir, "updates.json"), join(targetDir, "updates.json"));
+
+  const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+  assert.equal(metadata.sourceDigest, sourceDigest, "release metadata source digest mismatch");
+  assert.equal(metadata.sourceRepository, sourceRepository, "release metadata repository mismatch");
+  assert.equal(metadata.version, version, "release metadata version mismatch");
+
+  const result = await deployUpdateRelease({ metadataPath, signedXpiPath, sourceArchivePath, targetDir });
+  console.log(JSON.stringify(result));
 } catch (error) {
-  rmSync(stagingDir, { force: true, recursive: true });
-  throw error;
+  console.error(`Internal update deployment failed: ${error.message}`);
+  process.exitCode = 1;
+} finally {
+  rmSync(workDir, { force: true, recursive: true });
 }
-
-console.log(`deployed CHZZK ${version} update files to ${targetDir}`);
-console.log("update manifest: https://chzzk-updates.alpha-apple.dedyn.io/updates.json");

@@ -1,72 +1,45 @@
-import assert from "node:assert/strict";
+#!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+import { buildUpdateManifestDocument, validateUpdateManifestDocument } from "./lib/update-manifest.js";
 
-const version = packageJson.version;
-const addonId = manifest.browser_specific_settings?.gecko?.id;
-const strictMinVersion = manifest.browser_specific_settings?.gecko?.strict_min_version;
-const defaultReleaseBaseUrl = `https://chzzk-updates.alpha-apple.dedyn.io`;
-
-assert.ok(addonId, "manifest must define browser_specific_settings.gecko.id");
-assert.ok(strictMinVersion, "manifest must define browser_specific_settings.gecko.strict_min_version");
-
-function findSignedXpi() {
-  if (process.env.SIGNED_XPI) return process.env.SIGNED_XPI;
-
-  const preferred = `dist/chzzk-${version}-signed.xpi`;
-  try {
-    readFileSync(preferred);
-    return preferred;
-  } catch {
-    // Fall through.
-  }
-
-  const signedDir = "dist/signed";
-  const candidates = readdirSync(signedDir)
-    .filter((name) => name.endsWith(".xpi"))
-    .map((name) => join(signedDir, name));
-  assert.equal(candidates.length, 1, "expected exactly one signed XPI in dist/signed or SIGNED_XPI");
-  return candidates[0];
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-const signedXpi = findSignedXpi();
-const signedXpiBytes = readFileSync(signedXpi);
-const signedXpiName = basename(signedXpi);
-const releaseBaseUrl = process.env.RELEASE_BASE_URL ?? defaultReleaseBaseUrl;
-const updateLink = process.env.UPDATE_LINK ?? `${releaseBaseUrl}/${signedXpiName}`;
+function atomicWrite(path, content) {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new Error(`Refusing to replace non-regular output: ${path}`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(temporaryPath, content, { flag: "wx", mode: 0o600 });
+  renameSync(temporaryPath, path);
+  chmodSync(path, 0o600);
+}
 
-assert.match(updateLink, /^https:\/\//, "update_link must use HTTPS");
-assert.equal(signedXpiName, `chzzk-${version}-signed.xpi`, "signed XPI must use the release asset name");
-
-const updateManifest = {
-  addons: {
-    [addonId]: {
-      updates: [
-        {
-          version,
-          update_link: updateLink,
-          update_hash: `sha256:${createHash("sha256").update(signedXpiBytes).digest("hex")}`,
-          applications: {
-            gecko: {
-              strict_min_version: strictMinVersion,
-            },
-          },
-        },
-      ],
-    },
-  },
-};
-
-const outputDir = process.env.UPDATE_SITE_DIR ?? "dist/update-site";
-mkdirSync(outputDir, { recursive: true });
-writeFileSync(join(outputDir, "updates.json"), `${JSON.stringify(updateManifest, null, 2)}\n`);
-writeFileSync(
-  join(outputDir, "index.html"),
-  `<!doctype html>\n<meta charset="utf-8">\n<title>CHZZK extension updates</title>\n<p>Firefox update manifest: <a href="updates.json">updates.json</a></p>\n`,
-);
-console.log(`wrote ${join(outputDir, "updates.json")}`);
-console.log(`update_link=${updateLink}`);
+try {
+  if (!process.env.CHZZK_RELEASE_METADATA || !process.env.CHZZK_SIGNED_XPI) {
+    throw new Error("CHZZK_RELEASE_METADATA and CHZZK_SIGNED_XPI are required");
+  }
+  const metadataPath = resolve(process.env.CHZZK_RELEASE_METADATA);
+  const signedXpiPath = resolve(process.env.CHZZK_SIGNED_XPI);
+  const outputPath = resolve(process.env.CHZZK_UPDATE_MANIFEST_OUTPUT ?? "dist/updates.json");
+  const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+  const signedXpiSha256 = sha256(signedXpiPath);
+  const document = buildUpdateManifestDocument({ metadata, signedXpiPath });
+  validateUpdateManifestDocument(document, {
+    expectedMetadata: metadata,
+    expectedSignedXpiSha256: signedXpiSha256,
+  });
+  atomicWrite(outputPath, `${JSON.stringify(document, null, 2)}\n`);
+  console.log(JSON.stringify({ outputPath, signedXpiSha256, version: metadata.version }));
+} catch (error) {
+  console.error(`Update manifest build failed: ${error.message}`);
+  process.exitCode = 1;
+}

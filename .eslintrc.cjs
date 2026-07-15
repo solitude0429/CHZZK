@@ -1,7 +1,7 @@
 module.exports = {
   root: true,
   extends: ["eslint:recommended"],
-  ignorePatterns: ["dist/", "node_modules/", "web-ext-artifacts/"],
+  ignorePatterns: ["codex-security-scans/", "dist/", "node_modules/", "web-ext-artifacts/"],
   parserOptions: {
     ecmaVersion: "latest",
     sourceType: "module",

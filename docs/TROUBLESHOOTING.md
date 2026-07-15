@@ -16,7 +16,7 @@ The core behavior is network/webRequest level, so it does not depend on CHZZK pl
 
 ## Popup shows no active redirect target
 
-The extension does not ship a global static ruleset. CHZZK live tab identity may be prewarmed as soon as a live page starts, but the first redirect must still work from the numeric HLS playlist request itself when Firefox omits page metadata. Prewarm sender URL fields are not required because Firefox can omit them; the MV2 content-script match constrains the sender origin.
+The extension does not ship a global static ruleset. CHZZK live tab identity may be prewarmed as soon as a live page starts, but the first redirect must still work from the numeric HLS playlist request itself when Firefox omits page metadata. Firefox may omit message sender URL fields, so the background queries the current tab and prewarms only if its current URL is still a CHZZK live page.
 
 Check:
 
@@ -31,7 +31,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime treats prewarm as a supporting signal only. When a trusted HLS master playlist is observed, it parses `#EXT-X-STREAM-INF` variants and scores them by resolution, frame rate, then bitrate. The runtime caches the best target quality but redirects lower numeric playlist requests by preserving the current live playlist URL shape and signed tail. This avoids pinning playback refreshes to a stale exact master-playlist URL. If no master playlist has been scored yet, the runtime probes `policy/quality-policy.json` quality candidates from highest to lowest for the current HLS URL shape, redirects current lower numeric playlist requests, and caches the per-tab target for later lower numeric playlists in that tab.
+The runtime treats prewarm as a supporting signal only. A trusted master playlist starts non-blocking variant scoring by resolution, frame rate, and bitrate and supersedes an older pending numeric probe in the same tab/context. Without a master, the first numeric request starts one shared candidate resolution per tab/context. The blocking listener waits only the configured latency budget; if resolution is not ready it fails open while background probing continues, and subsequent lower requests use the resolved target. Each probe and the whole resolution have time/size limits. Candidate redirects fail closed because Firefox hides manual redirect hops, and returned playlist evidence must match the requested candidate. Navigation or tab close aborts and invalidates pending work.
 
 Check:
 
