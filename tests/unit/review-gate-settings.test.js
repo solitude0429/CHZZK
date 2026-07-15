@@ -24,6 +24,7 @@ state.log.push({ body, endpoint, method });
 function save() { fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(state)); }
 function output(value) { save(); process.stdout.write(JSON.stringify(value)); process.exit(0); }
 function fail() { save(); process.stderr.write("unexpected fake gh request: " + method + " " + endpoint); process.exit(1); }
+function notFound() { save(); process.stderr.write("gh: Branch not found (HTTP 404)"); process.exit(1); }
 
 if (method === "GET" && endpoint === "repos/example/repository") output({ default_branch: "main" });
 if (method === "GET" && endpoint === "apps/github-actions") {
@@ -37,6 +38,7 @@ if (method === "GET" && endpoint === "repos/example/repository/labels?per_page=1
 }
 if (method === "GET" && endpoint.endsWith("/required_status_checks")) output(state.statusProtection);
 if (method === "GET" && endpoint.endsWith("/required_conversation_resolution")) {
+  if (state.conversationResolutionMissing) notFound();
   output({ enabled: state.conversationResolution });
 }
 if (method === "GET" && endpoint.endsWith("/enforce_admins")) {
@@ -74,6 +76,7 @@ if (method === "PATCH" && endpoint.endsWith("/required_status_checks")) {
 }
 if (method === "PUT" && endpoint.endsWith("/required_conversation_resolution")) {
   state.conversationResolution = true;
+  state.conversationResolutionMissing = false;
   output({});
 }
 if (method === "POST" && endpoint.endsWith("/enforce_admins")) {
@@ -122,6 +125,7 @@ describe("sole-owner review-gate repository configuration", () => {
       JSON.stringify({
         adminEnforcement: false,
         conversationResolution: false,
+        conversationResolutionMissing: true,
         githubActionsAppId,
         labels: [
           {

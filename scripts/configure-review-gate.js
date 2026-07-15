@@ -42,6 +42,15 @@ function ghApi(method, endpoint, body = null) {
   });
 }
 
+function readOptionalBooleanProtection(endpoint) {
+  try {
+    return readJson(ghApi("GET", endpoint), "Optional branch protection");
+  } catch (error) {
+    if (/\(HTTP 404\)\s*$/.test(error.message)) return { enabled: false };
+    throw error;
+  }
+}
+
 function ghApiPages(endpoint) {
   return command(GH_COMMAND, [
     ...GH_COMMAND_PREFIX,
@@ -153,10 +162,7 @@ function readManagedState(repository, statusEndpoint, conversationsEndpoint, adm
   }
   return {
     adminProtection: readJson(ghApi("GET", adminsEndpoint), "Administrator enforcement protection"),
-    conversationProtection: readJson(
-      ghApi("GET", conversationsEndpoint),
-      "Required conversation-resolution protection",
-    ),
+    conversationProtection: readOptionalBooleanProtection(conversationsEndpoint),
     labels,
     statusProtection: readJson(ghApi("GET", statusEndpoint), "Required status-check protection"),
     variables,
