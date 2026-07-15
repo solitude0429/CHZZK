@@ -18,7 +18,7 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repos
 3. workflow는 `main` protected ref인지 확인한 뒤 다음 권한 경계를 유지합니다.
    - `prepare`: read-only checkout, `npm ci`, 전체 검증, 결정적 unsigned ZIP과 release metadata 생성, signer/client를 protected commit의 Git blob에 재고정
    - `sign`: checkout과 npm 실행 없이 검증된 artifact만 내려받고, `firefox-signing` environment를 통과한 signer step에서만 AMO secret 사용
-   - `verify-signed`: secret 없이 signed XPI의 런타임 파일을 prepared ZIP/metadata와 바이트 단위로 비교
+   - `verify-signed`: secret 없이 signed XPI의 `manifest.json`은 semantic JSON으로, 나머지 runtime 파일은 prepared ZIP/metadata와 바이트 단위로 비교
    - `attest`: AMO secret/checkout 없이 세 release asset에 provenance attestation 생성
    - `publish`: checkout/npm/secret 없이 `contents: write`만 사용해 immutable Release 게시
 4. Release에는 정확히 다음 세 asset만 게시됩니다.
@@ -63,4 +63,4 @@ CHZZK_SIGNED_OUTPUT_DIR="dist/signed" \
 npm run sign:unlisted
 ```
 
-서명 승인을 기다리다 job이 중단되더라도 재실행은 exact unlisted target version을 조회해 polling/download부터 재개하며 새 upload/version을 만들지 않습니다. 기존 version이 listed이거나 버전·ID 응답이 일치하지 않으면 실패하고, 내려받은 기존 signed XPI가 prepared runtime과 다르면 후속 `verify-signed` 단계에서 게시 전에 거부됩니다. 이미 게시된 GitHub Release 재실행은 source commit과 `--source-digest` provenance까지 확인하는 immutable reuse 경로로만 처리합니다.
+서명 승인을 기다리다 job이 중단되더라도 재실행은 exact unlisted target version을 조회해 polling/download부터 재개하며 새 upload/version을 만들지 않습니다. 기존 version이 listed이거나 버전·ID 응답이 일치하지 않으면 실패합니다. AMO가 `manifest.json`의 whitespace/key order를 정규화하는 것은 semantic equality로 허용하지만, manifest 의미나 다른 runtime 바이트가 달라지면 후속 `verify-signed` 단계에서 게시 전에 거부됩니다. 이미 게시된 GitHub Release 재실행은 source commit과 `--source-digest` provenance까지 확인하는 immutable reuse 경로로만 처리합니다.

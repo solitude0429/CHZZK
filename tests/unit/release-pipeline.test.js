@@ -141,7 +141,13 @@ describe("immutable release preparation", () => {
   });
 });
 
-async function buildSyntheticSignedXpi(sourceArchivePath, outputPath, mutateManifest = null) {
+async function buildSyntheticSignedXpi(
+  sourceArchivePath,
+  outputPath,
+  mutateManifest = null,
+  transformManifestBytes = null,
+  transformEntryName = null,
+) {
   const source = await JSZip.loadAsync(readFileSync(sourceArchivePath));
   const signed = new JSZip();
   for (const entry of Object.values(source.files)) {
@@ -152,7 +158,13 @@ async function buildSyntheticSignedXpi(sourceArchivePath, outputPath, mutateMani
       mutateManifest(manifest);
       bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
     }
-    signed.file(entry.name, bytes, { date: new Date("1980-01-01T00:00:00.000Z") });
+    if (entry.name === "manifest.json" && transformManifestBytes) {
+      bytes = transformManifestBytes(bytes);
+    }
+    signed.file(transformEntryName?.(entry.name) ?? entry.name, bytes, {
+      createFolders: false,
+      date: new Date("1980-01-01T00:00:00.000Z"),
+    });
   }
   signed.file("META-INF/mozilla.rsa", Buffer.from("synthetic signature"));
   writeFileSync(outputPath, await signed.generateAsync({ type: "nodebuffer" }), { mode: 0o600 });
@@ -186,6 +198,36 @@ describe("signed release verification", () => {
     }
   });
 
+  it("accepts AMO manifest formatting and key-order normalization when semantics are identical", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signed-release-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "e".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath, (manifest) => {
+        const name = manifest.name;
+        delete manifest.name;
+        manifest.name = name;
+      });
+
+      const verified = await verifySignedReleaseArtifacts({
+        metadataPath: prepared.metadataPath,
+        signedXpiPath,
+        sourceArchivePath: prepared.sourceArchivePath,
+      });
+
+      assert.equal(verified.version, prepared.metadata.version);
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
   it("rejects a signed XPI whose embedded identity differs from release metadata", async () => {
     const rootDir = makeReleaseFixture();
     const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signed-release-"));
@@ -208,6 +250,67 @@ describe("signed release verification", () => {
           sourceArchivePath: prepared.sourceArchivePath,
         }),
         /manifest|version|metadata/i,
+      );
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects duplicate signed manifest keys before semantic comparison", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signed-release-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "f".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath, null, (bytes) => {
+        const text = bytes.toString("utf8");
+        const expected = `"version": "${prepared.metadata.version}"`;
+        assert.equal(text.includes(expected), true);
+        return Buffer.from(text.replace(expected, `"\\u0076ersion": "9.9.9",\n  ${expected}`));
+      });
+
+      await assert.rejects(
+        verifySignedReleaseArtifacts({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        }),
+        /duplicate|manifest/i,
+      );
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects signed ZIP entries whose raw names normalize into the runtime allowlist", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signed-release-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "1".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath, null, null, (name) =>
+        name === "manifest.json" ? "nested/../manifest.json" : name,
+      );
+
+      await assert.rejects(
+        verifySignedReleaseArtifacts({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        }),
+        /unsafe|raw|entry|path/i,
       );
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
