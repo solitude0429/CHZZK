@@ -41,7 +41,7 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repos
 
 AMO 자격 증명은 signer step의 환경에만 주입되고 즉시 `process.env`에서 제거됩니다. 파생 JWT를 사용하는 `https://addons.mozilla.org/api/v5/` 요청은 redirect를 거부하고, signed XPI 다운로드와 그 redirect hop은 별도의 무인증 요청으로 처리됩니다.
 
-Signer의 전체 network/polling budget은 10분이며 API fetch, JSON body, signed-XPI fetch/body가 응답하지 않아도 이 deadline에서 abort/실패합니다. 따라서 25분 `sign` job timeout보다 먼저 통제된 오류를 반환합니다.
+Signer의 전체 network/polling budget은 10분이며 API fetch, JSON body, signed-XPI fetch/body가 응답하지 않아도 이 deadline에서 abort/실패합니다. AMO가 승인된 download URL을 CDN 파일보다 먼저 공개해 일시적으로 `404`를 반환하면 같은 deadline 안에서 재시도합니다. 따라서 25분 `sign` job timeout보다 먼저 통제된 오류를 반환합니다.
 
 ## 로컬 서명
 

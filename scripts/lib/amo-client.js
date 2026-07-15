@@ -157,6 +157,12 @@ async function fetchSignedXpi(fetchImpl, initialUrl, deadline) {
       continue;
     }
     if (!response?.ok) {
+      if (status === 404) {
+        cancelResponseBody(response);
+        const error = new Error("AMO signed download is not available yet");
+        error.code = "AMO_SIGNED_DOWNLOAD_NOT_READY";
+        throw error;
+      }
       throw new Error(`AMO signed download failed with HTTP ${response?.status ?? "unknown"}`);
     }
     const finalUrl = typeof response.url === "string" && response.url ? response.url : currentUrl;
@@ -408,7 +414,15 @@ export async function signPreparedAddon({
   }
   if (!isAllowedAmoDownloadUrl(downloadUrl)) throw new Error("AMO returned an untrusted signed download URL");
 
-  const signedResponse = await fetchSignedXpi(fetchImpl, downloadUrl, deadline);
+  let signedResponse;
+  while (!signedResponse) {
+    try {
+      signedResponse = await fetchSignedXpi(fetchImpl, downloadUrl, deadline);
+    } catch (error) {
+      if (error.code !== "AMO_SIGNED_DOWNLOAD_NOT_READY") throw error;
+      await withDeadline(sleep(pollIntervalMs), deadline, "signed download availability");
+    }
+  }
   const signedBytes = Buffer.from(
     await withDeadline(signedResponse.arrayBuffer(), deadline, "signed download response", () =>
       cancelResponseBody(signedResponse),
