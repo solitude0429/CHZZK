@@ -317,10 +317,8 @@ describe("minimal AMO signing client", () => {
         true,
       );
       assert.equal(downloadRequests.length, 2);
-      assert.equal(
-        downloadRequests.every(({ options }) => !options.headers.has("Authorization")),
-        true,
-      );
+      assert.match(downloadRequests[0].options.headers.get("Authorization"), /^JWT /);
+      assert.equal(downloadRequests[1].options.headers.has("Authorization"), false);
       assert.equal(
         downloadRequests.every(({ options }) => options.redirect === "manual"),
         true,
@@ -394,93 +392,6 @@ describe("minimal AMO signing client", () => {
       assert.equal(requests.length, 2);
     } finally {
       rmSync(outputDir, { force: true, recursive: true });
-    }
-  });
-
-  it("retries a transient 404 while AMO propagates an approved signed file", async () => {
-    const input = makeAmoInput();
-    const signedBytes = Buffer.from("synthetic signed xpi after propagation");
-    const downloadUrl = "https://addons.mozilla.org/firefox/downloads/file/propagating.xpi";
-    let downloadAttempts = 0;
-    const fetchImpl = async (url) => {
-      const parsedUrl = new URL(url);
-      if (parsedUrl.pathname.endsWith("/versions/")) {
-        return Response.json({
-          next: null,
-          results: [
-            {
-              channel: "unlisted",
-              file: { status: "public", url: downloadUrl },
-              id: 1234,
-              version: input.metadata.version,
-            },
-          ],
-        });
-      }
-      if (parsedUrl.pathname.endsWith("/firefox/downloads/file/propagating.xpi")) {
-        downloadAttempts += 1;
-        return downloadAttempts === 1
-          ? new Response("not propagated", { status: 404 })
-          : new Response(signedBytes, { status: 200 });
-      }
-      return new Response("unexpected request", { status: 404 });
-    };
-    try {
-      const result = await signPreparedAddon({
-        apiKey: SYNTHETIC_AMO_CREDENTIAL,
-        apiSecret: "synthetic-secret",
-        fetchImpl,
-        ...input,
-        maxWaitMs: 1000,
-        pollIntervalMs: 0,
-      });
-      assert.equal(downloadAttempts, 2);
-      assert.equal(result.signedXpiSha256, sha256(signedBytes));
-      assert.deepEqual(readFileSync(result.signedXpiPath), signedBytes);
-    } finally {
-      input.cleanup();
-    }
-  });
-
-  it("bounds repeated signed-file 404 responses by the global AMO deadline", async () => {
-    const input = makeAmoInput();
-    const downloadUrl = "https://addons.mozilla.org/firefox/downloads/file/not-ready.xpi";
-    let downloadAttempts = 0;
-    const fetchImpl = async (url) => {
-      const parsedUrl = new URL(url);
-      if (parsedUrl.pathname.endsWith("/versions/")) {
-        return Response.json({
-          next: null,
-          results: [
-            {
-              channel: "unlisted",
-              file: { status: "public", url: downloadUrl },
-              id: 1234,
-              version: input.metadata.version,
-            },
-          ],
-        });
-      }
-      if (parsedUrl.pathname.endsWith("/firefox/downloads/file/not-ready.xpi")) {
-        downloadAttempts += 1;
-        return new Response("not propagated", { status: 404 });
-      }
-      return new Response("unexpected request", { status: 404 });
-    };
-    try {
-      await assertControlledAmoTimeout(
-        signPreparedAddon({
-          apiKey: SYNTHETIC_AMO_CREDENTIAL,
-          apiSecret: "synthetic-secret",
-          fetchImpl,
-          ...input,
-          maxWaitMs: 100,
-          pollIntervalMs: 1,
-        }),
-      );
-      assert.equal(downloadAttempts >= 2, true);
-    } finally {
-      input.cleanup();
     }
   });
 

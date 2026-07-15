@@ -608,6 +608,11 @@ async function resetAndPrewarmRuntimeState() {
 }
 
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+  if (changeInfo?.status === "loading") {
+    removeTabTarget(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to clear tab target for document load", error),
+    );
+  }
   if (!changeInfo?.url) return;
   if (isChzzkLiveUrl(changeInfo.url, policy)) {
     prewarmLiveTab(tabId, changeInfo.url).catch((error) => console.warn("[CHZZK] failed to prewarm live tab from URL update", error));

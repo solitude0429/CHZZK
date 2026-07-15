@@ -92,19 +92,27 @@ describe("release and repository security guardrails", () => {
 
   it("keeps releases immutable and treats an exact rerun as verified reuse", () => {
     const text = read(".github/workflows/sign-unlisted.yml");
+    const release = workflow("sign-unlisted.yml");
+    const prepareRelease = release.jobs.prepare.steps.find((step) => step.id === "release").run;
     assert.match(text, /reuse_existing/);
     assert.match(text, /gh release view/);
     assert.match(text, /cmp "\$SOURCE"/);
     assert.match(text, /--draft/);
     assert.match(text, /gh release edit "\$TAG" --draft=false/);
+    assert.doesNotMatch(text, /\/immutable-releases/);
+    assert.match(text, /--json isImmutable/);
+    assert.match(text, /sync_draft_assets/);
+    assert.match(text, /gh release upload "\$TAG" "\$ASSET"/);
     assert.match(text, /--json isDraft/);
     assert.match(text, /--json isPrerelease/);
     assert.match(text, /--source-digest "\$GITHUB_SHA"/);
     assert.match(text, /--signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/sign-unlisted\.yml"/);
     assert.match(text, /git diff --cached --exit-code/);
-    assert.doesNotMatch(text, /--clobber|gh release upload|gh release edit "\$TAG" --target/);
+    assert.doesNotMatch(text, /--clobber|gh release edit "\$TAG" --target/);
     assert.match(text, /github\.ref_protected == true/);
     assert.match(text, /environment:\s*firefox-signing/);
+    assert.match(prepareRelease, /IS_DRAFT=/);
+    assert.match(prepareRelease, /if \[ "\$IS_DRAFT" = "false" \]/);
 
     const prepare = read("scripts/prepare-release.js");
     assert.match(prepare, /--porcelain=v1/);
