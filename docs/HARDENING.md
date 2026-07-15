@@ -5,13 +5,16 @@ This document summarizes the extension hardening invariants for the MV2 required
 ## Runtime behavior
 
 - A minimal MV2 `site-observer.js` content script runs at `document_start` on CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and prewarms only the CHZZK live tab identity before the first playlist request; the first redirect must not depend solely on content-script timing.
-- Trusted HLS master playlists start non-blocking background scoring when available, supersede any older in-flight numeric probe in the same tab/context, and cache the best target quality by resolution, frame rate, then bitrate.
-- Trusted numeric HLS playlist requests use blocking `webRequest`, but the listener waits only `blockingProbeBudgetMs`. Candidate resolution continues in one shared in-flight promise per tab/context and is bounded by `probeResolutionBudgetMs`.
-- Candidate probe redirects fail closed because Firefox does not expose redirect hops to manual Fetch handling. Numeric media-playlist evidence must match the requested quality; a returned master must contain a trusted variant whose metadata and URI both prove that candidate, and every meaningful quality marker in the variant pathname must agree.
-- The first request records its live-channel context before probing. Adopting a concrete live context invalidates older contextless work; navigation, tab close, or request-proven context mismatch aborts pending fetches, invalidates the per-tab token, and clears tab trust and cached targets, so stale async work or metadata-poor follow-up requests cannot resurrect cross-context state.
-- Quality rewriting uses one shared pathname grammar for parsing and replacement; only real `.m3u8` pathnames are eligible and query/hash bytes are never rewritten.
+- Trusted HLS master playlists start non-blocking background scoring when available, supersede an older numeric probe only in the same tab, live context, and playlist family, and cache the best target quality by resolution, frame rate, then bitrate.
+- Trusted numeric HLS playlist requests use blocking `webRequest`, but the listener waits only `blockingProbeBudgetMs`. Target state, resolved state, and in-flight work are independently keyed by tab, live context, and a secret-free playlist family; query, fragment, quality markers, and recognized signed path-tail segments are excluded from that family key, and the key is never persisted in diagnostics.
+- Candidate probe redirects fail closed because Firefox does not expose redirect hops to manual Fetch handling. A response must have an exact first meaningful `#EXTM3U` line, must not declare an obvious HTML/JSON content type, and is capped in UTF-8 bytes. A returned master must contain a trusted variant whose metadata and URI both prove that candidate.
+- Ordinary media-playlist bodies do not declare their rendition resolution, so numeric evidence relies on consistent URL markers. This assumption is bounded to one playlist family and `markerEvidenceTtlMs` (10 seconds, with a 30-second code maximum). A 4xx/5xx `webRequest.onCompleted` result or `onErrorOccurred` event for a redirected request invalidates and temporarily suppresses that target, allowing a safe re-resolution/downgrade without a redirect loop.
+- The first request records its live-channel context before probing. Explicit non-CHZZK document/origin metadata vetoes and evicts cached trust. Adopting a concrete live context invalidates older contextless work; navigation, tab close, or request-proven context mismatch aborts pending fetches, invalidates the per-tab token, and clears tab trust and cached targets, so stale async work cannot resurrect cross-context state.
+- Same-URL loading clears only quality/session evidence. When Firefox omits the update URL, the background validates `tabs.get(tabId).url`; a still-live tab retains trust for a generic-CDN first playlist, while navigation or tab close cannot be re-trusted by the stale asynchronous result.
+- Contextless compatibility is limited to numeric playlists on the dedicated `livecloud.pstatic.net.live.gscdn.net` and `nvelop-livecloud.pstatic.net` host suffixes when all page metadata is absent. Generic CDN path markers are never contextless trust evidence, and any contradictory metadata vetoes the exception.
+- Quality rewriting uses one shared pathname grammar for parsing and replacement; only real `.m3u8` pathnames are eligible and query/hash bytes are never rewritten. Contradictory markers fail closed except for the observed `/360p/.../chunklist_480p.m3u8` legacy shape, whose two markers are rewritten together.
 - Redirect handling and startup prewarming are independent of local diagnostics persistence; storage failures cannot extend the blocking request deadline or prevent already-open live tabs from being trusted after install/startup.
-- Local diagnostics storage writes are serialized to reduce read-modify-write races and use allowlisted redaction rather than denylisted parameter names.
+- Local diagnostics storage writes are serialized and exact-schema normalized on load/save. Arrays are tail-bounded by policy, corrupt counters reset to zero, valid counters saturate at `Number.MAX_SAFE_INTEGER`, unknown fields are dropped, and the popup normalizes again before rendering.
 
 ## Content script behavior
 
@@ -25,6 +28,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 - No `host_permissions`, `optional_permissions`, or `optional_host_permissions` site-access toggle surface is used for core functionality; the MV2 content script match is required install-time CHZZK live access.
 - No external telemetry/data collector is used by the extension runtime.
 - `data_collection_permissions` declares `required: ["none"]`.
+- Diagnostic URL labels retain only a canonical allowlist domain and media shape; full subdomains and ports are discarded before local persistence/export.
 
 ## Verification
 

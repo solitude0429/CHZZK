@@ -47,7 +47,7 @@ When CHZZK/NAVER changes break playback:
 
 - Diagnostics are stored only in the browser extension's local storage.
 - The extension runtime does not send diagnostics to an external collector.
-- Local samples are redacted before storage/export.
+- Local samples are exact-schema normalized and redacted before storage/export; host labels discard subdomains and ports.
 - If a diagnostic export is shared manually, review it again for signed URLs or account/session-like values.
 
 ## Incident response

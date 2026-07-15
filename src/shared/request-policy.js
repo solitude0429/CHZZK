@@ -1,4 +1,4 @@
-import { parseQualityFromUrl, qualityNumber } from "./quality.js";
+import { parseQualityFromUrl, qualityNumber, urlQualityMarkersAreSafe } from "./quality.js";
 
 const DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
 const DEFAULT_REQUEST_METHODS = ["get"];
@@ -24,6 +24,10 @@ function canonicalHttpsDomainFromUrl(value) {
   } catch {
     return null;
   }
+}
+
+function hasExplicitMetadataValue(value) {
+  return value !== undefined && value !== null;
 }
 
 function domainMatches(hostname, canonicalDomain) {
@@ -94,46 +98,68 @@ function knownChzzkHlsHost(hostname) {
   return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
 }
 
-function knownChzzkHlsPath(pathname) {
-  const normalized = String(pathname ?? "").toLowerCase();
-  if (!/(^|\/)chzzk(\/|$)/.test(normalized)) return false;
-  return /(?:^|\/)\d{3,4}p(?:\/|$)/.test(normalized) || /(?:^|\/)chunklist_\d{3,4}p/i.test(normalized);
-}
-
-function isKnownChzzkHlsUrl(url, policy) {
+function isDedicatedChzzkHlsUrl(url, policy) {
   if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
 
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:") return false;
-
-    const hostname = parsed.hostname.toLowerCase();
-    const pathname = parsed.pathname.toLowerCase();
-
-    if (trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain))) return true;
-    if (knownChzzkHlsHost(hostname)) return true;
-    if (knownChzzkHlsPath(pathname)) return true;
+    return knownChzzkHlsHost(parsed.hostname.toLowerCase());
   } catch {
     return false;
   }
+}
 
-  return false;
+function trustedInitiatorUrl(value, policy) {
+  const hostname = canonicalHttpsDomainFromUrl(value);
+  return Boolean(
+    hostname && trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain)),
+  );
+}
+
+function requestContextEvidence(details, policy) {
+  let hasMetadata = false;
+  let trusted = false;
+
+  if (hasExplicitMetadataValue(details?.documentUrl)) {
+    hasMetadata = true;
+    if (!isChzzkLiveUrl(details.documentUrl, policy)) {
+      return { hasMetadata, trusted: false, veto: true };
+    }
+    trusted = true;
+  }
+
+  if (hasExplicitMetadataValue(details?.originUrl)) {
+    hasMetadata = true;
+    if (!trustedInitiatorUrl(details.originUrl, policy)) {
+      return { hasMetadata, trusted: false, veto: true };
+    }
+    trusted = true;
+  }
+
+  if (hasExplicitMetadataValue(details?.initiator)) {
+    hasMetadata = true;
+    if (!trustedInitiatorUrl(details.initiator, policy)) {
+      return { hasMetadata, trusted: false, veto: true };
+    }
+    trusted = true;
+  }
+
+  return { hasMetadata, trusted, veto: false };
+}
+
+export function hasContradictoryChzzkMetadata(details, policy) {
+  return requestContextEvidence(details, policy).veto;
 }
 
 export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
+  const evidence = requestContextEvidence(details, policy);
+  if (evidence.veto) return false;
+  if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
+  if (evidence.hasMetadata) return false;
   if (trustedLiveTabIds?.has?.(details.tabId)) return true;
-  if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
-  if (isChzzkLiveUrl(details.originUrl, policy)) return true;
-
-  const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
-  const hasTrustedInitiator = Boolean(
-    initiatorDomain &&
-    trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
-  );
-
-  if (hasTrustedInitiator && isNumericHlsPlaylistUrl(details.url)) return true;
-  return isKnownChzzkHlsUrl(details.url, policy);
+  return isDedicatedChzzkHlsUrl(details.url, policy);
 }
 
 export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTabIds = null } = {}) {
@@ -142,13 +168,11 @@ export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTab
   if (details.type && !resourceTypes(policy).includes(details.type)) return false;
   const method = String(details.method ?? "GET").toLowerCase();
   if (!requestMethods(policy).includes(method) || !isTrustedRequestDomain(details.url, policy)) return false;
-  if (trustedLiveTabIds?.has?.(details.tabId)) return true;
-  if (isChzzkLiveUrl(details.documentUrl, policy) || isChzzkLiveUrl(details.originUrl, policy)) return true;
-  const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
-  return Boolean(
-    initiatorDomain &&
-    trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
-  );
+  const evidence = requestContextEvidence(details, policy);
+  if (evidence.veto) return false;
+  if (evidence.trusted) return true;
+  if (evidence.hasMetadata) return false;
+  return Boolean(trustedLiveTabIds?.has?.(details.tabId));
 }
 
 export function shouldRecordDiagnostics(details, policy, options = {}) {
@@ -191,6 +215,9 @@ export function shouldRedirectRequest(details, policy, options = {}) {
   }
 
   const quality = parseQualityFromUrl(details.url);
+  if (quality && !urlQualityMarkersAreSafe(details.url)) {
+    return { ok: false, quality, reason: "contradictory-quality-markers", tabId };
+  }
   const current = qualityNumber(quality);
   const min = qualityNumber(policy.minRedirectQuality ?? "100p");
   if (!quality || !current || !min) {

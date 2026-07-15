@@ -13,22 +13,26 @@
     maxDiagnosticsSamples: 200,
     maxPendingDiagnosticsMutations: 50,
     blockingProbeBudgetMs: 150,
+    markerEvidenceTtlMs: 1e4,
     probeMaxBytes: 256e3,
     probeResolutionBudgetMs: 3e3,
     probeTimeoutMs: 1500,
+    redirectFailureBackoffMs: 1e4,
     notes: [
       "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
-      "The persistent background page uses blocking webRequest, but an unresolved candidate search can delay a request only for blockingProbeBudgetMs before failing open while one shared per-tab/context resolution continues in the background.",
-      "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token is current.",
-      "Numeric quality replacement changes pathname markers only and preserves signed query strings and fragments byte-for-byte.",
-      "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; concurrent requests share the same in-flight resolution.",
-      "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
+      "The persistent background page uses blocking webRequest, but an unresolved candidate search can delay a request only for blockingProbeBudgetMs before failing open while one shared per-tab/live-context/playlist-family resolution continues in the background.",
+      "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
+      "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
+      "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
+      "URL-marker-only media evidence expires after markerEvidenceTtlMs, and redirect failures suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
+      "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
+      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK live context constrain redirects; explicit foreign metadata vetoes cache, and metadata-free contextless compatibility is limited to the two dedicated CHZZK livecloud host suffixes rather than generic CDN path markers.",
       "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
-      "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies are capped by probeMaxBytes, and numeric/master evidence must prove the requested candidate before it can seed a target.",
-      "Navigation and tab close abort pending probes and invalidate their context token before clearing state so stale completions cannot restore a target.",
+      "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
+      "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
+      "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports.",
     ],
   };
 
@@ -38,6 +42,18 @@
   var QUALITY_PATH_MARKER_SOURCE = String.raw`(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)`;
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
+  var MAX_PLAYLIST_FAMILY_PATH_LENGTH = 4096;
+  var MAX_PLAYLIST_FAMILY_SEGMENTS = 64;
+  var MAX_HLS_BANDWIDTH = 1e9;
+  var MAX_HLS_FRAME_RATE = 240;
+  var SIGNED_PATH_TAIL_RE = /(?:^|[~;&])(?:[a-z][a-z0-9_-]{0,31})=/i;
+  var DIAGNOSTIC_DOMAIN_LABELS = [
+    "akamaized.net",
+    "chzzk.naver.com",
+    "gscdn.net",
+    "navercdn.com",
+    "pstatic.net",
+  ];
   function normalizeQualityLabel(value) {
     if (typeof value !== "string") return null;
     const resolutionMatch = value.match(RESOLUTION_RE);
@@ -67,6 +83,80 @@
   function parseQualityFromUrl(url) {
     return parseQualitiesFromUrl(url)[0] ?? null;
   }
+  function urlQualityMarkersAreSafe(url) {
+    const qualities = parseQualitiesFromUrl(url);
+    if (qualities.length <= 1) return true;
+    if (qualities.every((quality) => quality === qualities[0])) return true;
+    return qualities.length === 2 && qualities[0] === "360p" && qualities[1] === "480p";
+  }
+  function decodePathSegment(segment) {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  }
+  function stripSignedPathTail(segment) {
+    const decoded = decodePathSegment(segment);
+    const match = SIGNED_PATH_TAIL_RE.exec(decoded);
+    if (!match) return { prefix: segment, signed: false };
+    const prefix = decoded.slice(0, match.index).replace(/[~;&]+$/, "");
+    return { prefix: prefix ? encodeURIComponent(prefix) : "", signed: true };
+  }
+  function playlistNameDiscriminator(segment) {
+    const { prefix } = stripSignedPathTail(segment);
+    const decoded = decodePathSegment(prefix);
+    if (!/\.m3u8$/i.test(decoded)) return null;
+    let stem = decoded.slice(0, -".m3u8".length);
+    stem = stem.replace(/(^|[_-])\d{3,4}p(?=$|[_-])/gi, "$1{quality}");
+    stem = stem.replace(
+      /^(?:chunklist(?:_\{quality\})?|index|manifest|master|media|playlist)(?:[_-]+|$)/i,
+      "",
+    );
+    stem = stem.replace(/\{quality\}/gi, "").replace(/^[-_.]+|[-_.]+$/g, "");
+    return stem ? encodeURIComponent(stem) : "";
+  }
+  function playlistFamilyKey(url) {
+    if (typeof url !== "string" || url === "") return null;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:" || !parsed.hostname) return null;
+      if (parsed.pathname.length > MAX_PLAYLIST_FAMILY_PATH_LENGTH) return null;
+      const rawSegments = parsed.pathname.split("/").filter(Boolean);
+      if (rawSegments.length > MAX_PLAYLIST_FAMILY_SEGMENTS) return null;
+      const playlistIndex = rawSegments.findIndex((segment) => {
+        const { prefix } = stripSignedPathTail(segment);
+        return /\.m3u8$/i.test(decodePathSegment(prefix));
+      });
+      if (playlistIndex === -1) return null;
+      const discriminator = playlistNameDiscriminator(rawSegments[playlistIndex]);
+      if (discriminator === null) return null;
+      const directorySegments = rawSegments.slice(0, playlistIndex);
+      const familySegments = [];
+      let removedRenditionMarker = false;
+      for (const segment of directorySegments) {
+        const { prefix, signed } = stripSignedPathTail(segment);
+        const decoded = decodePathSegment(prefix);
+        if (prefix === "" && signed) break;
+        if (/^\d{3,4}p$/i.test(decoded)) {
+          removedRenditionMarker = true;
+          continue;
+        }
+        if (removedRenditionMarker && /^(?:media|playlist|playlists|segment|segments)$/i.test(decoded)) {
+          continue;
+        }
+        familySegments.push(prefix);
+        if (signed) break;
+      }
+      return JSON.stringify([
+        `${parsed.protocol}//${parsed.host.toLowerCase()}`,
+        familySegments,
+        discriminator,
+      ]);
+    } catch {
+      return null;
+    }
+  }
   function redactMediaUrl(url) {
     if (typeof url !== "string" || url === "") return "";
     try {
@@ -76,7 +166,11 @@
       const isPlaylist = /\.m3u8$/i.test(parsed.pathname);
       const mediaShape = isPlaylist ? `/${quality ?? "playlist"}.m3u8` : quality ? `/${quality}` : "";
       const hadSensitiveTail = Boolean(parsed.search || parsed.hash);
-      return `${parsed.protocol}//${parsed.host}/[redacted-path]${mediaShape}${hadSensitiveTail ? "?[redacted]" : ""}`;
+      const hostname = parsed.hostname.toLowerCase();
+      const domainLabel =
+        DIAGNOSTIC_DOMAIN_LABELS.find((domain) => hostname === domain || hostname.endsWith(`.${domain}`)) ??
+        "other-media.invalid";
+      return `${parsed.protocol}//${domainLabel}/[redacted-path]${mediaShape}${hadSensitiveTail ? "?[redacted]" : ""}`;
     } catch {
       return "[redacted-url]";
     }
@@ -99,7 +193,15 @@
     const normalizedTarget = normalizeQualityLabel(targetQuality);
     const target = qualityNumber(normalizedTarget);
     const currentQuality = parseQualityFromUrl(url);
-    if (typeof url !== "string" || !normalizedTarget || !target || !currentQuality) return null;
+    if (
+      typeof url !== "string" ||
+      !normalizedTarget ||
+      !target ||
+      !currentQuality ||
+      !urlQualityMarkersAreSafe(url)
+    ) {
+      return null;
+    }
     const urlParts = url.match(/^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)([^?#]*)([?#][\s\S]*)?$/i);
     if (!urlParts) return null;
     try {
@@ -117,7 +219,9 @@
         return match.replace(quality, normalizedTarget);
       },
     );
-    return replacedAny ? `${urlParts[1]}${replacedPath}${urlParts[3] ?? ""}` : null;
+    if (!replacedAny) return null;
+    const replacedUrl = `${urlParts[1]}${replacedPath}${urlParts[3] ?? ""}`;
+    return urlQualityMarkersAreSafe(replacedUrl) ? replacedUrl : null;
   }
   function splitHlsAttributeList(value) {
     const result = [];
@@ -132,29 +236,49 @@
       }
       current += char;
     }
+    if (quoted) return null;
     if (current) result.push(current);
     return result;
   }
   function parseHlsAttributeList(value) {
-    return Object.fromEntries(
-      splitHlsAttributeList(value)
-        .map((entry) => {
-          const separator = entry.indexOf("=");
-          if (separator === -1) return null;
-          const key = entry.slice(0, separator).trim().toUpperCase();
-          const rawValue = entry
-            .slice(separator + 1)
-            .trim()
-            .replace(/^"|"$/g, "");
-          return key ? [key, rawValue] : null;
-        })
-        .filter(Boolean),
-    );
+    const entries = splitHlsAttributeList(value);
+    if (!entries) return null;
+    const attributes = {};
+    for (const entry of entries) {
+      const separator = entry.indexOf("=");
+      if (separator <= 0) return null;
+      const key = entry.slice(0, separator).trim().toUpperCase();
+      if (!/^[A-Z0-9-]+$/.test(key) || Object.hasOwn(attributes, key)) return null;
+      let rawValue = entry.slice(separator + 1).trim();
+      if (rawValue.startsWith('"')) {
+        if (rawValue.length < 2 || !rawValue.endsWith('"')) return null;
+        rawValue = rawValue.slice(1, -1);
+      } else if (rawValue.includes('"')) {
+        return null;
+      }
+      attributes[key] = rawValue;
+    }
+    return attributes;
   }
-  function numericAttribute(value) {
-    if (value == null || value === "") return null;
+  function boundedPositiveDecimalInteger(value, max) {
+    if (value == null) return { valid: true, value: null };
+    if (typeof value !== "string" || !/^\d+$/.test(value)) return { valid: false, value: null };
     const number = Number(value);
-    return Number.isFinite(number) ? number : null;
+    return {
+      valid: Number.isSafeInteger(number) && number > 0 && number <= max,
+      value: number,
+    };
+  }
+  function boundedPositiveDecimal(value, max) {
+    if (value == null) return { valid: true, value: null };
+    if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/.test(value)) {
+      return { valid: false, value: null };
+    }
+    const number = Number(value);
+    return {
+      valid: Number.isFinite(number) && number > 0 && number <= max,
+      value: number,
+    };
   }
   function parseResolutionAttribute(value) {
     if (typeof value !== "string") return null;
@@ -171,6 +295,16 @@
       const line = lines[index];
       if (!line.toUpperCase().startsWith("#EXT-X-STREAM-INF:")) continue;
       const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
+      if (!attributes) continue;
+      const averageBandwidth = boundedPositiveDecimalInteger(
+        attributes["AVERAGE-BANDWIDTH"],
+        MAX_HLS_BANDWIDTH,
+      );
+      const bandwidth = boundedPositiveDecimalInteger(attributes.BANDWIDTH, MAX_HLS_BANDWIDTH);
+      const frameRate = boundedPositiveDecimal(attributes["FRAME-RATE"], MAX_HLS_FRAME_RATE);
+      if (!averageBandwidth.valid || !bandwidth.valid || bandwidth.value === null || !frameRate.valid) {
+        continue;
+      }
       let uriIndex = index + 1;
       while (uriIndex < lines.length && !lines[uriIndex]) uriIndex += 1;
       const nextUri = lines[uriIndex];
@@ -184,9 +318,9 @@
       }
       const quality = resolution ? normalizeQualityLabel(attributes.RESOLUTION) : parseQualityFromUrl(url);
       variants.push({
-        averageBandwidth: numericAttribute(attributes["AVERAGE-BANDWIDTH"]),
-        bandwidth: numericAttribute(attributes.BANDWIDTH),
-        frameRate: numericAttribute(attributes["FRAME-RATE"]),
+        averageBandwidth: averageBandwidth.value,
+        bandwidth: bandwidth.value,
+        frameRate: frameRate.value,
         quality,
         resolution,
         url,
@@ -203,11 +337,24 @@
       peakBandwidth: variant?.bandwidth ?? 0,
     };
   }
-  function chooseBestHlsVariant(playlistText, baseUrl = "", { minRedirectQuality = "100p" } = {}) {
+  function chooseBestHlsVariant(
+    playlistText,
+    baseUrl = "",
+    { excludedQualities = [], minRedirectQuality = "100p" } = {},
+  ) {
     const min = qualityNumber(minRedirectQuality) ?? 0;
+    const excluded = new Set(
+      (Array.isArray(excludedQualities) ? excludedQualities : []).map(normalizeQualityLabel).filter(Boolean),
+    );
     return (
       parseHlsMasterPlaylistVariants(playlistText, baseUrl)
         .filter((variant) => (variantScore(variant).height || 0) >= min)
+        .filter((variant) => {
+          const quality =
+            normalizeQualityLabel(variant?.quality) ??
+            (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
+          return !quality || !excluded.has(quality);
+        })
         .map((variant, index) => ({ index, score: variantScore(variant), variant }))
         .sort(
           (left, right) =>
@@ -228,20 +375,159 @@
   }
 
   // src/shared/diagnostics.js
-  function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
+  var EPOCH_ISO = /* @__PURE__ */ new Date(0).toISOString();
+  var HARD_MAX_DIAGNOSTIC_SAMPLES = 1e3;
+  var MAX_DIAGNOSTIC_QUALITY_KEYS = 64;
+  var MAX_DIAGNOSTIC_REASON_LENGTH = 64;
+  var MAX_DIAGNOSTIC_TYPE_LENGTH = 32;
+  var MAX_DIAGNOSTIC_URL_INPUT_LENGTH = 4096;
+  function normalizedMaxSamples(value, fallback = 200) {
+    const normalizedFallback =
+      Number.isSafeInteger(fallback) && fallback > 0 ? Math.min(fallback, HARD_MAX_DIAGNOSTIC_SAMPLES) : 200;
+    return Number.isSafeInteger(value) && value > 0
+      ? Math.min(value, normalizedFallback)
+      : normalizedFallback;
+  }
+  function normalizedCounter(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+  function incrementCounter(value) {
+    const normalized = normalizedCounter(value);
+    return normalized >= Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : normalized + 1;
+  }
+  function normalizedQuality(value, { nullable = false } = {}) {
+    if (nullable && value === null) return null;
+    if (typeof value !== "string" || !/^\d{3,4}p$/i.test(value)) return void 0;
+    return normalizeQualityLabel(value) ?? void 0;
+  }
+  function normalizedIsoTimestamp(value) {
+    if (typeof value !== "string" || value.length > 40) return EPOCH_ISO;
+    const timestamp = new Date(value);
+    return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : EPOCH_ISO;
+  }
+  function normalizedTabId(value, { nullable = false } = {}) {
+    if (nullable && value === null) return null;
+    return Number.isSafeInteger(value) && value >= 0 ? value : void 0;
+  }
+  function normalizedType(value) {
+    if (value === null) return null;
+    return typeof value === "string" && value.length <= MAX_DIAGNOSTIC_TYPE_LENGTH ? value : void 0;
+  }
+  function normalizedDiagnosticUrl(value) {
+    if (typeof value !== "string" || value.length > MAX_DIAGNOSTIC_URL_INPUT_LENGTH) return void 0;
+    return redactMediaUrl(value);
+  }
+  function normalizedRuntimeError(value) {
+    return typeof value === "string" && value.length > 0 ? "runtime-error" : null;
+  }
+  function normalizeSample(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const quality = normalizedQuality(value.quality);
+    const tabId = normalizedTabId(value.tabId, { nullable: true });
+    const type = normalizedType(value.type);
+    const url = normalizedDiagnosticUrl(value.url);
+    if (!quality || tabId === void 0 || type === void 0 || url === void 0) return null;
+    const seenAt = normalizedIsoTimestamp(value.seenAt);
+    if (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) return null;
+    return { quality, seenAt, tabId, type, url };
+  }
+  function normalizeDecision(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const quality = normalizedQuality(value.quality, { nullable: true });
+    const targetQuality = normalizedQuality(value.targetQuality, { nullable: true });
+    const tabId = normalizedTabId(value.tabId, { nullable: true });
+    const type = normalizedType(value.type);
+    const url = normalizedDiagnosticUrl(value.url);
+    const seenAt = normalizedIsoTimestamp(value.seenAt);
+    if (
+      typeof value.ok !== "boolean" ||
+      typeof value.redirectedCurrentRequest !== "boolean" ||
+      quality === void 0 ||
+      targetQuality === void 0 ||
+      tabId === void 0 ||
+      type === void 0 ||
+      url === void 0 ||
+      (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) ||
+      typeof value.reason !== "string" ||
+      value.reason.length === 0 ||
+      value.reason.length > MAX_DIAGNOSTIC_REASON_LENGTH
+    ) {
+      return null;
+    }
     return {
-      decisions: [],
-      generatedAt: /* @__PURE__ */ new Date(0).toISOString(),
-      maxSamples,
-      qualities: {},
+      ok: value.ok,
+      quality,
+      reason: value.reason,
+      redirectedCurrentRequest: value.redirectedCurrentRequest,
+      seenAt,
+      tabId,
+      targetQuality,
+      type,
+      url,
+    };
+  }
+  function normalizeQualityCounters(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const counters = {};
+    for (const [rawQuality, rawCount] of Object.entries(value)) {
+      if (Object.keys(counters).length >= MAX_DIAGNOSTIC_QUALITY_KEYS) break;
+      const quality = normalizedQuality(rawQuality);
+      if (!quality || normalizedCounter(rawCount) !== rawCount) continue;
+      counters[quality] = rawCount;
+    }
+    return counters;
+  }
+  function normalizeActiveTabIds(value, maxSamples) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.filter((tabId) => normalizedTabId(tabId) !== void 0))]
+      .sort((left, right) => left - right)
+      .slice(-maxSamples);
+  }
+  function normalizeTargetsByTab(value, maxSamples) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([tabId, quality]) => {
+          const parsedTabId = Number(tabId);
+          return (
+            String(parsedTabId) === tabId &&
+            normalizedTabId(parsedTabId) !== void 0 &&
+            normalizedQuality(quality)
+          );
+        })
+        .sort(([left], [right]) => Number(left) - Number(right))
+        .slice(-maxSamples)
+        .map(([tabId, quality]) => [tabId, normalizedQuality(quality)]),
+    );
+  }
+  function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
+    const policyMaxSamples = normalizedMaxSamples(maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
+    const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const effectiveMaxSamples = normalizedMaxSamples(source.maxSamples, policyMaxSamples);
+    const runtimeSource =
+      source.runtimeRedirects &&
+      typeof source.runtimeRedirects === "object" &&
+      !Array.isArray(source.runtimeRedirects)
+        ? source.runtimeRedirects
+        : {};
+    const lastError = normalizedRuntimeError(runtimeSource.lastError);
+    return {
+      decisions: (Array.isArray(source.decisions) ? source.decisions.slice(-effectiveMaxSamples) : [])
+        .map(normalizeDecision)
+        .filter(Boolean),
+      generatedAt: normalizedIsoTimestamp(source.generatedAt),
+      maxSamples: effectiveMaxSamples,
+      qualities: normalizeQualityCounters(source.qualities),
       runtimeRedirects: {
-        activeTabIds: [],
-        lastError: null,
-        targetsByTab: {},
-        updatedAt: /* @__PURE__ */ new Date(0).toISOString(),
+        activeTabIds: normalizeActiveTabIds(runtimeSource.activeTabIds, effectiveMaxSamples),
+        lastError,
+        targetsByTab: normalizeTargetsByTab(runtimeSource.targetsByTab, effectiveMaxSamples),
+        updatedAt: normalizedIsoTimestamp(runtimeSource.updatedAt),
       },
-      samples: [],
-      totalHlsRequests: 0,
+      samples: (Array.isArray(source.samples) ? source.samples.slice(-effectiveMaxSamples) : [])
+        .map(normalizeSample)
+        .filter(Boolean),
+      totalHlsRequests: normalizedCounter(source.totalHlsRequests),
     };
   }
   function capList(list, maxItems) {
@@ -253,25 +539,33 @@
     if (!diagnostics || typeof url !== "string" || !/\.m3u8(?:[?#]|$)/i.test(url)) return false;
     const quality = parseQualityFromUrl(url);
     if (!quality) return false;
-    diagnostics.totalHlsRequests = (diagnostics.totalHlsRequests ?? 0) + 1;
-    diagnostics.qualities ??= {};
-    diagnostics.qualities[quality] = (diagnostics.qualities[quality] ?? 0) + 1;
-    diagnostics.samples ??= [];
-    diagnostics.samples.push({
+    const sample = normalizeSample({
       quality,
       seenAt: now.toISOString(),
       tabId: context.tabId ?? null,
       type: context.type ?? null,
-      url: redactMediaUrl(url),
+      url,
     });
-    capList(diagnostics.samples, diagnostics.maxSamples ?? 200);
+    if (!sample) return false;
+    diagnostics.totalHlsRequests = incrementCounter(diagnostics.totalHlsRequests);
+    if (
+      !diagnostics.qualities ||
+      typeof diagnostics.qualities !== "object" ||
+      Array.isArray(diagnostics.qualities)
+    ) {
+      diagnostics.qualities = {};
+    }
+    diagnostics.qualities[quality] = incrementCounter(diagnostics.qualities[quality]);
+    if (!Array.isArray(diagnostics.samples)) diagnostics.samples = [];
+    diagnostics.samples.push(sample);
+    capList(diagnostics.samples, normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES));
     diagnostics.generatedAt = now.toISOString();
     return true;
   }
   function recordDecision(diagnostics, decision, details = {}, { now = /* @__PURE__ */ new Date() } = {}) {
     if (!diagnostics || !decision) return false;
-    diagnostics.decisions ??= [];
-    diagnostics.decisions.push({
+    if (!Array.isArray(diagnostics.decisions)) diagnostics.decisions = [];
+    const entry = normalizeDecision({
       ok: Boolean(decision.ok),
       quality: decision.quality ?? null,
       reason: decision.reason ?? "unknown",
@@ -280,9 +574,11 @@
       tabId: decision.tabId ?? details.tabId ?? null,
       targetQuality: decision.targetQuality ?? null,
       type: details.type ?? null,
-      url: redactMediaUrl(details.url ?? ""),
+      url: details.url ?? "",
     });
-    capList(diagnostics.decisions, diagnostics.maxSamples ?? 200);
+    if (!entry) return false;
+    diagnostics.decisions.push(entry);
+    capList(diagnostics.decisions, normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES));
     diagnostics.generatedAt = now.toISOString();
     return true;
   }
@@ -291,12 +587,11 @@
     { activeTabIds = [], lastError = null, now = /* @__PURE__ */ new Date(), targetsByTab = {} } = {},
   ) {
     if (!diagnostics) return false;
+    const maxSamples = normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
     diagnostics.runtimeRedirects = {
-      activeTabIds: [...activeTabIds].sort((a, b) => a - b),
-      lastError,
-      targetsByTab: Object.fromEntries(
-        Object.entries(targetsByTab).sort(([left], [right]) => Number(left) - Number(right)),
-      ),
+      activeTabIds: normalizeActiveTabIds(activeTabIds, maxSamples),
+      lastError: normalizedRuntimeError(lastError),
+      targetsByTab: normalizeTargetsByTab(targetsByTab, maxSamples),
       updatedAt: now.toISOString(),
     };
     diagnostics.generatedAt = now.toISOString();
@@ -325,6 +620,9 @@
     } catch {
       return null;
     }
+  }
+  function hasExplicitMetadataValue(value) {
+    return value !== void 0 && value !== null;
   }
   function domainMatches(hostname, canonicalDomain) {
     return hostname === canonicalDomain || hostname.endsWith(`.${canonicalDomain}`);
@@ -387,38 +685,59 @@
     const knownSuffixes = ["livecloud.pstatic.net.live.gscdn.net", "nvelop-livecloud.pstatic.net"];
     return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
   }
-  function knownChzzkHlsPath(pathname) {
-    const normalized = String(pathname ?? "").toLowerCase();
-    if (!/(^|\/)chzzk(\/|$)/.test(normalized)) return false;
-    return /(?:^|\/)\d{3,4}p(?:\/|$)/.test(normalized) || /(?:^|\/)chunklist_\d{3,4}p/i.test(normalized);
-  }
-  function isKnownChzzkHlsUrl(url, policy) {
+  function isDedicatedChzzkHlsUrl(url, policy) {
     if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
     try {
       const parsed = new URL(url);
       if (parsed.protocol !== "https:") return false;
-      const hostname = parsed.hostname.toLowerCase();
-      const pathname = parsed.pathname.toLowerCase();
-      if (trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain))) return true;
-      if (knownChzzkHlsHost(hostname)) return true;
-      if (knownChzzkHlsPath(pathname)) return true;
+      return knownChzzkHlsHost(parsed.hostname.toLowerCase());
     } catch {
       return false;
     }
-    return false;
+  }
+  function trustedInitiatorUrl(value, policy) {
+    const hostname = canonicalHttpsDomainFromUrl(value);
+    return Boolean(
+      hostname && trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain)),
+    );
+  }
+  function requestContextEvidence(details, policy) {
+    let hasMetadata = false;
+    let trusted = false;
+    if (hasExplicitMetadataValue(details?.documentUrl)) {
+      hasMetadata = true;
+      if (!isChzzkLiveUrl(details.documentUrl, policy)) {
+        return { hasMetadata, trusted: false, veto: true };
+      }
+      trusted = true;
+    }
+    if (hasExplicitMetadataValue(details?.originUrl)) {
+      hasMetadata = true;
+      if (!trustedInitiatorUrl(details.originUrl, policy)) {
+        return { hasMetadata, trusted: false, veto: true };
+      }
+      trusted = true;
+    }
+    if (hasExplicitMetadataValue(details?.initiator)) {
+      hasMetadata = true;
+      if (!trustedInitiatorUrl(details.initiator, policy)) {
+        return { hasMetadata, trusted: false, veto: true };
+      }
+      trusted = true;
+    }
+    return { hasMetadata, trusted, veto: false };
+  }
+  function hasContradictoryChzzkMetadata(details, policy) {
+    return requestContextEvidence(details, policy).veto;
   }
   function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
+    const evidence = requestContextEvidence(details, policy);
+    if (evidence.veto) return false;
+    if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
+    if (evidence.hasMetadata) return false;
     if (trustedLiveTabIds?.has?.(details.tabId)) return true;
-    if (isChzzkLiveUrl(details.documentUrl, policy)) return true;
-    if (isChzzkLiveUrl(details.originUrl, policy)) return true;
-    const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
-    const hasTrustedInitiator = Boolean(
-      initiatorDomain &&
-      trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
-    );
-    if (hasTrustedInitiator && isNumericHlsPlaylistUrl(details.url)) return true;
-    return isKnownChzzkHlsUrl(details.url, policy);
+    return isDedicatedChzzkHlsUrl(details.url, policy);
   }
   function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTabIds = null } = {}) {
     if (!details || !isValidRedirectTabId(details.tabId) || !isHttpsUrl(details.url)) return false;
@@ -427,13 +746,11 @@
     const method = String(details.method ?? "GET").toLowerCase();
     if (!requestMethods(policy).includes(method) || !isTrustedRequestDomain(details.url, policy))
       return false;
-    if (trustedLiveTabIds?.has?.(details.tabId)) return true;
-    if (isChzzkLiveUrl(details.documentUrl, policy) || isChzzkLiveUrl(details.originUrl, policy)) return true;
-    const initiatorDomain = canonicalHttpsDomainFromUrl(details.initiator);
-    return Boolean(
-      initiatorDomain &&
-      trustedInitiatorDomains(policy).some((domain) => domainMatches(initiatorDomain, domain)),
-    );
+    const evidence = requestContextEvidence(details, policy);
+    if (evidence.veto) return false;
+    if (evidence.trusted) return true;
+    if (evidence.hasMetadata) return false;
+    return Boolean(trustedLiveTabIds?.has?.(details.tabId));
   }
   function shouldRecordDiagnostics(details, policy, options = {}) {
     if (!isHttpsUrl(details?.url)) return false;
@@ -469,6 +786,9 @@
       return { ok: false, reason: "untrusted-initiator", tabId };
     }
     const quality = parseQualityFromUrl(details.url);
+    if (quality && !urlQualityMarkersAreSafe(details.url)) {
+      return { ok: false, quality, reason: "contradictory-quality-markers", tabId };
+    }
     const current = qualityNumber(quality);
     const min = qualityNumber(policy.minRedirectQuality ?? "100p");
     if (!quality || !current || !min) {
@@ -503,55 +823,36 @@
   var STORAGE_KEY = "chzzkDiagnostics";
   var WEB_REQUEST_URLS = configuredWebRequestUrls(quality_policy_default);
   var activeLiveTabIds = /* @__PURE__ */ new Set();
-  var activeTargetsByTab = /* @__PURE__ */ new Map();
+  var activeTargetsBySession = /* @__PURE__ */ new Map();
+  var failedTargetsBySession = /* @__PURE__ */ new Map();
   var liveContextByTab = /* @__PURE__ */ new Map();
-  var resolutionByTab = /* @__PURE__ */ new Map();
-  var resolvedTargetsByTab = /* @__PURE__ */ new Set();
+  var pendingTrustValidationByTab = /* @__PURE__ */ new Map();
+  var redirectedRequestsById = /* @__PURE__ */ new Map();
+  var resolutionBySession = /* @__PURE__ */ new Map();
   var tabContextTokenByTab = /* @__PURE__ */ new Map();
+  var MAX_MARKER_EVIDENCE_TTL_MS = 3e4;
+  var MAX_REDIRECT_FAILURE_BACKOFF_MS = 3e4;
+  var MAX_TRACKED_REDIRECT_REQUESTS = 500;
   var diagnosticsMutationQueue = Promise.resolve();
   var diagnosticsMutationQueueDepth = 0;
-  function normalizeDiagnostics(value) {
-    const empty = createEmptyDiagnostics({ maxSamples: quality_policy_default.maxDiagnosticsSamples });
-    if (!value || typeof value !== "object") return empty;
-    const runtimeRedirects =
-      value.runtimeRedirects && typeof value.runtimeRedirects === "object" ? value.runtimeRedirects : {};
-    return {
-      ...empty,
-      ...value,
-      decisions: Array.isArray(value.decisions) ? value.decisions : [],
-      maxSamples:
-        Number.isSafeInteger(value.maxSamples) && value.maxSamples > 0 ? value.maxSamples : empty.maxSamples,
-      qualities:
-        value.qualities && typeof value.qualities === "object" && !Array.isArray(value.qualities)
-          ? value.qualities
-          : {},
-      runtimeRedirects: {
-        ...empty.runtimeRedirects,
-        ...runtimeRedirects,
-        activeTabIds: Array.isArray(runtimeRedirects.activeTabIds) ? runtimeRedirects.activeTabIds : [],
-        targetsByTab:
-          runtimeRedirects.targetsByTab &&
-          typeof runtimeRedirects.targetsByTab === "object" &&
-          !Array.isArray(runtimeRedirects.targetsByTab)
-            ? runtimeRedirects.targetsByTab
-            : {},
-      },
-      samples: Array.isArray(value.samples) ? value.samples : [],
-      totalHlsRequests: Number.isFinite(Number(value.totalHlsRequests)) ? Number(value.totalHlsRequests) : 0,
-    };
-  }
   async function loadDiagnostics() {
     const stored = await api.storage.local.get(STORAGE_KEY);
-    return normalizeDiagnostics(stored?.[STORAGE_KEY]);
+    return normalizeDiagnostics(stored?.[STORAGE_KEY], {
+      maxSamples: quality_policy_default.maxDiagnosticsSamples,
+    });
   }
   async function saveDiagnostics(diagnostics) {
-    await api.storage.local.set({ [STORAGE_KEY]: diagnostics });
+    const normalized = normalizeDiagnostics(diagnostics, {
+      maxSamples: quality_policy_default.maxDiagnosticsSamples,
+    });
+    await api.storage.local.set({ [STORAGE_KEY]: normalized });
+    return normalized;
   }
   async function mutateDiagnostics(mutator) {
     const diagnostics = await loadDiagnostics();
     const result = mutator(diagnostics);
-    await saveDiagnostics(diagnostics);
-    return { diagnostics, result };
+    const savedDiagnostics = await saveDiagnostics(diagnostics);
+    return { diagnostics: savedDiagnostics, result };
   }
   function diagnosticsQueueLimit() {
     const configured = Number(quality_policy_default.maxPendingDiagnosticsMutations ?? 50);
@@ -573,22 +874,28 @@
     return operation;
   }
   function currentRedirectState(lastError = null) {
+    const targetsByTab = {};
+    for (const state of activeTargetsBySession.values()) {
+      if (state.expiresAt != null && state.expiresAt <= Date.now()) continue;
+      const tabKey = String(state.tabId);
+      const existing = targetsByTab[tabKey];
+      if (!existing || (qualityNumber(state.targetQuality) ?? 0) > (qualityNumber(existing) ?? 0)) {
+        targetsByTab[tabKey] = state.targetQuality;
+      }
+    }
     return {
       activeTabIds: [...activeLiveTabIds],
       lastError,
-      targetsByTab: Object.fromEntries(
-        [...activeTargetsByTab.entries()].map(([tabId, targetQuality]) => [String(tabId), targetQuality]),
-      ),
+      targetsByTab,
     };
   }
-  function activeTargetCoversObserved(tabId, observedQuality) {
-    const activeTarget = activeTargetsByTab.get(tabId);
-    const activeTargetNumber = qualityNumber(activeTarget);
+  function activeTargetCoversObserved(state, observedQuality) {
+    const activeTargetNumber = qualityNumber(state?.targetQuality);
     const observedNumber = qualityNumber(observedQuality);
     return Boolean(activeTargetNumber && observedNumber && activeTargetNumber >= observedNumber);
   }
-  function resolvedTargetCoversObserved(tabId, observedQuality) {
-    return resolvedTargetsByTab.has(tabId) && activeTargetCoversObserved(tabId, observedQuality);
+  function resolvedTargetCoversObserved(state, observedQuality) {
+    return Boolean(state?.resolved && activeTargetCoversObserved(state, observedQuality));
   }
   function probeTimeoutMs() {
     const configured = Number(quality_policy_default.probeTimeoutMs ?? 1500);
@@ -606,8 +913,27 @@
     const configured = Number(quality_policy_default.probeMaxBytes ?? 256e3);
     return Number.isFinite(configured) && configured > 0 ? configured : 256e3;
   }
+  function markerEvidenceTtlMs() {
+    const configured = Number(quality_policy_default.markerEvidenceTtlMs ?? 1e4);
+    return Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(configured, MAX_MARKER_EVIDENCE_TTL_MS)
+      : 1e4;
+  }
+  function redirectFailureBackoffMs() {
+    const configured = Number(quality_policy_default.redirectFailureBackoffMs ?? 1e4);
+    return Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(configured, MAX_REDIRECT_FAILURE_BACKOFF_MS)
+      : 1e4;
+  }
   function isLikelyHlsPlaylist(text) {
-    return /^\s*#EXTM3U/m.test(String(text ?? ""));
+    let source = String(text ?? "");
+    if (source.charCodeAt(0) === 65279) source = source.slice(1);
+    for (const line of source.split(/\r\n|[\r\n]/)) {
+      const candidate = line.replace(/^[\t ]+|[\t ]+$/g, "");
+      if (candidate === "") continue;
+      return candidate === "#EXTM3U";
+    }
+    return false;
   }
   function responseHeader(response, name) {
     return response?.headers?.get?.(name) ?? null;
@@ -616,12 +942,25 @@
     const value = Number(responseHeader(response, "content-length") ?? 0);
     return Number.isFinite(value) && value > 0 ? value : 0;
   }
+  function hasRejectedPlaylistContentType(response) {
+    const contentType = String(responseHeader(response, "content-type") ?? "")
+      .split(";", 1)[0]
+      .trim()
+      .toLowerCase();
+    return (
+      contentType === "application/json" ||
+      contentType === "application/xhtml+xml" ||
+      contentType === "text/html" ||
+      contentType === "text/json" ||
+      contentType.endsWith("+json")
+    );
+  }
   async function readResponseTextWithLimit(response, maxBytes) {
     const declaredLength = responseContentLength(response);
     if (declaredLength > maxBytes) return null;
     if (!response?.body?.getReader) {
-      const text = await response.text();
-      return text.length > maxBytes ? null : text;
+      const text = String(await response.text());
+      return new TextEncoder().encode(text).byteLength > maxBytes ? null : text;
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -662,6 +1001,7 @@
         signal: controller.signal,
       });
       if (!response.ok) return null;
+      if (hasRejectedPlaylistContentType(response)) return null;
       const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
       if (!isTrustedRequestDomain(finalUrl, quality_policy_default) || finalUrl !== url) return null;
       const text = await readResponseTextWithLimit(response, probeMaxBytes());
@@ -694,7 +1034,11 @@
     }
     return urlQualityMarkersMatch(evidence.finalUrl, expectedQuality);
   }
-  async function resolveHighestSupportedQuality(details, observedQuality, { signal = null } = {}) {
+  async function resolveHighestSupportedQuality(
+    details,
+    observedQuality,
+    { signal = null, skipTargetQualities = /* @__PURE__ */ new Set() } = {},
+  ) {
     const observedNumber = qualityNumber(observedQuality);
     if (!observedNumber) return null;
     const candidates = normalizeQualityCandidates(quality_policy_default.qualityCandidates, {
@@ -703,29 +1047,38 @@
     });
     for (const candidate of candidates) {
       if (signal?.aborted) return null;
+      if (skipTargetQualities.has(candidate)) continue;
       const candidateNumber = qualityNumber(candidate);
       if (!candidateNumber || candidateNumber < observedNumber) continue;
       const candidateUrl = replaceQualityInUrl(details.url, candidate);
       if (!candidateUrl) continue;
-      if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) return candidate;
-      if (await fetchSupportsExpectedQuality(candidateUrl, candidate, { signal })) return candidate;
+      if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) {
+        return { evidenceKind: "url-marker", targetQuality: candidate };
+      }
+      if (await fetchSupportsExpectedQuality(candidateUrl, candidate, { signal })) {
+        return { evidenceKind: "url-marker", targetQuality: candidate };
+      }
     }
-    return signal?.aborted ? null : observedQuality;
+    return signal?.aborted ? null : { evidenceKind: "url-marker", targetQuality: observedQuality };
   }
   function bestVariantTargetQuality(variant) {
     return variant?.quality ?? (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
   }
-  async function resolveBestVariantFromMaster(details, { signal = null } = {}) {
+  async function resolveBestVariantFromMaster(
+    details,
+    { signal = null, skipTargetQualities = /* @__PURE__ */ new Set() } = {},
+  ) {
     const evidence = await fetchPlaylistEvidence(details.url, { signal });
     if (!evidence || signal?.aborted) return null;
     const variant = chooseBestHlsVariant(evidence.text, evidence.finalUrl, {
+      excludedQualities: [...skipTargetQualities],
       minRedirectQuality: quality_policy_default.minRedirectQuality,
     });
     const targetQuality = bestVariantTargetQuality(variant);
     if (!variant?.url || !targetQuality || !isTrustedRequestDomain(variant.url, quality_policy_default))
       return null;
     if (!urlQualityMarkersMatch(variant.url, targetQuality)) return null;
-    return targetQuality;
+    return { evidenceKind: "master", targetQuality };
   }
   async function updateRedirectDiagnostics(lastError = null) {
     await enqueueDiagnosticsMutation((diagnostics) => {
@@ -752,38 +1105,9 @@
   function requestLiveContext(details) {
     return liveContextKey(details?.documentUrl) ?? liveContextKey(details?.originUrl);
   }
-  function registerRequestContext(details) {
-    const tabId = details?.tabId;
-    if (!isValidRedirectTabId(tabId)) return false;
-    const requestContext = requestLiveContext(details);
-    if (!requestContext) return true;
-    const knownContext = liveContextByTab.get(tabId);
-    if (knownContext && knownContext !== requestContext) {
-      invalidateTabResolution(tabId);
-      activeTargetsByTab.delete(tabId);
-      resolvedTargetsByTab.delete(tabId);
-      liveContextByTab.delete(tabId);
-      activeLiveTabIds.delete(tabId);
-      scheduleRedirectDiagnostics();
-      return false;
-    }
-    if (!knownContext) {
-      currentTabContextToken(tabId);
-      liveContextByTab.set(tabId, requestContext);
-      activeLiveTabIds.add(tabId);
-    }
-    return true;
-  }
   function currentTabContextToken(tabId) {
     if (!tabContextTokenByTab.has(tabId)) tabContextTokenByTab.set(tabId, {});
     return tabContextTokenByTab.get(tabId);
-  }
-  function invalidateTabResolution(tabId, { dropToken = false } = {}) {
-    const activeResolution = resolutionByTab.get(tabId);
-    activeResolution?.controller.abort();
-    resolutionByTab.delete(tabId);
-    tabContextTokenByTab.set(tabId, {});
-    if (dropToken) tabContextTokenByTab.delete(tabId);
   }
   function resolutionContextKey(details) {
     return (
@@ -793,56 +1117,98 @@
       "trusted-request"
     );
   }
+  function playlistSession(details) {
+    const familyKey = playlistFamilyKey(details?.url);
+    if (!familyKey || !isValidRedirectTabId(details?.tabId)) return null;
+    const contextKey = resolutionContextKey(details);
+    const tabId = details.tabId;
+    return {
+      contextKey,
+      familyKey,
+      key: JSON.stringify([tabId, contextKey, familyKey]),
+      tabId,
+    };
+  }
   function resolutionContextIsCurrent(tabId, contextKey) {
     const adoptedContext = liveContextByTab.get(tabId);
     return contextKey === "trusted-request" ? !adoptedContext : adoptedContext === contextKey;
   }
-  function resolutionIsCurrent(tabId, state) {
+  function resolutionIsCurrent(state) {
     return (
-      tabContextTokenByTab.get(tabId) === state.token &&
-      resolutionByTab.get(tabId) === state &&
-      resolutionContextIsCurrent(tabId, state.contextKey)
+      tabContextTokenByTab.get(state.tabId) === state.token &&
+      resolutionBySession.get(state.key) === state &&
+      resolutionContextIsCurrent(state.tabId, state.contextKey)
     );
   }
-  async function setTabTarget(
-    tabId,
-    targetQuality,
-    { contextKey = null, resolved = false, token = null } = {},
-  ) {
-    if (!isValidRedirectTabId(tabId) || !targetQuality) return false;
-    if (token && tabContextTokenByTab.get(tabId) !== token) return false;
-    if (contextKey && !resolutionContextIsCurrent(tabId, contextKey)) return false;
-    const previous = activeTargetsByTab.get(tabId);
-    activeTargetsByTab.set(tabId, targetQuality);
-    if (resolved) resolvedTargetsByTab.add(tabId);
-    if (previous !== targetQuality || resolved) scheduleRedirectDiagnostics();
+  function activeTargetForSession(session) {
+    const state = activeTargetsBySession.get(session.key);
+    if (!state) return null;
+    if (state.expiresAt != null && state.expiresAt <= Date.now()) {
+      activeTargetsBySession.delete(session.key);
+      scheduleRedirectDiagnostics();
+      return null;
+    }
+    return state;
+  }
+  function failedTargetsForSession(session) {
+    const state = failedTargetsBySession.get(session.key);
+    if (!state) return /* @__PURE__ */ new Set();
+    const now = Date.now();
+    for (const [quality, expiresAt] of state.targets) {
+      if (expiresAt <= now) state.targets.delete(quality);
+    }
+    if (state.targets.size === 0) {
+      failedTargetsBySession.delete(session.key);
+      return /* @__PURE__ */ new Set();
+    }
+    return new Set(state.targets.keys());
+  }
+  async function setSessionTarget(session, resolution, token) {
+    const targetQuality = resolution?.targetQuality;
+    if (!targetQuality || tabContextTokenByTab.get(session.tabId) !== token) return false;
+    if (!resolutionContextIsCurrent(session.tabId, session.contextKey)) return false;
+    if (failedTargetsForSession(session).has(targetQuality)) return false;
+    const previous = activeTargetsBySession.get(session.key);
+    activeTargetsBySession.set(session.key, {
+      ...session,
+      evidenceKind: resolution.evidenceKind,
+      expiresAt: resolution.evidenceKind === "url-marker" ? Date.now() + markerEvidenceTtlMs() : null,
+      resolved: true,
+      targetQuality,
+    });
+    if (previous?.targetQuality !== targetQuality || !previous?.resolved) scheduleRedirectDiagnostics();
     return true;
   }
-  function startTabResolution(details, resolver, resolverKind) {
-    const tabId = details.tabId;
-    const contextKey = resolutionContextKey(details);
-    let token = currentTabContextToken(tabId);
-    const existing = resolutionByTab.get(tabId);
-    if (existing?.token === token && existing.contextKey === contextKey) {
+  function invalidateSessionResolution(sessionKey) {
+    const activeResolution = resolutionBySession.get(sessionKey);
+    activeResolution?.controller.abort();
+    resolutionBySession.delete(sessionKey);
+  }
+  function startSessionResolution(details, resolver, resolverKind) {
+    const session = playlistSession(details);
+    if (!session) return Promise.resolve(null);
+    const token = currentTabContextToken(session.tabId);
+    const existing = resolutionBySession.get(session.key);
+    if (existing?.token === token) {
       if (resolverKind !== "master" || existing.resolverKind === "master") return existing.promise;
-      invalidateTabResolution(tabId);
-      token = currentTabContextToken(tabId);
+      invalidateSessionResolution(session.key);
     } else {
       existing?.controller.abort();
     }
     const controller = new AbortController();
     const resolutionTimeout = setTimeout(() => controller.abort(), probeResolutionBudgetMs());
-    const state = { contextKey, controller, promise: null, resolverKind, token };
+    const state = { ...session, controller, promise: null, resolverKind, token };
     state.promise = Promise.resolve()
-      .then(() => resolver({ signal: controller.signal }))
-      .then(async (targetQuality) => {
-        if (!targetQuality || !resolutionIsCurrent(tabId, state)) return null;
-        const stored = await setTabTarget(tabId, targetQuality, {
-          contextKey,
-          resolved: true,
-          token,
-        });
-        return stored ? targetQuality : null;
+      .then(() =>
+        resolver({
+          signal: controller.signal,
+          skipTargetQualities: failedTargetsForSession(session),
+        }),
+      )
+      .then(async (resolution) => {
+        if (!resolution?.targetQuality || !resolutionIsCurrent(state)) return null;
+        const stored = await setSessionTarget(session, resolution, token);
+        return stored ? resolution.targetQuality : null;
       })
       .catch((error) => {
         if (controller.signal.aborted) return null;
@@ -850,9 +1216,9 @@
       })
       .finally(() => {
         clearTimeout(resolutionTimeout);
-        if (resolutionByTab.get(tabId) === state) resolutionByTab.delete(tabId);
+        if (resolutionBySession.get(session.key) === state) resolutionBySession.delete(session.key);
       });
-    resolutionByTab.set(tabId, state);
+    resolutionBySession.set(session.key, state);
     return state.promise;
   }
   async function waitForBlockingResolution(promise) {
@@ -871,62 +1237,216 @@
     }
   }
   function startHighestTargetResolution(details, decision) {
-    return startTabResolution(
+    return startSessionResolution(
       details,
-      ({ signal }) => resolveHighestSupportedQuality(details, decision.quality, { signal }),
+      ({ signal, skipTargetQualities }) =>
+        resolveHighestSupportedQuality(details, decision.quality, { signal, skipTargetQualities }),
       "numeric",
     );
   }
   function startMasterTargetResolution(details) {
-    return startTabResolution(
+    return startSessionResolution(
       details,
-      ({ signal }) => resolveBestVariantFromMaster(details, { signal }),
+      ({ signal, skipTargetQualities }) =>
+        resolveBestVariantFromMaster(details, { signal, skipTargetQualities }),
       "master",
     );
+  }
+  function tabHasQualityState(tabId) {
+    return (
+      [...activeTargetsBySession.values()].some((state) => state.tabId === tabId) ||
+      [...resolutionBySession.values()].some((state) => state.tabId === tabId)
+    );
+  }
+  function dropTabQualityState(tabId, { dropToken = false } = {}) {
+    let hadTarget = false;
+    for (const [key, state] of resolutionBySession) {
+      if (state.tabId !== tabId) continue;
+      state.controller.abort();
+      resolutionBySession.delete(key);
+    }
+    for (const [key, state] of activeTargetsBySession) {
+      if (state.tabId !== tabId) continue;
+      hadTarget = true;
+      activeTargetsBySession.delete(key);
+    }
+    for (const [key, state] of failedTargetsBySession) {
+      if (state.tabId === tabId) failedTargetsBySession.delete(key);
+    }
+    for (const [requestId, state] of redirectedRequestsById) {
+      if (state.tabId === tabId) redirectedRequestsById.delete(requestId);
+    }
+    if (dropToken) {
+      tabContextTokenByTab.delete(tabId);
+    } else {
+      tabContextTokenByTab.set(tabId, {});
+    }
+    return hadTarget;
+  }
+  function registerRequestContext(details) {
+    const tabId = details?.tabId;
+    if (!isValidRedirectTabId(tabId)) return false;
+    if (hasContradictoryChzzkMetadata(details, quality_policy_default)) {
+      removeTabTrustContext(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear contradicted tab trust", error),
+      );
+      return false;
+    }
+    const requestContext = requestLiveContext(details);
+    if (!requestContext) return true;
+    const knownContext = liveContextByTab.get(tabId);
+    if (knownContext && knownContext !== requestContext) {
+      removeTabTrustContext(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear mismatched live context", error),
+      );
+      return false;
+    }
+    if (!knownContext) {
+      const hadUnboundState = tabHasQualityState(tabId);
+      if (hadUnboundState) dropTabQualityState(tabId);
+      currentTabContextToken(tabId);
+      liveContextByTab.set(tabId, requestContext);
+      activeLiveTabIds.add(tabId);
+      if (hadUnboundState) scheduleRedirectDiagnostics();
+    }
+    return true;
   }
   async function prewarmLiveTab(tabId, url = null) {
     if (!isValidRedirectTabId(tabId)) return;
     currentTabContextToken(tabId);
     const nextContext = liveContextKey(url);
     const previousContext = liveContextByTab.get(tabId);
-    const activeResolution = resolutionByTab.get(tabId);
     const hasUnboundState =
       !previousContext &&
-      (activeResolution?.contextKey === "trusted-request" ||
-        activeTargetsByTab.has(tabId) ||
-        resolvedTargetsByTab.has(tabId));
+      ([...resolutionBySession.values()].some(
+        (state) => state.tabId === tabId && state.contextKey === "trusted-request",
+      ) ||
+        [...activeTargetsBySession.values()].some(
+          (state) => state.tabId === tabId && state.contextKey === "trusted-request",
+        ));
     const contextChanged = Boolean(
       nextContext && ((previousContext && previousContext !== nextContext) || hasUnboundState),
     );
-    let hadTarget = false;
-    if (contextChanged) {
-      hadTarget = activeTargetsByTab.delete(tabId);
-      invalidateTabResolution(tabId);
-      resolvedTargetsByTab.delete(tabId);
-    }
+    const hadTarget = contextChanged ? dropTabQualityState(tabId) : false;
     if (nextContext) liveContextByTab.set(tabId, nextContext);
     const previousSize = activeLiveTabIds.size;
     activeLiveTabIds.add(tabId);
     if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
   }
-  async function removeTabTarget(tabId) {
+  async function clearTabQualityState(tabId) {
     if (!isValidRedirectTabId(tabId)) return;
-    invalidateTabResolution(tabId, { dropToken: true });
-    const hadTarget = activeTargetsByTab.delete(tabId);
+    if (dropTabQualityState(tabId)) await updateRedirectDiagnostics();
+  }
+  async function removeTabTrustContext(tabId) {
+    if (!isValidRedirectTabId(tabId)) return;
+    pendingTrustValidationByTab.delete(tabId);
+    const hadTarget = dropTabQualityState(tabId, { dropToken: true });
     const hadLiveTab = activeLiveTabIds.delete(tabId);
     const hadContext = liveContextByTab.delete(tabId);
-    resolvedTargetsByTab.delete(tabId);
     if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
   }
   async function clearRuntimeRedirectState() {
-    for (const state of resolutionByTab.values()) state.controller.abort();
+    for (const state of resolutionBySession.values()) state.controller.abort();
     activeLiveTabIds.clear();
-    activeTargetsByTab.clear();
+    activeTargetsBySession.clear();
+    failedTargetsBySession.clear();
     liveContextByTab.clear();
-    resolutionByTab.clear();
-    resolvedTargetsByTab.clear();
+    pendingTrustValidationByTab.clear();
+    redirectedRequestsById.clear();
+    resolutionBySession.clear();
     tabContextTokenByTab.clear();
     await updateRedirectDiagnostics();
+  }
+  function startReloadTrustValidation(tabId) {
+    if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return null;
+    const validation = { promise: null };
+    pendingTrustValidationByTab.set(tabId, validation);
+    validation.promise = Promise.resolve()
+      .then(() => api.tabs.get(tabId))
+      .then(async (tab) => {
+        if (pendingTrustValidationByTab.get(tabId) !== validation) return false;
+        if (tab?.id === tabId && isChzzkLiveUrl(tab.url, quality_policy_default)) {
+          await prewarmLiveTab(tabId, tab.url);
+          return pendingTrustValidationByTab.get(tabId) === validation;
+        }
+        await removeTabTrustContext(tabId);
+        return false;
+      })
+      .catch(async () => {
+        if (pendingTrustValidationByTab.get(tabId) === validation) {
+          await removeTabTrustContext(tabId);
+        }
+        return false;
+      })
+      .finally(() => {
+        if (pendingTrustValidationByTab.get(tabId) === validation) {
+          pendingTrustValidationByTab.delete(tabId);
+        }
+      });
+    return validation.promise;
+  }
+  async function awaitPendingTrustValidation(tabId) {
+    const validation = pendingTrustValidationByTab.get(tabId);
+    if (!validation?.promise) return true;
+    const timedOut = /* @__PURE__ */ Symbol("tab-trust-validation-timeout");
+    let timeout;
+    try {
+      const result = await Promise.race([
+        validation.promise,
+        new Promise((resolve) => {
+          timeout = setTimeout(() => resolve(timedOut), blockingProbeBudgetMs());
+        }),
+      ]);
+      return result !== timedOut && result === true;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  function rememberRedirectedRequest(details, session, targetQuality) {
+    if (details?.requestId == null || !session || !targetQuality) return;
+    const requestId = String(details.requestId);
+    if (requestId === "" || requestId.length > 128) return;
+    redirectedRequestsById.delete(requestId);
+    redirectedRequestsById.set(requestId, { ...session, targetQuality });
+    while (redirectedRequestsById.size > MAX_TRACKED_REDIRECT_REQUESTS) {
+      redirectedRequestsById.delete(redirectedRequestsById.keys().next().value);
+    }
+  }
+  function invalidateRedirectedTarget(record) {
+    const current = activeTargetsBySession.get(record.key);
+    if (current?.targetQuality === record.targetQuality) activeTargetsBySession.delete(record.key);
+    invalidateSessionResolution(record.key);
+    const failures = failedTargetsBySession.get(record.key) ?? {
+      ...record,
+      targets: /* @__PURE__ */ new Map(),
+    };
+    failures.targets.set(record.targetQuality, Date.now() + redirectFailureBackoffMs());
+    failedTargetsBySession.set(record.key, failures);
+    for (const [requestId, pending] of redirectedRequestsById) {
+      if (pending.key === record.key && pending.targetQuality === record.targetQuality) {
+        redirectedRequestsById.delete(requestId);
+      }
+    }
+    scheduleRedirectDiagnostics();
+  }
+  function handleRedirectCompleted(details) {
+    const requestId = details?.requestId == null ? null : String(details.requestId);
+    if (!requestId) return;
+    const record = redirectedRequestsById.get(requestId);
+    if (!record) return;
+    redirectedRequestsById.delete(requestId);
+    const statusCode = Number(details.statusCode);
+    if (Number.isSafeInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
+      invalidateRedirectedTarget(record);
+    }
+  }
+  function handleRedirectError(details) {
+    const requestId = details?.requestId == null ? null : String(details.requestId);
+    if (!requestId) return;
+    const record = redirectedRequestsById.get(requestId);
+    if (!record) return;
+    redirectedRequestsById.delete(requestId);
+    invalidateRedirectedTarget(record);
   }
   async function recordRequestDiagnostics(details, decision) {
     await enqueueDiagnosticsMutation((current) => {
@@ -935,6 +1455,7 @@
     });
   }
   async function handleRequest(details) {
+    if (!(await awaitPendingTrustValidation(details?.tabId))) return void 0;
     if (!registerRequestContext(details)) return void 0;
     const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default, redirectOptions);
@@ -942,10 +1463,13 @@
     let redirectUrl = null;
     if (decision.ok) {
       try {
-        let targetQuality = activeTargetsByTab.get(decision.tabId);
+        const session = playlistSession(details);
+        let targetState = session ? activeTargetForSession(session) : null;
+        let targetQuality = targetState?.targetQuality ?? null;
         if (!targetQuality) {
           targetQuality = await waitForBlockingResolution(startHighestTargetResolution(details, decision));
-        } else if (!resolvedTargetCoversObserved(decision.tabId, decision.quality)) {
+          targetState = session ? activeTargetForSession(session) : null;
+        } else if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
           startHighestTargetResolution(details, decision).catch((error) => {
             reportRedirectError(error).catch(() => {});
             console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
@@ -960,6 +1484,7 @@
         if (targetQuality) {
           decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
         }
+        if (redirectUrl) rememberRedirectedRequest(details, session, targetQuality);
       } catch (error) {
         scheduleRedirectDiagnostics(String(error?.message ?? error));
         console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
@@ -977,22 +1502,26 @@
     }
     return redirectUrl ? { redirectUrl } : void 0;
   }
+  var WEB_REQUEST_FILTER = {
+    urls: WEB_REQUEST_URLS,
+    types: configuredResourceTypes(quality_policy_default),
+  };
   api.webRequest.onBeforeRequest.addListener(
     (details) =>
       handleRequest(details).catch((error) => {
         console.warn("[CHZZK] diagnostics/redirect handling failed", error);
         return void 0;
       }),
-    {
-      urls: WEB_REQUEST_URLS,
-      types: configuredResourceTypes(quality_policy_default),
-    },
+    WEB_REQUEST_FILTER,
     ["blocking"],
   );
+  api.webRequest.onCompleted?.addListener(handleRedirectCompleted, WEB_REQUEST_FILTER);
+  api.webRequest.onErrorOccurred?.addListener(handleRedirectError, WEB_REQUEST_FILTER);
   async function prewarmMessageTab(tabId) {
     if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return;
     const currentTab = await api.tabs.get(tabId);
     if (currentTab?.id !== tabId || !isChzzkLiveUrl(currentTab.url, quality_policy_default)) return;
+    pendingTrustValidationByTab.delete(tabId);
     await prewarmLiveTab(tabId, currentTab.url);
   }
   api.runtime.onMessage?.addListener((message, sender) => {
@@ -1028,21 +1557,32 @@
   }
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     if (changeInfo?.status === "loading") {
-      removeTabTarget(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to clear tab target for document load", error),
+      clearTabQualityState(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear tab quality state for document load", error),
       );
+      if (!changeInfo?.url) {
+        startReloadTrustValidation(tabId)?.catch((error) =>
+          console.warn("[CHZZK] failed to validate tab trust after document load", error),
+        );
+        return;
+      }
     }
     if (!changeInfo?.url) return;
+    pendingTrustValidationByTab.delete(tabId);
     if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
       prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
         console.warn("[CHZZK] failed to prewarm live tab from URL update", error),
       );
       return;
     }
-    removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to clear tab target", error));
+    removeTabTrustContext(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to clear tab trust context", error),
+    );
   });
   api.tabs?.onRemoved?.addListener((tabId) => {
-    removeTabTarget(tabId).catch((error) => console.warn("[CHZZK] failed to remove tab target", error));
+    removeTabTrustContext(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to remove tab trust context", error),
+    );
   });
   api.runtime.onInstalled?.addListener(() => {
     resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
