@@ -48,6 +48,10 @@ describe("release and repository security guardrails", () => {
     }
 
     const release = workflow("sign-unlisted.yml");
+    assert.deepEqual(release.jobs.prepare.permissions, {
+      attestations: "read",
+      contents: "read",
+    });
     assert.deepEqual(release.jobs.sign.permissions, { actions: "read" });
     assert.deepEqual(release.jobs.attest.permissions, {
       actions: "read",
@@ -64,6 +68,26 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(signText, /actions\/checkout|npm ci|npm install/);
     assert.doesNotMatch(attestText, /secrets\.|actions\/checkout|npm ci|npm install|node scripts/);
     assert.doesNotMatch(publishText, /secrets\.|actions\/checkout|npm ci|npm install|node scripts/);
+
+    const prepareSteps = release.jobs.prepare.steps;
+    const preparationIndex = prepareSteps.findIndex((step) => step.run === "npm run prepare:release");
+    const signerAnchorIndex = prepareSteps.findIndex(
+      (step) => step.name === "Anchor signer code to the protected commit",
+    );
+    assert.notEqual(preparationIndex, -1);
+    assert.equal(signerAnchorIndex > preparationIndex, true);
+    const signerAnchor = prepareSteps[signerAnchorIndex].run;
+    assert.match(signerAnchor, /git show "\$GITHUB_SHA:scripts\/sign-unlisted\.js"/);
+    assert.match(signerAnchor, /git show "\$GITHUB_SHA:scripts\/lib\/amo-client\.js"/);
+    const releasePreparation = prepareSteps.find((step) => step.id === "release").run;
+    assert.match(
+      releasePreparation,
+      /SIGNER_SHA=\$\(git show "\$GITHUB_SHA:scripts\/sign-unlisted\.js" \| sha256sum/,
+    );
+    assert.match(
+      releasePreparation,
+      /CLIENT_SHA=\$\(git show "\$GITHUB_SHA:scripts\/lib\/amo-client\.js" \| sha256sum/,
+    );
   });
 
   it("keeps releases immutable and treats an exact rerun as verified reuse", () => {
@@ -75,6 +99,8 @@ describe("release and repository security guardrails", () => {
     assert.match(text, /gh release edit "\$TAG" --draft=false/);
     assert.match(text, /--json isDraft/);
     assert.match(text, /--json isPrerelease/);
+    assert.match(text, /--source-digest "\$GITHUB_SHA"/);
+    assert.match(text, /--signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/sign-unlisted\.yml"/);
     assert.match(text, /git diff --cached --exit-code/);
     assert.doesNotMatch(text, /--clobber|gh release upload|gh release edit "\$TAG" --target/);
     assert.match(text, /github\.ref_protected == true/);

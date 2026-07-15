@@ -2,7 +2,6 @@ export const QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
 export const DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
 
 const QUALITY_PATH_MARKER_SOURCE = String.raw`(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)`;
-const PATH_QUALITY_RE = new RegExp(QUALITY_PATH_MARKER_SOURCE, "i");
 const RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
 const TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
 
@@ -25,8 +24,8 @@ export function qualityNumber(label) {
   return match ? Number(match[1]) : null;
 }
 
-export function parseQualityFromUrl(url) {
-  if (typeof url !== "string") return null;
+export function parseQualitiesFromUrl(url) {
+  if (typeof url !== "string") return [];
   let pathname = url;
 
   try {
@@ -35,8 +34,13 @@ export function parseQualityFromUrl(url) {
     pathname = url.split("?")[0].split("#")[0];
   }
 
-  const pathQuality = pathname.match(PATH_QUALITY_RE);
-  return pathQuality ? normalizeQualityLabel(pathQuality[1]) : null;
+  return [...pathname.matchAll(new RegExp(QUALITY_PATH_MARKER_SOURCE, "gi"))]
+    .map((match) => normalizeQualityLabel(match[1]))
+    .filter(Boolean);
+}
+
+export function parseQualityFromUrl(url) {
+  return parseQualitiesFromUrl(url)[0] ?? null;
 }
 
 export function redactMediaUrl(url) {

@@ -6,7 +6,7 @@ const AMO_API_ROOT = "https://addons.mozilla.org/api/v5/";
 const AMO_DOWNLOAD_DOMAIN = "addons.mozilla.org";
 const MAX_SIGNED_XPI_BYTES = 100 * 1024 * 1024;
 const MAX_SIGNED_XPI_REDIRECT_HOPS = 5;
-const MAX_WAIT_MS = 20 * 60 * 1000;
+const MAX_WAIT_MS = 10 * 60 * 1000;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 
 function sha256(bytes) {
@@ -81,17 +81,71 @@ function sleep(delayMs) {
   return delayMs > 0 ? new Promise((resolve) => setTimeout(resolve, delayMs)) : Promise.resolve();
 }
 
-async function fetchSignedXpi(fetchImpl, initialUrl) {
+function timeoutError(operation) {
+  const error = new Error(`AMO ${operation} timed out`);
+  error.code = "AMO_TIMEOUT";
+  return error;
+}
+
+async function withDeadline(operationPromise, deadline, operation, onTimeout = () => {}) {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw timeoutError(operation);
+  let timeout;
+  try {
+    return await Promise.race([
+      Promise.resolve(operationPromise),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(timeoutError(operation));
+          try {
+            onTimeout();
+          } catch {
+            // The deadline error remains authoritative.
+          }
+        }, remainingMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchWithDeadline(fetchImpl, url, options, deadline, operation) {
+  const controller = new AbortController();
+  return withDeadline(
+    Promise.resolve().then(() => fetchImpl(url, { ...options, signal: controller.signal })),
+    deadline,
+    operation,
+    () => controller.abort(),
+  );
+}
+
+function cancelResponseBody(response) {
+  try {
+    const cancellation = response?.body?.cancel?.();
+    if (cancellation && typeof cancellation.catch === "function") cancellation.catch(() => {});
+  } catch {
+    // The deadline error remains authoritative.
+  }
+}
+
+async function fetchSignedXpi(fetchImpl, initialUrl, deadline) {
   let currentUrl = String(initialUrl);
   for (let hop = 0; hop <= MAX_SIGNED_XPI_REDIRECT_HOPS; hop += 1) {
     if (!isAllowedAmoDownloadUrl(currentUrl)) {
       throw new Error("AMO signed download left the trusted download domain");
     }
-    const response = await fetchImpl(currentUrl, {
-      headers: new Headers({ Accept: "application/octet-stream" }),
-      method: "GET",
-      redirect: "manual",
-    });
+    const response = await fetchWithDeadline(
+      fetchImpl,
+      currentUrl,
+      {
+        headers: new Headers({ Accept: "application/octet-stream" }),
+        method: "GET",
+        redirect: "manual",
+      },
+      deadline,
+      "signed download",
+    );
     const status = Number(response?.status ?? 0);
     if (status >= 300 && status < 400) {
       if (hop >= MAX_SIGNED_XPI_REDIRECT_HOPS) {
@@ -121,11 +175,14 @@ function atomicWrite(path, bytes) {
   chmodSync(path, 0o600);
 }
 
-async function readJsonResponse(response, operation) {
+async function readJsonResponse(response, operation, deadline) {
   if (!response?.ok) throw new Error(`AMO ${operation} failed with HTTP ${response?.status ?? "unknown"}`);
   try {
-    return await response.json();
-  } catch {
+    return await withDeadline(response.json(), deadline, `${operation} response`, () =>
+      cancelResponseBody(response),
+    );
+  } catch (error) {
+    if (error.code === "AMO_TIMEOUT") throw error;
     throw new Error(`AMO ${operation} returned invalid JSON`);
   }
 }
@@ -142,10 +199,97 @@ function validateMetadata(metadata, sourceArchivePath) {
   }
 }
 
+function versionListUrl(metadata) {
+  const url = new URL(`${AMO_API_ROOT}addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`);
+  url.searchParams.set("filter", "all_with_unlisted");
+  return url;
+}
+
+function assertReusableUnlistedVersion(version, metadata) {
+  if (!version || typeof version !== "object") throw new Error("AMO returned an invalid existing version");
+  if (version.version !== metadata.version)
+    throw new Error("AMO existing version does not match release metadata");
+  if (version.channel !== "unlisted") throw new Error("AMO existing version is not unlisted");
+  if (!/^\d+$/.test(String(version.id ?? ""))) throw new Error("AMO existing version is missing a valid ID");
+  return version;
+}
+
+function versionIdentity(version) {
+  const nested = version?.version && typeof version.version === "object" ? version.version : null;
+  return {
+    channel: version?.channel ?? nested?.channel,
+    file: version?.file ?? nested?.file,
+    id: version?.id ?? nested?.id,
+    version: typeof version?.version === "string" ? version.version : nested?.version,
+  };
+}
+
+function assertSubmittedVersion(version, metadata) {
+  if (!version || typeof version !== "object") throw new Error("AMO returned an invalid submitted version");
+  const identity = versionIdentity(version);
+  if (identity.version !== metadata.version) {
+    throw new Error("AMO submitted version does not match release metadata");
+  }
+  if (identity.channel != null && identity.channel !== "unlisted") {
+    throw new Error("AMO submitted version is not unlisted");
+  }
+  if (!/^\d+$/.test(String(identity.id ?? ""))) {
+    throw new Error("AMO version response omitted a valid version ID");
+  }
+  return identity;
+}
+
+function assertApprovedUnlistedVersion(version, metadata, expectedVersionId) {
+  if (!version || typeof version !== "object") throw new Error("AMO returned an invalid approved version");
+  const identity = versionIdentity(version);
+  if (identity.version !== metadata.version) {
+    throw new Error("AMO approved version does not match release metadata");
+  }
+  if (identity.channel !== "unlisted") throw new Error("AMO approved version is not unlisted");
+  if (String(identity.id ?? "") !== String(expectedVersionId)) {
+    throw new Error("AMO approved version ID changed during polling");
+  }
+  return identity;
+}
+
+async function findExistingUnlistedVersion({ authorizedFetch, deadline, metadata }) {
+  let nextUrl = versionListUrl(metadata);
+  const visited = new Set();
+  let targetVersion = null;
+  for (let page = 0; page < 100 && nextUrl; page += 1) {
+    const pageUrl = new URL(nextUrl);
+    if (visited.has(pageUrl.href)) throw new Error("AMO version-list pagination loop detected");
+    visited.add(pageUrl.href);
+
+    const response = await readJsonResponse(
+      await authorizedFetch(pageUrl, { method: "GET" }, "version-list lookup"),
+      "version-list lookup",
+      deadline,
+    );
+    if (!Array.isArray(response?.results)) {
+      throw new Error("AMO version-list lookup returned an invalid result set");
+    }
+    const matches = response.results.filter((version) => version?.version === metadata.version);
+    if (matches.length > 1) throw new Error("AMO returned duplicate target versions");
+    if (matches.length === 1) {
+      if (targetVersion) throw new Error("AMO returned duplicate target versions");
+      targetVersion = assertReusableUnlistedVersion(matches[0], metadata);
+    }
+
+    if (response.next == null) return targetVersion;
+    if (typeof response.next !== "string" || !response.next) {
+      throw new Error("AMO version-list lookup returned an invalid next page");
+    }
+    nextUrl = new URL(response.next, pageUrl);
+  }
+  throw new Error("AMO version-list lookup exceeded the pagination limit");
+}
+
 export async function signPreparedAddon({
   apiKey,
   apiSecret,
   fetchImpl = globalThis.fetch,
+  maxWaitMs = MAX_WAIT_MS,
   metadata,
   outputDir,
   pollIntervalMs = 5000,
@@ -154,6 +298,9 @@ export async function signPreparedAddon({
   validateCredential("AMO API key", apiKey);
   validateCredential("AMO API secret", apiSecret);
   if (typeof fetchImpl !== "function") throw new Error("fetch implementation is unavailable");
+  if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 1 || maxWaitMs > MAX_WAIT_MS) {
+    throw new Error("AMO signing timeout is invalid");
+  }
   if (!outputDir || !sourceArchivePath) throw new Error("outputDir and sourceArchivePath are required");
   validateMetadata(metadata, sourceArchivePath);
   assertRegularPrivateInput(sourceArchivePath);
@@ -162,76 +309,111 @@ export async function signPreparedAddon({
     throw new Error("Prepared archive digest does not match release metadata");
   }
   mkdirSync(outputDir, { mode: 0o700, recursive: true });
+  const deadline = Date.now() + maxWaitMs;
 
-  const authorizedFetch = (url, options = {}) => {
+  const authorizedFetch = (url, options = {}, operation = "API request") => {
     if (!isAllowedAmoApiUrl(url)) throw new Error("Refusing to send AMO authorization outside the API root");
     const headers = new Headers(options.headers ?? {});
     headers.set("Authorization", `JWT ${makeJwt(apiKey, apiSecret)}`);
     headers.set("Accept", "application/json");
-    return fetchImpl(url, { ...options, headers, redirect: "error" });
+    return fetchWithDeadline(fetchImpl, url, { ...options, headers, redirect: "error" }, deadline, operation);
   };
 
-  const uploadBody = new FormData();
-  uploadBody.set("channel", "unlisted");
-  uploadBody.set("upload", new File([sourceBytes], metadata.sourceArchive.name, { type: "application/zip" }));
-  const upload = await readJsonResponse(
-    await authorizedFetch(new URL("addons/upload/", AMO_API_ROOT), { method: "POST", body: uploadBody }),
-    "upload",
-  );
-  if (typeof upload.uuid !== "string" || !upload.uuid)
-    throw new Error("AMO upload response omitted its UUID");
-
-  const validationDeadline = Date.now() + MAX_WAIT_MS;
-  let validation;
-  do {
-    if (Date.now() > validationDeadline) throw new Error("AMO validation timed out");
-    validation = await readJsonResponse(
-      await authorizedFetch(new URL(`addons/upload/${encodeURIComponent(upload.uuid)}/`, AMO_API_ROOT)),
-      "validation",
+  const existingVersion = await findExistingUnlistedVersion({ authorizedFetch, deadline, metadata });
+  let version = existingVersion;
+  if (!version) {
+    const uploadBody = new FormData();
+    uploadBody.set("channel", "unlisted");
+    uploadBody.set(
+      "upload",
+      new File([sourceBytes], metadata.sourceArchive.name, { type: "application/zip" }),
     );
-    if (!validation.processed) await sleep(pollIntervalMs);
-  } while (!validation.processed);
-  if (!validation.valid) throw new Error("AMO rejected the prepared extension archive");
+    const upload = await readJsonResponse(
+      await authorizedFetch(
+        new URL("addons/upload/", AMO_API_ROOT),
+        {
+          method: "POST",
+          body: uploadBody,
+        },
+        "upload",
+      ),
+      "upload",
+      deadline,
+    );
+    if (typeof upload.uuid !== "string" || !upload.uuid) {
+      throw new Error("AMO upload response omitted its UUID");
+    }
 
-  const submission = await readJsonResponse(
-    await authorizedFetch(
-      new URL(`addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`, AMO_API_ROOT),
-      {
-        body: JSON.stringify({ upload: upload.uuid }),
-        headers: { "Content-Type": "application/json" },
-        method: "POST",
-      },
-    ),
-    "submission",
-  );
-  const versionId = submission?.id ?? submission?.version?.id;
-  if (!Number.isSafeInteger(versionId) && typeof versionId !== "string") {
-    throw new Error("AMO submission response omitted its version ID");
+    let validation;
+    do {
+      validation = await readJsonResponse(
+        await authorizedFetch(
+          new URL(`addons/upload/${encodeURIComponent(upload.uuid)}/`, AMO_API_ROOT),
+          {},
+          "validation",
+        ),
+        "validation",
+        deadline,
+      );
+      if (!validation.processed) {
+        await withDeadline(sleep(pollIntervalMs), deadline, "validation");
+      }
+    } while (!validation.processed);
+    if (!validation.valid) throw new Error("AMO rejected the prepared extension archive");
+
+    version = await readJsonResponse(
+      await authorizedFetch(
+        new URL(`addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`, AMO_API_ROOT),
+        {
+          body: JSON.stringify({ upload: upload.uuid }),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        },
+        "submission",
+      ),
+      "submission",
+      deadline,
+    );
   }
 
-  const approvalDeadline = Date.now() + MAX_WAIT_MS;
-  let downloadUrl;
-  do {
-    if (Date.now() > approvalDeadline) throw new Error("AMO signing approval timed out");
-    const version = await readJsonResponse(
+  const initialIdentity = existingVersion
+    ? versionIdentity(assertReusableUnlistedVersion(existingVersion, metadata))
+    : assertSubmittedVersion(version, metadata);
+  const versionId = initialIdentity.id;
+  let downloadUrl =
+    existingVersion &&
+    initialIdentity.file?.status === "public" &&
+    typeof initialIdentity.file.url === "string"
+      ? initialIdentity.file.url
+      : undefined;
+  while (!downloadUrl) {
+    const approvedVersion = await readJsonResponse(
       await authorizedFetch(
         new URL(
           `addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/${encodeURIComponent(versionId)}/`,
           AMO_API_ROOT,
         ),
+        {},
+        "approval polling",
       ),
       "approval polling",
+      deadline,
     );
-    if (version?.file?.status === "public" && typeof version.file.url === "string") {
-      downloadUrl = version.file.url;
+    const approvedIdentity = assertApprovedUnlistedVersion(approvedVersion, metadata, versionId);
+    if (approvedIdentity.file?.status === "public" && typeof approvedIdentity.file.url === "string") {
+      downloadUrl = approvedIdentity.file.url;
       break;
     }
-    await sleep(pollIntervalMs);
-  } while (!downloadUrl);
+    await withDeadline(sleep(pollIntervalMs), deadline, "signing approval");
+  }
   if (!isAllowedAmoDownloadUrl(downloadUrl)) throw new Error("AMO returned an untrusted signed download URL");
 
-  const signedResponse = await fetchSignedXpi(fetchImpl, downloadUrl);
-  const signedBytes = Buffer.from(await signedResponse.arrayBuffer());
+  const signedResponse = await fetchSignedXpi(fetchImpl, downloadUrl, deadline);
+  const signedBytes = Buffer.from(
+    await withDeadline(signedResponse.arrayBuffer(), deadline, "signed download response", () =>
+      cancelResponseBody(signedResponse),
+    ),
+  );
   if (signedBytes.length <= 0 || signedBytes.length > MAX_SIGNED_XPI_BYTES) {
     throw new Error("AMO signed XPI size is invalid");
   }

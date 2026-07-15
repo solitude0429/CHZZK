@@ -20,6 +20,7 @@ import {
   chooseBestHlsVariant,
   normalizeQualityCandidates,
   parseHlsMasterPlaylistVariants,
+  parseQualitiesFromUrl,
   parseQualityFromUrl,
   qualityNumber,
   replaceQualityInUrl,
@@ -214,6 +215,11 @@ async function fetchPlaylistEvidence(url, { signal = null } = {}) {
   }
 }
 
+function urlQualityMarkersMatch(url, expectedQuality) {
+  const qualities = parseQualitiesFromUrl(url);
+  return qualities.length > 0 && qualities.every((quality) => quality === expectedQuality);
+}
+
 async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
   const evidence = await fetchPlaylistEvidence(url, { signal });
   if (!evidence) return false;
@@ -225,12 +231,12 @@ async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = nul
         variantQuality === expectedQuality &&
         typeof variant.url === "string" &&
         isTrustedRequestDomain(variant.url, policy) &&
-        parseQualityFromUrl(variant.url) === expectedQuality
+        urlQualityMarkersMatch(variant.url, expectedQuality)
       );
     });
   }
 
-  return parseQualityFromUrl(evidence.finalUrl) === expectedQuality;
+  return urlQualityMarkersMatch(evidence.finalUrl, expectedQuality);
 }
 
 async function resolveHighestSupportedQuality(details, observedQuality, { signal = null } = {}) {
@@ -269,7 +275,7 @@ async function resolveBestVariantFromMaster(details, { signal = null } = {}) {
   });
   const targetQuality = bestVariantTargetQuality(variant);
   if (!variant?.url || !targetQuality || !isTrustedRequestDomain(variant.url, policy)) return null;
-  if (parseQualityFromUrl(variant.url) !== targetQuality) return null;
+  if (!urlQualityMarkersMatch(variant.url, targetQuality)) return null;
   return targetQuality;
 }
 
@@ -593,8 +599,12 @@ async function prewarmExistingLiveTabs() {
 }
 
 async function resetAndPrewarmRuntimeState() {
-  await clearRuntimeRedirectState();
-  await prewarmExistingLiveTabs();
+  await Promise.all([
+    clearRuntimeRedirectState().catch((error) =>
+      console.warn("[CHZZK] failed to persist startup redirect cleanup", error),
+    ),
+    prewarmExistingLiveTabs(),
+  ]);
 }
 
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {

@@ -303,6 +303,21 @@ chunklist_360p.m3u8?Policy=redacted
     assert.equal(redirect, undefined, "candidate master evidence must contain the requested quality");
   });
 
+  it("rejects master evidence whose pathname contains conflicting quality markers", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const conflictingMaster = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=12000000,RESOLUTION=3840x2160
+https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_360p.m3u8?Policy=redacted
+`;
+    const { listeners } = await loadBackground({
+      responsesByUrl: new Map([[requested2160, conflictingMaster]]),
+    });
+
+    const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(427));
+    assert.equal(redirect, undefined, "every meaningful pathname quality marker must agree");
+  });
+
   it("does not restore a stale target after navigating to another live channel", async () => {
     const pendingFetch = deferred();
     const { fetches, listeners, storage } = await loadBackground({
@@ -506,6 +521,31 @@ chunklist_360p.m3u8?Policy=redacted
       redirect.redirectUrl,
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
     );
+  });
+
+  it("prewarms already-open live tabs even when startup diagnostics storage fails", async () => {
+    const { listeners, tabQueries } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      existingLiveTabs: [{ id: 89, url: "https://chzzk.naver.com/live/example-channel" }],
+      storageSetImplementation: async () => {
+        throw new Error("synthetic startup storage failure");
+      },
+    });
+
+    listeners.onStartup();
+    await waitForDiagnosticsQueue();
+
+    assert.deepEqual(plain(tabQueries), [{ url: ["https://*.chzzk.naver.com/live/*"] }]);
+    const redirect = plain(
+      await listeners.onBeforeRequest({
+        ...firstLowQualityRequest(89),
+        documentUrl: undefined,
+        initiator: undefined,
+        originUrl: undefined,
+        url: "https://example.pstatic.net/video/chunklist_480p.m3u8?Policy=redacted",
+      }),
+    );
+    assert.match(redirect.redirectUrl, /chunklist_1080p\.m3u8/);
   });
 
   it("uses master-playlist scoring to choose the target quality while preserving live playlist URL shape", async () => {

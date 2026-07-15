@@ -14,6 +14,7 @@ jobs:
   prepare:
     if: github.ref == 'refs/heads/main' && github.ref_protected == true
     permissions:
+      attestations: read
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -45,6 +46,14 @@ jobs:
         env:
           CHZZK_SOURCE_DIGEST: ${{ github.sha }}
           CHZZK_SOURCE_REPOSITORY: ${{ github.repository }}
+      - name: Anchor signer code to the protected commit
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          cmp scripts/sign-unlisted.js <(git show "$GITHUB_SHA:scripts/sign-unlisted.js")
+          cmp scripts/lib/amo-client.js <(git show "$GITHUB_SHA:scripts/lib/amo-client.js")
       - id: release
         name: Verify prepared input and detect an immutable existing release
         env:
@@ -58,8 +67,8 @@ jobs:
           SIGNED="dist/release/chzzk-${VERSION}-signed.xpi"
           SOURCE_SHA=$(sha256sum "$SOURCE" | cut -d ' ' -f1)
           METADATA_SHA=$(sha256sum "$METADATA" | cut -d ' ' -f1)
-          SIGNER_SHA=$(sha256sum scripts/sign-unlisted.js | cut -d ' ' -f1)
-          CLIENT_SHA=$(sha256sum scripts/lib/amo-client.js | cut -d ' ' -f1)
+          SIGNER_SHA=$(git show "$GITHUB_SHA:scripts/sign-unlisted.js" | sha256sum | cut -d ' ' -f1)
+          CLIENT_SHA=$(git show "$GITHUB_SHA:scripts/lib/amo-client.js" | sha256sum | cut -d ' ' -f1)
           REUSE=false
           SIGNED_SHA=""
 
@@ -87,6 +96,7 @@ jobs:
             for ASSET in existing/*; do
               gh attestation verify "$ASSET" \
                 --repo "$GITHUB_REPOSITORY" \
+                --source-digest "$GITHUB_SHA" \
                 --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
             done
             cp "existing/chzzk-${VERSION}-signed.xpi" "$SIGNED"
@@ -256,7 +266,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           VERSION="${{ needs.prepare.outputs.version }}"
           TAG="v${VERSION}"
           SOURCE="release-assets/chzzk-${VERSION}.zip"
@@ -299,22 +309,23 @@ jobs:
 
           CREATED_DRAFT=false
           cleanup_draft() {
-            if [ "$CREATED_DRAFT" = "true" ]; then
+            DRAFT_STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
+            if [ "$CREATED_DRAFT" = "true" ] && [ "$DRAFT_STATE" = "true" ]; then
               gh release delete "$TAG" --cleanup-tag --yes || true
             fi
           }
           trap cleanup_draft ERR
+          CREATED_DRAFT=true
           gh release create "$TAG" "$SOURCE" "$METADATA" "$SIGNED" \
             --draft \
             --generate-notes \
             --target "$GITHUB_SHA" \
             --title "CHZZK ${VERSION}"
-          CREATED_DRAFT=true
           verify_existing_release true
           gh release edit "$TAG" --draft=false
-          verify_existing_release false
           CREATED_DRAFT=false
           trap - ERR
+          verify_existing_release false
 
   complete:
     needs: [attest, prepare, publish, sign, verify-signed]

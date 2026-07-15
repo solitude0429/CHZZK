@@ -15,6 +15,7 @@ import {
 } from "../../scripts/lib/release-artifacts.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+const SYNTHETIC_AMO_CREDENTIAL = ["synthetic", "credential", "value"].join("-");
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -43,6 +44,36 @@ function syntheticMetadata(sourceArchiveSha256) {
     updateManifestUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
     version: "0.1.4",
   };
+}
+
+function makeAmoInput(prefix = "chzzk-amo-review-") {
+  const outputDir = mkdtempSync(join(tmpdir(), prefix));
+  const sourceArchivePath = join(outputDir, "chzzk-0.1.4.zip");
+  const sourceBytes = Buffer.from("synthetic deterministic source archive");
+  writeFileSync(sourceArchivePath, sourceBytes, { mode: 0o600 });
+  return {
+    cleanup() {
+      rmSync(outputDir, { force: true, recursive: true });
+    },
+    metadata: syntheticMetadata(sha256(sourceBytes)),
+    outputDir,
+    sourceArchivePath,
+  };
+}
+
+async function assertControlledAmoTimeout(operation) {
+  let guardTimer;
+  const guard = new Promise((_, reject) => {
+    guardTimer = setTimeout(
+      () => reject(new Error("test guard expired before a controlled AMO timeout")),
+      250,
+    );
+  });
+  try {
+    await assert.rejects(Promise.race([operation, guard]), /AMO .*timed out/i);
+  } finally {
+    clearTimeout(guardTimer);
+  }
 }
 
 describe("immutable release preparation", () => {
@@ -198,7 +229,15 @@ describe("minimal AMO signing client", () => {
 
     const fetchImpl = async (url, options = {}) => {
       requests.push({ options, url: String(url) });
-      const path = new URL(url).pathname;
+      const parsedUrl = new URL(url);
+      const path = parsedUrl.pathname;
+      if (
+        path.endsWith(`/addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`) &&
+        options.method === "GET"
+      ) {
+        assert.equal(parsedUrl.searchParams.get("filter"), "all_with_unlisted");
+        return Response.json({ next: null, results: [] });
+      }
       if (path.endsWith("/addons/upload/") && options.method === "POST") {
         const upload = options.body.get("upload");
         assert.equal(upload.name, "chzzk-0.1.4.zip");
@@ -225,7 +264,10 @@ describe("minimal AMO signing client", () => {
       if (path.endsWith("/versions/1234/")) {
         approvalPolls += 1;
         return Response.json({
+          channel: "unlisted",
           file: { status: "public", url: "https://addons.mozilla.org/firefox/downloads/file/synthetic.xpi" },
+          id: 1234,
+          version: metadata.version,
         });
       }
       if (path.endsWith("/firefox/downloads/file/synthetic.xpi")) {
@@ -257,6 +299,13 @@ describe("minimal AMO signing client", () => {
       assert.deepEqual(readFileSync(result.signedXpiPath), Buffer.from("synthetic signed xpi"));
       assert.equal(validationPolls, 1);
       assert.equal(approvalPolls, 1);
+      assert.equal(
+        new URL(requests[0].url).pathname.endsWith(
+          `/addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`,
+        ),
+        true,
+        "the client must detect an existing target version before creating a new upload",
+      );
       const apiRequests = requests.filter(({ url }) => new URL(url).pathname.startsWith("/api/v5/"));
       const downloadRequests = requests.filter(({ url }) => !new URL(url).pathname.startsWith("/api/v5/"));
       assert.equal(
@@ -282,6 +331,334 @@ describe("minimal AMO signing client", () => {
       );
     } finally {
       rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("resumes an existing unlisted target version without creating another upload", async () => {
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-amo-resume-"));
+    const sourceArchivePath = join(outputDir, "chzzk-0.1.4.zip");
+    const sourceBytes = Buffer.from("synthetic deterministic source archive");
+    writeFileSync(sourceArchivePath, sourceBytes, { mode: 0o600 });
+    const metadata = syntheticMetadata(sha256(sourceBytes));
+    const requests = [];
+
+    const fetchImpl = async (url, options = {}) => {
+      requests.push({ options, url: String(url) });
+      const parsedUrl = new URL(url);
+      if (
+        parsedUrl.pathname.endsWith(`/addons/addon/${encodeURIComponent(metadata.addOnId)}/versions/`) &&
+        options.method === "GET"
+      ) {
+        assert.equal(parsedUrl.searchParams.get("filter"), "all_with_unlisted");
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: {
+                status: "public",
+                url: "https://addons.mozilla.org/firefox/downloads/file/resumed.xpi",
+              },
+              id: 5678,
+              version: metadata.version,
+            },
+          ],
+        });
+      }
+      if (parsedUrl.pathname.endsWith("/firefox/downloads/file/resumed.xpi")) {
+        return new Response(Buffer.from("resumed signed xpi"), { status: 200 });
+      }
+      return new Response("unexpected request", { status: 404 });
+    };
+
+    try {
+      const result = await signPreparedAddon({
+        apiKey: "synthetic-key",
+        apiSecret: "synthetic-secret",
+        fetchImpl,
+        metadata,
+        outputDir,
+        pollIntervalMs: 0,
+        sourceArchivePath,
+      });
+
+      assert.deepEqual(readFileSync(result.signedXpiPath), Buffer.from("resumed signed xpi"));
+      assert.equal(
+        requests.some(({ url }) => new URL(url).pathname.endsWith("/addons/upload/")),
+        false,
+      );
+      assert.equal(
+        requests.some(({ options }) => options.method === "POST"),
+        false,
+      );
+      assert.equal(requests.length, 2);
+    } finally {
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects listed or wrong-version submission records before polling", async () => {
+    for (const invalidSubmission of [
+      { channel: "listed", version: "0.1.4" },
+      { channel: "unlisted", version: "9.9.9" },
+    ]) {
+      const input = makeAmoInput();
+      let followupRequests = 0;
+      const fetchImpl = async (url, options = {}) => {
+        const parsedUrl = new URL(url);
+        const path = parsedUrl.pathname;
+        if (path.endsWith(`/addons/addon/${encodeURIComponent(input.metadata.addOnId)}/versions/`)) {
+          if (options.method === "GET") return Response.json({ next: null, results: [] });
+          return Response.json({
+            ...invalidSubmission,
+            file: { status: "public", url: "https://addons.mozilla.org/firefox/downloads/file/invalid.xpi" },
+            id: 1234,
+          });
+        }
+        if (path.endsWith("/addons/upload/") && options.method === "POST") {
+          return Response.json({ uuid: "synthetic-upload" });
+        }
+        if (path.endsWith("/addons/upload/synthetic-upload/")) {
+          return Response.json({ processed: true, valid: true });
+        }
+        followupRequests += 1;
+        return new Response("unexpected request", { status: 404 });
+      };
+      try {
+        await assert.rejects(
+          signPreparedAddon({
+            apiKey: SYNTHETIC_AMO_CREDENTIAL,
+            apiSecret: "synthetic-secret",
+            fetchImpl,
+            ...input,
+            pollIntervalMs: 0,
+          }),
+          /unlisted|release metadata|version/i,
+        );
+        assert.equal(followupRequests, 0);
+      } finally {
+        input.cleanup();
+      }
+    }
+  });
+
+  it("rejects listed or wrong-version approval records before downloading", async () => {
+    for (const invalidApproval of [
+      { channel: "listed", version: "0.1.4" },
+      { channel: "unlisted", version: "9.9.9" },
+    ]) {
+      const input = makeAmoInput();
+      let downloadRequests = 0;
+      const fetchImpl = async (url, options = {}) => {
+        const parsedUrl = new URL(url);
+        const path = parsedUrl.pathname;
+        if (path.endsWith(`/addons/addon/${encodeURIComponent(input.metadata.addOnId)}/versions/`)) {
+          if (options.method === "GET") return Response.json({ next: null, results: [] });
+          return Response.json({ id: 1234, version: input.metadata.version });
+        }
+        if (path.endsWith("/addons/upload/") && options.method === "POST") {
+          return Response.json({ uuid: "synthetic-upload" });
+        }
+        if (path.endsWith("/addons/upload/synthetic-upload/")) {
+          return Response.json({ processed: true, valid: true });
+        }
+        if (path.endsWith("/versions/1234/")) {
+          return Response.json({
+            ...invalidApproval,
+            file: { status: "public", url: "https://addons.mozilla.org/firefox/downloads/file/invalid.xpi" },
+            id: 1234,
+          });
+        }
+        if (path.endsWith("/firefox/downloads/file/invalid.xpi")) {
+          downloadRequests += 1;
+          return new Response(Buffer.from("must not download"), { status: 200 });
+        }
+        return new Response("unexpected request", { status: 404 });
+      };
+      try {
+        await assert.rejects(
+          signPreparedAddon({
+            apiKey: SYNTHETIC_AMO_CREDENTIAL,
+            apiSecret: "synthetic-secret",
+            fetchImpl,
+            ...input,
+            pollIntervalMs: 0,
+          }),
+          /unlisted|release metadata|version/i,
+        );
+        assert.equal(downloadRequests, 0);
+      } finally {
+        input.cleanup();
+      }
+    }
+  });
+
+  it("rejects duplicate target versions spread across pagination", async () => {
+    const input = makeAmoInput();
+    const requests = [];
+    const versionRecord = (id) => ({
+      channel: "unlisted",
+      file: { status: "public", url: `https://addons.mozilla.org/firefox/downloads/file/${id}.xpi` },
+      id,
+      version: input.metadata.version,
+    });
+    const fetchImpl = async (url, options = {}) => {
+      const parsedUrl = new URL(url);
+      requests.push(parsedUrl.href);
+      if (options.method === "GET" && parsedUrl.pathname.endsWith("/versions/")) {
+        if (parsedUrl.searchParams.get("page") === "2") {
+          return Response.json({ next: null, results: [versionRecord(2222)] });
+        }
+        const next = new URL(parsedUrl);
+        next.searchParams.set("page", "2");
+        return Response.json({ next: next.href, results: [versionRecord(1111)] });
+      }
+      if (parsedUrl.pathname.endsWith("/firefox/downloads/file/1111.xpi")) {
+        return new Response(Buffer.from("must not download"), { status: 200 });
+      }
+      return new Response("unexpected request", { status: 404 });
+    };
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          pollIntervalMs: 0,
+        }),
+        /duplicate target versions/i,
+      );
+      assert.equal(
+        requests.some((url) => new URL(url).searchParams.get("page") === "2"),
+        true,
+      );
+      assert.equal(
+        requests.some((url) => url.endsWith("/firefox/downloads/file/1111.xpi")),
+        false,
+      );
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("times out a stalled AMO API fetch", async () => {
+    const input = makeAmoInput();
+    try {
+      await assertControlledAmoTimeout(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl: async () => new Promise(() => {}),
+          ...input,
+          maxWaitMs: 25,
+          pollIntervalMs: 0,
+        }),
+      );
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("times out a stalled AMO JSON response body", async () => {
+    const input = makeAmoInput();
+    try {
+      await assertControlledAmoTimeout(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl: async () => ({
+            json: async () => new Promise(() => {}),
+            ok: true,
+            status: 200,
+          }),
+          ...input,
+          maxWaitMs: 25,
+          pollIntervalMs: 0,
+        }),
+      );
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("times out a stalled signed-XPI fetch", async () => {
+    const input = makeAmoInput();
+    const fetchImpl = async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: {
+                status: "public",
+                url: "https://addons.mozilla.org/firefox/downloads/file/stalled.xpi",
+              },
+              id: 1234,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      return new Promise(() => {});
+    };
+    try {
+      await assertControlledAmoTimeout(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          maxWaitMs: 25,
+          pollIntervalMs: 0,
+        }),
+      );
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("times out a stalled signed-XPI response body", async () => {
+    const input = makeAmoInput();
+    const downloadUrl = "https://addons.mozilla.org/firefox/downloads/file/stalled-body.xpi";
+    const fetchImpl = async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: { status: "public", url: downloadUrl },
+              id: 1234,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      return {
+        arrayBuffer: async () => new Promise(() => {}),
+        headers: new Headers(),
+        ok: true,
+        status: 200,
+        url: downloadUrl,
+      };
+    };
+    try {
+      await assertControlledAmoTimeout(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          maxWaitMs: 25,
+          pollIntervalMs: 0,
+        }),
+      );
+    } finally {
+      input.cleanup();
     }
   });
 });

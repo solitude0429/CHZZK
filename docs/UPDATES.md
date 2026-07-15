@@ -24,6 +24,7 @@ https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 
 ```text
 /var/www/chzzk-updates/
+├── .deploy-state/                    # mode 0700 lock/recovery state
 ├── current -> releases/<version>
 ├── index.html -> current/index.html
 ├── provenance.json -> current/provenance.json
@@ -37,7 +38,7 @@ https://chzzk-updates.alpha-apple.dedyn.io/updates.json
     └── updates.json
 ```
 
-`updates.json`의 `update_link`는 immutable version directory의 signed XPI를 가리킵니다. `current` symlink 하나를 원자적으로 전환하므로 stable manifest와 versioned XPI가 섞이지 않습니다. 기존 target/releases directory mode는 변경하지 않습니다. 활성화 중 오류가 나면 모든 live symlink를 이전 상태로 복구하고 새 release directory를 제거합니다.
+`updates.json`의 `update_link`는 immutable version directory의 signed XPI를 가리킵니다. `current` symlink 하나를 원자적으로 전환하므로 stable manifest와 versioned XPI가 섞이지 않습니다. 기존 target/releases directory mode는 변경하지 않습니다. `.deploy-state`는 web worker가 읽을 수 없는 mode `0700`이며 process-bound advisory lock과 fsync된 이전 link snapshot을 보관합니다. 활성화 중 일반 오류뿐 아니라 SIGKILL/재부팅으로 프로세스가 사라져도 lock은 자동 해제되고, 다음 실행이 이전 generation을 복구한 뒤 재시도합니다.
 
 ## 버전 규칙
 

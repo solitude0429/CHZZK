@@ -36,7 +36,6 @@
   var QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
   var DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
   var QUALITY_PATH_MARKER_SOURCE = String.raw`(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)`;
-  var PATH_QUALITY_RE = new RegExp(QUALITY_PATH_MARKER_SOURCE, "i");
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
   function normalizeQualityLabel(value) {
@@ -53,16 +52,20 @@
     const match = normalized.match(QUALITY_LABEL_RE);
     return match ? Number(match[1]) : null;
   }
-  function parseQualityFromUrl(url) {
-    if (typeof url !== "string") return null;
+  function parseQualitiesFromUrl(url) {
+    if (typeof url !== "string") return [];
     let pathname = url;
     try {
       pathname = new URL(url).pathname;
     } catch {
       pathname = url.split("?")[0].split("#")[0];
     }
-    const pathQuality = pathname.match(PATH_QUALITY_RE);
-    return pathQuality ? normalizeQualityLabel(pathQuality[1]) : null;
+    return [...pathname.matchAll(new RegExp(QUALITY_PATH_MARKER_SOURCE, "gi"))]
+      .map((match) => normalizeQualityLabel(match[1]))
+      .filter(Boolean);
+  }
+  function parseQualityFromUrl(url) {
+    return parseQualitiesFromUrl(url)[0] ?? null;
   }
   function redactMediaUrl(url) {
     if (typeof url !== "string" || url === "") return "";
@@ -670,6 +673,10 @@
       signal?.removeEventListener?.("abort", abortFromParent);
     }
   }
+  function urlQualityMarkersMatch(url, expectedQuality) {
+    const qualities = parseQualitiesFromUrl(url);
+    return qualities.length > 0 && qualities.every((quality) => quality === expectedQuality);
+  }
   async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
     const evidence = await fetchPlaylistEvidence(url, { signal });
     if (!evidence) return false;
@@ -681,11 +688,11 @@
           variantQuality === expectedQuality &&
           typeof variant.url === "string" &&
           isTrustedRequestDomain(variant.url, quality_policy_default) &&
-          parseQualityFromUrl(variant.url) === expectedQuality
+          urlQualityMarkersMatch(variant.url, expectedQuality)
         );
       });
     }
-    return parseQualityFromUrl(evidence.finalUrl) === expectedQuality;
+    return urlQualityMarkersMatch(evidence.finalUrl, expectedQuality);
   }
   async function resolveHighestSupportedQuality(details, observedQuality, { signal = null } = {}) {
     const observedNumber = qualityNumber(observedQuality);
@@ -717,7 +724,7 @@
     const targetQuality = bestVariantTargetQuality(variant);
     if (!variant?.url || !targetQuality || !isTrustedRequestDomain(variant.url, quality_policy_default))
       return null;
-    if (parseQualityFromUrl(variant.url) !== targetQuality) return null;
+    if (!urlQualityMarkersMatch(variant.url, targetQuality)) return null;
     return targetQuality;
   }
   async function updateRedirectDiagnostics(lastError = null) {
@@ -1012,8 +1019,12 @@
     await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
   }
   async function resetAndPrewarmRuntimeState() {
-    await clearRuntimeRedirectState();
-    await prewarmExistingLiveTabs();
+    await Promise.all([
+      clearRuntimeRedirectState().catch((error) =>
+        console.warn("[CHZZK] failed to persist startup redirect cleanup", error),
+      ),
+      prewarmExistingLiveTabs(),
+    ]);
   }
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     if (!changeInfo?.url) return;

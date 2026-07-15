@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
@@ -30,6 +29,15 @@ if (args[0] === "release" && args[1] === "view") {
   if (!state.releaseExists) fail();
   if (args.includes("--json")) {
     const field = args[args.indexOf("--json") + 1];
+    if (
+      field === "isDraft" &&
+      !state.isDraft &&
+      process.env.FAIL_POST_PUBLISH_VERIFY === "true" &&
+      !state.failedPostPublishVerify
+    ) {
+      state.failedPostPublishVerify = true;
+      fail();
+    }
     if (field === "isDraft") process.stdout.write(String(state.isDraft));
     else if (field === "isPrerelease") process.stdout.write(String(state.isPrerelease));
     else if (field === "assets") process.stdout.write(String(state.assets.length));
@@ -61,11 +69,15 @@ if (args[0] === "release" && args[1] === "create") {
     const name = path.basename(argument); state.assets.push(name);
     fs.copyFileSync(argument, path.join(state.assetsDir, name));
   }
-  save(); process.exit(0);
+  save();
+  if (process.env.FAIL_RELEASE_CREATE_AFTER_DRAFT === "true") process.exit(1);
+  process.exit(0);
 }
 if (args[0] === "release" && args[1] === "edit") {
   if (args.includes("--draft=false")) state.isDraft = false;
-  save(); process.exit(0);
+  save();
+  if (process.env.FAIL_EDIT_AFTER_PUBLISH === "true") process.exit(1);
+  process.exit(0);
 }
 if (args[0] === "release" && args[1] === "delete") {
   state.releaseExists = false; state.tagExists = false; save(); process.exit(0);
@@ -74,8 +86,18 @@ fail();
 `;
 }
 
-function runPublisher({ existing = false, draft = false, mismatch = false, prerelease = false } = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "chzzk-publisher-test-"));
+function runPublisher({
+  existing = false,
+  draft = false,
+  failCreateAfterDraft = false,
+  failEditAfterPublish = false,
+  failPostPublishVerify = false,
+  mismatch = false,
+  prerelease = false,
+} = {}) {
+  const scratchRoot = join(repoRoot, "dist");
+  mkdirSync(scratchRoot, { recursive: true });
+  const directory = mkdtempSync(join(scratchRoot, "publisher-test-"));
   const binDir = join(directory, "bin");
   const releaseAssetsDir = join(directory, "release-assets");
   const remoteAssetsDir = join(directory, "remote-assets");
@@ -94,8 +116,10 @@ function runPublisher({ existing = false, draft = false, mismatch = false, prere
     }
     if (mismatch) writeFileSync(join(remoteAssetsDir, names[2]), "tampered");
 
+    const fakeGhModulePath = join(binDir, "fake-gh.cjs");
     const fakeGhPath = join(binDir, "gh");
-    writeFileSync(fakeGhPath, fakeGhSource());
+    writeFileSync(fakeGhModulePath, fakeGhSource());
+    writeFileSync(fakeGhPath, `#!/bin/sh\nexec node "${fakeGhModulePath}" "$@"\n`);
     chmodSync(fakeGhPath, 0o755);
     const statePath = join(directory, "state.json");
     writeFileSync(
@@ -123,14 +147,17 @@ function runPublisher({ existing = false, draft = false, mismatch = false, prere
       ["${{ needs.verify-signed.outputs.signed_sha256 }}", sha256(join(releaseAssetsDir, names[2]))],
     ]);
     for (const [placeholder, value] of replacements) script = script.replaceAll(placeholder, value);
-    script = `gh() { node "${fakeGhPath}" "$@"; }\n${script}`;
+    script = `unset -f gh 2>/dev/null || true\nhash -r\n${script}`;
     const environment = {
       ...process.env,
+      FAIL_EDIT_AFTER_PUBLISH: String(failEditAfterPublish),
+      FAIL_RELEASE_CREATE_AFTER_DRAFT: String(failCreateAfterDraft),
+      FAIL_POST_PUBLISH_VERIFY: String(failPostPublishVerify),
       FAKE_GH_STATE: statePath,
       GH_TOKEN: "synthetic-token",
       GITHUB_REPOSITORY: "solitude0429/CHZZK",
       GITHUB_SHA: sourceDigest,
-      PATH: process.env.PATH,
+      PATH: `${binDir}:${process.env.PATH}`,
     };
     const result = spawnSync("bash", ["-c", script], {
       cwd: directory,
@@ -195,6 +222,54 @@ describe("immutable release publisher workflow shell", () => {
       } finally {
         run.cleanup();
       }
+    }
+  });
+
+  it("removes a partial draft and tag when release creation fails during asset upload", () => {
+    const run = runPublisher({ failCreateAfterDraft: true });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.equal(run.state.releaseExists, false, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
+      assert.equal(run.state.tagExists, false);
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
+        true,
+        `${run.result.stderr}\n${JSON.stringify(run.state.log)}`,
+      );
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("preserves a published release when publication succeeds but the CLI reports failure", () => {
+    const run = runPublisher({ failEditAfterPublish: true });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.equal(run.state.releaseExists, true, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
+      assert.equal(run.state.tagExists, true);
+      assert.equal(run.state.isDraft, false);
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
+        false,
+      );
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("preserves a published release when post-publication verification fails", () => {
+    const run = runPublisher({ failPostPublishVerify: true });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.equal(run.state.releaseExists, true, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
+      assert.equal(run.state.tagExists, true);
+      assert.equal(run.state.isDraft, false);
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
+        false,
+      );
+    } finally {
+      run.cleanup();
     }
   });
 
