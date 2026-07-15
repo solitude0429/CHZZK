@@ -18,7 +18,7 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repos
 3. workflow는 `main` protected ref인지 확인한 뒤 다음 권한 경계를 유지합니다.
    - `prepare`: read-only checkout, `npm ci`, 전체 검증, 결정적 unsigned ZIP과 release metadata 생성, signer/client를 protected commit의 Git blob에 재고정
    - `sign`: checkout과 npm 실행 없이 검증된 artifact만 내려받고, `firefox-signing` environment를 통과한 signer step에서만 AMO secret 사용
-   - `verify-signed`: secret 없이 signed XPI의 `manifest.json`은 semantic JSON으로, 나머지 runtime 파일은 prepared ZIP/metadata와 바이트 단위로 비교
+   - `verify-signed`: secret 없이 signed XPI 구조, exact Mozilla metadata 파일 집합, ZIP resource bounds를 확인하고 `manifest.json`은 lossless semantic JSON으로, 나머지 runtime 파일은 prepared ZIP/metadata와 바이트 단위로 비교
    - `attest`: AMO secret/checkout 없이 세 release asset에 provenance attestation 생성
    - `publish`: checkout/npm/secret 없이 `contents: write`만 사용해 immutable Release 게시
 4. Release에는 정확히 다음 세 asset만 게시됩니다.
@@ -37,12 +37,26 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repos
 3. target version이 없을 때만 AMO upload/validation 후 `POST /api/v5/addons/addon/<add-on id>/versions/`에 top-level upload UUID를 보내 unlisted version 생성
 4. 이미 존재하는 exact unlisted version 또는 새 version의 승인 상태를 polling하며 version/channel/ID가 요청과 정확히 일치하는지 매 응답에서 검증
 5. 허용된 `addons.mozilla.org` HTTPS download URL과 각 redirect hop 검증
-6. unlisted 파일 권한 검사를 위해 정확한 첫 `addons.mozilla.org/.../downloads/file/...` 요청에만 새 AMO JWT를 보내고, 이후 redirect hop에서는 Authorization을 제거
-7. signed XPI를 mode `0600`으로 원자적 저장
+6. 승인된 exact developer-file URL의 일시적 404만 하나의 10분 signing deadline과 60회 상한 안에서 재시도
+7. 매 시도마다 승인 URL에서 새 JWT로 시작하고, 이후 redirect hop에서는 Authorization을 제거
+8. signed XPI body를 16 MiB 상한으로 streaming하며 Content-Length가 초과하면 body를 읽기 전에 cancel
+9. signed XPI를 mode `0600`으로 원자적 저장
 
 AMO 자격 증명은 signer step의 환경에만 주입되고 즉시 `process.env`에서 제거됩니다. 파생 JWT를 사용하는 `https://addons.mozilla.org/api/v5/` 요청은 redirect를 거부합니다. AMO의 unlisted download endpoint는 add-on developer 인증을 요구하므로 첫 download 요청만 exact host/path allowlist를 통과한 뒤 JWT를 사용하고, manual redirect 이후의 CDN 요청에는 JWT를 전달하지 않습니다.
 
-Signer의 전체 network/polling budget은 10분이며 API fetch, JSON body, signed-XPI fetch/body가 응답하지 않아도 이 deadline에서 abort/실패합니다. 따라서 25분 `sign` job timeout보다 먼저 통제된 오류를 반환합니다.
+Signer의 전체 network/polling budget은 10분이며 poll interval은 100~60,000 ms safe integer만 허용합니다. API JSON은 response당 1 MiB와 nesting depth 64로 제한되고, API fetch, JSON body, signed-XPI fetch/body가 응답하지 않아도 같은 deadline에서 abort/실패합니다. 401/403, 승인 URL이 아닌 hop의 404, untrusted redirect, 그 밖의 non-404 status는 즉시 실패합니다.
+
+## 구조 검사와 Firefox authenticity gate
+
+`npm run verify:signed-release-structure`는 암호 검증기가 아닙니다. 이 검사는 runtime allowlist/metadata digest, raw ZIP path, ZIP64/multi-disk 금지, 중앙 디렉터리 size/ratio, 그리고 다음 exact Mozilla metadata 이름과 보수적 크기 범위만 확인합니다.
+
+- `META-INF/cose.manifest`: 256 B~256 KiB
+- `META-INF/cose.sig`: 512 B~64 KiB
+- `META-INF/manifest.mf`: 256 B~256 KiB
+- `META-INF/mozilla.sf`: 64 B~16 KiB
+- `META-INF/mozilla.rsa`: 512 B~64 KiB
+
+Signature metadata aggregate는 512 KiB 이하입니다. signed XPI compressed 16 MiB, source ZIP compressed 8 MiB, entry compressed 2 MiB, entry uncompressed 4 MiB, archive aggregate uncompressed 8 MiB, compression ratio 100:1 상한을 JSZip inflation 전에 적용합니다. Mozilla signature authenticity는 자체 COSE/JAR 구현이 아니라 `docs/TESTING.md`의 stock-Firefox permanent-install gate가 판정합니다. 이 worktree는 gate script/interface만 제공하며 release workflow에는 연결하지 않습니다.
 
 ## 로컬 서명
 
@@ -63,4 +77,4 @@ CHZZK_SIGNED_OUTPUT_DIR="dist/signed" \
 npm run sign:unlisted
 ```
 
-서명 승인을 기다리다 job이 중단되더라도 재실행은 exact unlisted target version을 조회해 polling/download부터 재개하며 새 upload/version을 만들지 않습니다. 기존 version이 listed이거나 버전·ID 응답이 일치하지 않으면 실패합니다. AMO가 `manifest.json`의 whitespace/key order를 정규화하는 것은 semantic equality로 허용하지만, manifest 의미나 다른 runtime 바이트가 달라지면 후속 `verify-signed` 단계에서 게시 전에 거부됩니다. 이미 게시된 GitHub Release 재실행은 source commit과 `--source-digest` provenance까지 확인하는 immutable reuse 경로로만 처리합니다.
+서명 승인을 기다리다 job이 중단되더라도 재실행은 exact unlisted target version을 조회해 polling/download부터 재개하며 새 upload/version을 만들지 않습니다. 기존 version이 listed이거나 버전·ID 응답이 일치하지 않으면 실패합니다. AMO가 `manifest.json`의 whitespace/key order와 동등한 number exponent 표기를 정규화하는 것은 lossless semantic equality로 허용하지만, unsafe integer/underflow/precision collision이나 `-0`/`0` 차이, manifest 의미, 다른 runtime 바이트가 달라지면 후속 structural 단계에서 게시 전에 거부됩니다. 이미 게시된 GitHub Release 재실행은 source commit과 `--source-digest` provenance까지 확인하는 immutable reuse 경로로만 처리합니다.

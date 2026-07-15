@@ -25,6 +25,13 @@ import { deployUpdateRelease } from "../../scripts/lib/update-deployment.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const crashFixture = fileURLToPath(new URL("../fixtures/update-deployment-crash.mjs", import.meta.url));
+const STRUCTURAL_SIGNATURE_FIXTURE = Object.freeze({
+  "META-INF/cose.manifest": Buffer.alloc(512, "m"),
+  "META-INF/cose.sig": Buffer.alloc(1024, "c"),
+  "META-INF/manifest.mf": Buffer.alloc(512, "f"),
+  "META-INF/mozilla.rsa": Buffer.alloc(1024, "r"),
+  "META-INF/mozilla.sf": Buffer.alloc(128, "s"),
+});
 
 function mode(path) {
   return statSync(path).mode & 0o777;
@@ -59,7 +66,9 @@ async function makeSignedRelease(version, sourceDigest) {
   for (const entry of Object.values(sourceZip.files)) {
     if (!entry.dir) signedZip.file(entry.name, await entry.async("nodebuffer"));
   }
-  signedZip.file("META-INF/mozilla.rsa", Buffer.from("synthetic signature"));
+  for (const [name, bytes] of Object.entries(STRUCTURAL_SIGNATURE_FIXTURE)) {
+    signedZip.file(name, bytes, { createFolders: false });
+  }
   const signedXpiPath = join(assetDir, `chzzk-${version}-signed.xpi`);
   writeFileSync(signedXpiPath, await signedZip.generateAsync({ type: "nodebuffer" }), { mode: 0o600 });
   return {

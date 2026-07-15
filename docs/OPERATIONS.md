@@ -11,8 +11,10 @@
 npm run setup:firefox-e2e
 FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
 GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
-npm run test:firefox-e2e
+npm run test:firefox-functional-e2e
 ```
+
+This is the unsigned functional-only gate. After AMO signing, run the stock-Firefox install gate from `docs/TESTING.md` with the real final XPI. After update-host deployment, run its old-signed-to-new-signed update mode. Do not waive either mode because an artifact is missing; the harness intentionally fails instead of skipping.
 
 5. Open a GitHub PR and wait for all required CI/review gates.
 6. Merge to protected `main`.

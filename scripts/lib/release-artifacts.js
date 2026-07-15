@@ -14,24 +14,42 @@ import { basename, dirname, join } from "node:path";
 import { TextDecoder } from "node:util";
 import JSZip from "jszip";
 
-export const RELEASE_PACKAGE_FILES = Object.freeze([
-  "background.js",
-  "diagnostics.html",
-  "diagnostics.js",
-  "icon-32.png",
-  "icon-48.png",
-  "icon-96.png",
-  "icon.png",
-  "manifest.json",
-  "site-observer.js",
-]);
+import {
+  RELEASE_ADD_ON_ID,
+  RELEASE_PACKAGE_FILES,
+  RELEASE_SOURCE_REPOSITORY,
+  RELEASE_UPDATE_MANIFEST_URL,
+  MAX_SIGNED_XPI_BYTES,
+  assertReleaseMetadata,
+} from "./amo-client.js";
+
+export { RELEASE_PACKAGE_FILES, assertReleaseMetadata } from "./amo-client.js";
 
 const FIXED_ZIP_DATE = new Date("1980-01-01T00:00:00.000Z");
+const JSON_NUMBER_TOKEN = Symbol("lossless-json-number");
 const MAX_JSON_DEPTH = 128;
 const MAX_MANIFEST_BYTES = 256 * 1024;
-const SHA256_RE = /^[a-f0-9]{64}$/;
+const MAX_SIGNATURE_METADATA_BYTES = 512 * 1024;
+const MAX_SOURCE_ARCHIVE_BYTES = 8 * 1024 * 1024;
 const SOURCE_DIGEST_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+export const RELEASE_ZIP_LIMITS = Object.freeze({
+  maxAggregateUncompressedBytes: 8 * 1024 * 1024,
+  maxCompressionRatio: 100,
+  maxEntryCompressedBytes: 2 * 1024 * 1024,
+  maxEntryUncompressedBytes: 4 * 1024 * 1024,
+  maxSignedCompressedBytes: MAX_SIGNED_XPI_BYTES,
+  maxSourceCompressedBytes: MAX_SOURCE_ARCHIVE_BYTES,
+});
+
+export const MOZILLA_SIGNATURE_METADATA = Object.freeze({
+  "META-INF/cose.manifest": Object.freeze({ maxBytes: 256 * 1024, minBytes: 256 }),
+  "META-INF/cose.sig": Object.freeze({ maxBytes: 64 * 1024, minBytes: 512 }),
+  "META-INF/manifest.mf": Object.freeze({ maxBytes: 256 * 1024, minBytes: 256 }),
+  "META-INF/mozilla.rsa": Object.freeze({ maxBytes: 64 * 1024, minBytes: 512 }),
+  "META-INF/mozilla.sf": Object.freeze({ maxBytes: 16 * 1024, minBytes: 64 }),
+});
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -76,8 +94,8 @@ function atomicWrite(path, bytes) {
 function validateReleaseIdentity(rootDir, sourceDigest, sourceRepository) {
   if (!SOURCE_DIGEST_RE.test(sourceDigest))
     throw new Error("sourceDigest must be a full hexadecimal Git digest");
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(sourceRepository)) {
-    throw new Error("sourceRepository must use owner/repository form");
+  if (sourceRepository !== RELEASE_SOURCE_REPOSITORY) {
+    throw new Error("sourceRepository must be the canonical release repository");
   }
 
   assertRegularFile(join(rootDir, "manifest.json"));
@@ -89,24 +107,17 @@ function validateReleaseIdentity(rootDir, sourceDigest, sourceRepository) {
   if (!VERSION_RE.test(version) || packageJson.version !== version) {
     throw new Error("manifest.json and package.json must carry the same SemVer version");
   }
-  if (typeof gecko?.id !== "string" || !gecko.id) throw new Error("Firefox add-on ID is missing");
+  if (gecko?.id !== RELEASE_ADD_ON_ID) throw new Error("Firefox add-on ID is not canonical");
   if (typeof gecko.strict_min_version !== "string" || !gecko.strict_min_version) {
     throw new Error("Firefox strict_min_version is missing");
   }
-  const updateUrl = new URL(gecko.update_url);
-  if (
-    updateUrl.protocol !== "https:" ||
-    updateUrl.username ||
-    updateUrl.password ||
-    updateUrl.search ||
-    updateUrl.hash
-  ) {
-    throw new Error("Firefox update_url must be a credential-free HTTPS URL without query or fragment");
+  if (gecko.update_url !== RELEASE_UPDATE_MANIFEST_URL) {
+    throw new Error("Firefox update_url is not canonical");
   }
   return {
     addOnId: gecko.id,
     strictMinVersion: gecko.strict_min_version,
-    updateManifestUrl: updateUrl.toString(),
+    updateManifestUrl: gecko.update_url,
     version,
   };
 }
@@ -166,7 +177,7 @@ export async function prepareReleaseArtifacts({ outputDir, rootDir, sourceDigest
       updateManifestUrl: identity.updateManifestUrl,
       version: identity.version,
     };
-    if (!SHA256_RE.test(metadata.sourceArchive.sha256)) throw new Error("Invalid source archive digest");
+    assertReleaseMetadata(metadata);
     const metadataName = `chzzk-${identity.version}-release-metadata.json`;
     const metadataPath = join(outputDir, metadataName);
     atomicWrite(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
@@ -179,21 +190,6 @@ export async function prepareReleaseArtifacts({ outputDir, rootDir, sourceDigest
   } finally {
     rmSync(stageDir, { force: true, recursive: true });
   }
-}
-
-export function assertReleaseMetadata(metadata) {
-  if (!metadata || metadata.schemaVersion !== 1) throw new Error("Unsupported release metadata schema");
-  if (!VERSION_RE.test(String(metadata.version ?? ""))) throw new Error("Invalid release metadata version");
-  if (typeof metadata.addOnId !== "string" || !metadata.addOnId) throw new Error("Invalid release add-on ID");
-  if (!SOURCE_DIGEST_RE.test(String(metadata.sourceDigest ?? "")))
-    throw new Error("Invalid release source digest");
-  if (!SHA256_RE.test(String(metadata.sourceArchive?.sha256 ?? ""))) {
-    throw new Error("Invalid release source archive digest");
-  }
-  if (basename(String(metadata.sourceArchive?.name ?? "")) !== metadata.sourceArchive.name) {
-    throw new Error("Invalid release source archive name");
-  }
-  return metadata;
 }
 
 function decodeSafeZipName(nameBytes, label) {
@@ -228,7 +224,22 @@ function findZipEndRecord(bytes, label) {
   throw new Error(`${label} ZIP end record is missing or ambiguous`);
 }
 
-function rawZipEntryNames(bytes, label) {
+function assertZipExtraFields(extraBytes, label) {
+  let cursor = 0;
+  while (cursor < extraBytes.length) {
+    if (cursor + 4 > extraBytes.length) throw new Error(`${label} ZIP extra field is malformed`);
+    const fieldId = extraBytes.readUInt16LE(cursor);
+    const fieldSize = extraBytes.readUInt16LE(cursor + 2);
+    cursor += 4;
+    if (cursor + fieldSize > extraBytes.length) {
+      throw new Error(`${label} ZIP extra field is malformed`);
+    }
+    if (fieldId === 0x0001) throw new Error(`${label} ZIP uses an unsupported ZIP64 layout`);
+    cursor += fieldSize;
+  }
+}
+
+function inspectZipCentralDirectory(bytes, label, expectedNames) {
   if (bytes.length < 22) throw new Error(`${label} ZIP is truncated`);
   const endOffset = findZipEndRecord(bytes, label);
   const disk = bytes.readUInt16LE(endOffset + 4);
@@ -249,15 +260,21 @@ function rawZipEntryNames(bytes, label) {
     throw new Error(`${label} ZIP uses an unsupported multi-disk or ZIP64 layout`);
   }
 
-  const names = [];
+  const entries = [];
   const seenNames = new Set();
   const seenLocalOffsets = new Set();
+  let aggregateUncompressedBytes = 0;
+  let signatureMetadataBytes = 0;
   let cursor = centralOffset;
   for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
     if (cursor + 46 > endOffset || bytes.readUInt32LE(cursor) !== 0x02014b50) {
       throw new Error(`${label} ZIP central directory is malformed`);
     }
     const flags = bytes.readUInt16LE(cursor + 8);
+    const compressionMethod = bytes.readUInt16LE(cursor + 10);
+    const crc32 = bytes.readUInt32LE(cursor + 16);
+    const compressedSize = bytes.readUInt32LE(cursor + 20);
+    const uncompressedSize = bytes.readUInt32LE(cursor + 24);
     const nameLength = bytes.readUInt16LE(cursor + 28);
     const extraLength = bytes.readUInt16LE(cursor + 30);
     const commentLength = bytes.readUInt16LE(cursor + 32);
@@ -266,7 +283,12 @@ function rawZipEntryNames(bytes, label) {
     const nextCursor = cursor + 46 + nameLength + extraLength + commentLength;
     if (
       (flags & 1) !== 0 ||
+      (flags & ~0x080e) !== 0 ||
+      ![0, 8].includes(compressionMethod) ||
       diskStart !== 0 ||
+      compressedSize === 0xffffffff ||
+      uncompressedSize === 0xffffffff ||
+      localOffset === 0xffffffff ||
       nextCursor > endOffset ||
       localOffset + 30 > centralOffset ||
       seenLocalOffsets.has(localOffset)
@@ -274,6 +296,8 @@ function rawZipEntryNames(bytes, label) {
       throw new Error(`${label} ZIP entry metadata is unsafe`);
     }
     const centralNameBytes = bytes.subarray(cursor + 46, cursor + 46 + nameLength);
+    const centralExtraStart = cursor + 46 + nameLength;
+    assertZipExtraFields(bytes.subarray(centralExtraStart, centralExtraStart + extraLength), label);
     const name = decodeSafeZipName(centralNameBytes, label);
     if (seenNames.has(name)) throw new Error(`${label} ZIP contains a duplicate raw entry name`);
     seenNames.add(name);
@@ -282,6 +306,11 @@ function rawZipEntryNames(bytes, label) {
     if (bytes.readUInt32LE(localOffset) !== 0x04034b50) {
       throw new Error(`${label} ZIP local entry header is malformed`);
     }
+    const localFlags = bytes.readUInt16LE(localOffset + 6);
+    const localCompressionMethod = bytes.readUInt16LE(localOffset + 8);
+    const localCrc32 = bytes.readUInt32LE(localOffset + 14);
+    const localCompressedSize = bytes.readUInt32LE(localOffset + 18);
+    const localUncompressedSize = bytes.readUInt32LE(localOffset + 22);
     const localNameLength = bytes.readUInt16LE(localOffset + 26);
     const localExtraLength = bytes.readUInt16LE(localOffset + 28);
     const localNameStart = localOffset + 30;
@@ -289,20 +318,74 @@ function rawZipEntryNames(bytes, label) {
     if (localNameEnd + localExtraLength > centralOffset) {
       throw new Error(`${label} ZIP local entry metadata is truncated`);
     }
+    if (localFlags !== flags || localCompressionMethod !== compressionMethod) {
+      throw new Error(`${label} ZIP local and central entry metadata differ`);
+    }
     const localNameBytes = bytes.subarray(localNameStart, localNameEnd);
     if (!localNameBytes.equals(centralNameBytes)) {
       throw new Error(`${label} ZIP local and central entry names differ`);
     }
-    names.push(name);
+    const localExtraEnd = localNameEnd + localExtraLength;
+    assertZipExtraFields(bytes.subarray(localNameEnd, localExtraEnd), label);
+    if (
+      (flags & 0x0008) === 0 &&
+      (localCrc32 !== crc32 ||
+        localCompressedSize !== compressedSize ||
+        localUncompressedSize !== uncompressedSize)
+    ) {
+      throw new Error(`${label} ZIP local and central entry sizes or CRC differ`);
+    }
+    const dataEnd = localExtraEnd + compressedSize;
+    if (dataEnd > centralOffset) throw new Error(`${label} ZIP entry data range is unsafe`);
+    if (compressedSize <= 0 || compressedSize > RELEASE_ZIP_LIMITS.maxEntryCompressedBytes) {
+      throw new Error(`${label} ZIP compressed entry size limit exceeded: ${name}`);
+    }
+    if (uncompressedSize <= 0 || uncompressedSize > RELEASE_ZIP_LIMITS.maxEntryUncompressedBytes) {
+      throw new Error(`${label} ZIP uncompressed entry size limit exceeded: ${name}`);
+    }
+    aggregateUncompressedBytes += uncompressedSize;
+    if (aggregateUncompressedBytes > RELEASE_ZIP_LIMITS.maxAggregateUncompressedBytes) {
+      throw new Error(`${label} ZIP aggregate uncompressed size limit exceeded`);
+    }
+    if (uncompressedSize / compressedSize > RELEASE_ZIP_LIMITS.maxCompressionRatio) {
+      throw new Error(`${label} ZIP compression ratio limit exceeded: ${name}`);
+    }
+    const signatureBounds = MOZILLA_SIGNATURE_METADATA[name];
+    if (signatureBounds) {
+      if (uncompressedSize < signatureBounds.minBytes || uncompressedSize > signatureBounds.maxBytes) {
+        throw new Error(`Signed XPI signature metadata size is invalid: ${name}`);
+      }
+      signatureMetadataBytes += uncompressedSize;
+      if (signatureMetadataBytes > MAX_SIGNATURE_METADATA_BYTES) {
+        throw new Error("Signed XPI aggregate signature metadata size is invalid");
+      }
+    }
+    entries.push({
+      compressedSize,
+      dataEnd,
+      localOffset,
+      name,
+      uncompressedSize,
+    });
     cursor = nextCursor;
   }
   if (cursor !== endOffset) throw new Error(`${label} ZIP central directory size is inconsistent`);
-  return names;
+  const actualNames = entries.map((entry) => entry.name).sort();
+  const canonicalNames = [...expectedNames].sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(canonicalNames)) {
+    const detail = label === "Signed XPI" ? "runtime or signature metadata" : "runtime";
+    throw new Error(`${label} ZIP ${detail} entries do not match the exact release allowlist`);
+  }
+  const entriesByOffset = [...entries].sort((left, right) => left.localOffset - right.localOffset);
+  for (const [index, entry] of entriesByOffset.entries()) {
+    const nextOffset = entriesByOffset[index + 1]?.localOffset ?? centralOffset;
+    if (entry.dataEnd > nextOffset) throw new Error(`${label} ZIP entry data ranges overlap`);
+  }
+  return entries;
 }
 
-function assertSafeZipEntries(zip, bytes, label) {
-  const rawNames = rawZipEntryNames(bytes, label);
-  const rawFiles = rawNames.filter((name) => !name.endsWith("/")).sort();
+function assertSafeZipEntries(zip, inspectedEntries, label) {
+  const rawFiles = inspectedEntries.map((entry) => entry.name).sort();
   const parsedFiles = Object.values(zip.files)
     .filter((entry) => !entry.dir)
     .map((entry) => {
@@ -332,6 +415,17 @@ function assertExactRuntimeEntries(zip, label) {
   }
 }
 
+function assertExactSignatureMetadata(zip) {
+  const signatureEntries = Object.values(zip.files).filter(
+    (entry) => !entry.dir && entry.name.startsWith("META-INF/"),
+  );
+  const actualNames = signatureEntries.map((entry) => entry.name).sort();
+  const expectedNames = Object.keys(MOZILLA_SIGNATURE_METADATA).sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+    throw new Error("Signed XPI signature metadata does not match the exact Mozilla allowlist");
+  }
+}
+
 function assertSignedManifestIdentity(manifest, metadata) {
   const gecko = manifest.browser_specific_settings?.gecko;
   if (
@@ -345,6 +439,11 @@ function assertSignedManifestIdentity(manifest, metadata) {
 }
 
 function jsonSemanticallyEqual(left, right) {
+  const leftNumber = left?.[JSON_NUMBER_TOKEN];
+  const rightNumber = right?.[JSON_NUMBER_TOKEN];
+  if (leftNumber !== undefined || rightNumber !== undefined) {
+    return leftNumber !== undefined && rightNumber !== undefined && leftNumber === rightNumber;
+  }
   if (Object.is(left, right)) return true;
   if (typeof left !== typeof right || left === null || right === null) return false;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -411,12 +510,23 @@ function parseStrictJson(text, label) {
     fail("is not valid JSON");
   };
   const parseNumber = () => {
-    const match = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    const match = text.slice(index).match(/^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?/);
     if (!match) fail("is not valid JSON");
     index += match[0].length;
-    const value = Number(match[0]);
-    if (!Number.isFinite(value)) fail("contains a non-finite number");
-    return value;
+    const [, sign, integer, fraction = "", exponentToken = "0"] = match;
+    if (exponentToken.replace(/^[+-]/, "").length > 6) {
+      fail("contains a number exponent outside the supported range");
+    }
+    let coefficient = `${integer}${fraction}`.replace(/^0+/, "");
+    if (!coefficient) {
+      return Object.freeze({ [JSON_NUMBER_TOKEN]: sign ? "-0" : "0" });
+    }
+    const trailingZeroCount = coefficient.match(/0+$/)?.[0].length ?? 0;
+    if (trailingZeroCount > 0) coefficient = coefficient.slice(0, -trailingZeroCount);
+    const exponent = BigInt(exponentToken) - BigInt(fraction.length) + BigInt(trailingZeroCount);
+    return Object.freeze({
+      [JSON_NUMBER_TOKEN]: `${sign}${coefficient}e${exponent.toString()}`,
+    });
   };
   const parseValue = (depth) => {
     if (depth > MAX_JSON_DEPTH) fail("exceeds the nesting limit");
@@ -505,10 +615,16 @@ function parseManifest(bytes, label) {
   return manifest;
 }
 
-export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath, sourceArchivePath }) {
+export async function verifySignedReleaseStructure({ metadataPath, signedXpiPath, sourceArchivePath }) {
   assertRegularFile(metadataPath);
-  assertRegularFile(signedXpiPath);
-  assertRegularFile(sourceArchivePath);
+  const signedXpiStat = assertRegularFile(signedXpiPath);
+  const sourceArchiveStat = assertRegularFile(sourceArchivePath);
+  if (signedXpiStat.size <= 0 || signedXpiStat.size > RELEASE_ZIP_LIMITS.maxSignedCompressedBytes) {
+    throw new Error("Signed XPI compressed archive size limit exceeded");
+  }
+  if (sourceArchiveStat.size <= 0 || sourceArchiveStat.size > RELEASE_ZIP_LIMITS.maxSourceCompressedBytes) {
+    throw new Error("Source archive compressed archive size limit exceeded");
+  }
   const metadata = assertReleaseMetadata(readJson(metadataPath));
   const sourceBytes = readFileSync(sourceArchivePath);
   const signedBytes = readFileSync(signedXpiPath);
@@ -525,18 +641,18 @@ export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath
     throw new Error("Signed XPI filename does not match release metadata");
   }
 
+  const sourceEntries = inspectZipCentralDirectory(sourceBytes, "Source archive", RELEASE_PACKAGE_FILES);
+  const signedEntries = inspectZipCentralDirectory(signedBytes, "Signed XPI", [
+    ...RELEASE_PACKAGE_FILES,
+    ...Object.keys(MOZILLA_SIGNATURE_METADATA),
+  ]);
   const sourceZip = await JSZip.loadAsync(sourceBytes, { checkCRC32: true });
   const signedZip = await JSZip.loadAsync(signedBytes, { checkCRC32: true });
-  assertSafeZipEntries(sourceZip, sourceBytes, "Source archive");
-  assertSafeZipEntries(signedZip, signedBytes, "Signed XPI");
+  assertSafeZipEntries(sourceZip, sourceEntries, "Source archive");
+  assertSafeZipEntries(signedZip, signedEntries, "Signed XPI");
   assertExactRuntimeEntries(sourceZip, "Source archive");
   assertExactRuntimeEntries(signedZip, "Signed XPI");
-  const signatureEntries = Object.values(signedZip.files).filter(
-    (entry) => !entry.dir && entry.name.startsWith("META-INF/"),
-  );
-  if (signatureEntries.length === 0 || signatureEntries.length > 20) {
-    throw new Error("Signed XPI has invalid signature metadata");
-  }
+  assertExactSignatureMetadata(signedZip);
 
   const metadataFiles = new Map((metadata.files ?? []).map((file) => [file.path, file]));
   if (metadataFiles.size !== RELEASE_PACKAGE_FILES.length) {
@@ -570,6 +686,7 @@ export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath
     signedXpiSha256: sha256(signedBytes),
     signedXpiSize: signedBytes.length,
     sourceDigest: metadata.sourceDigest,
+    verification: "structural-only",
     version: metadata.version,
   };
 }

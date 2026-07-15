@@ -43,7 +43,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 - dependency audit
 - deterministic package build/audit
 
-CI also runs the checksum-pinned Firefox Developer Edition E2E. It proves a synthetic `480p` playlist is redirected to the available `1080p` fixture without altering the signed-style query and proves `AddonManager.findUpdates` installs the next version in an isolated profile.
+CI also runs the checksum-pinned Firefox Developer Edition functional-only E2E. It proves a synthetic `480p` playlist is redirected to the available `1080p` fixture without altering the signed-style query and proves the synthetic `AddonManager.findUpdates` path in an isolated profile. It does not establish Release authenticity.
 
 ## Release invariants
 
@@ -51,7 +51,10 @@ CI also runs the checksum-pinned Firefox Developer Edition E2E. It proves a synt
 - Version bumps follow the project `a.b.c` SemVer rule: MAJOR for incompatible changes, MINOR for backward-compatible features, PATCH for backward-compatible bug/security fixes.
 - `policy/quality-policy.json` is the source of truth for fallback candidates, probe budgets, and trusted domains.
 - AMO receives only the deterministic exact-allowlist ZIP; local untracked files and symlinks cannot enter the signing input.
-- Authorized AMO API requests reject redirects. The exact first unlisted signed-XPI download request authenticates only to the allowlisted AMO developer-file route; manually validated redirect hops receive no authorization.
+- Release metadata has one exact validator shared by prepare/sign/structure/update/deploy callers: fixed project identity/repository/update URL, exact keys and runtime paths, unique paths, canonical names, safe sizes, and SHA-256/Git digest syntax.
+- Authorized AMO API requests reject redirects. Only an exact approved developer-file URL 404 is retried; every attempt starts there with a fresh JWT, while manually validated redirect hops receive no authorization. API JSON and signed bodies have streaming byte/depth bounds.
+- The Node signed-XPI check is structural-only. It applies compressed, per-entry, aggregate, ratio, exact signature-name/size, ZIP64/multi-disk, and raw-path limits before JSZip inflation. It does not implement Mozilla cryptography.
+- Release authenticity requires the separate stock-Firefox gate with default signature enforcement, permanent installation, exact ID/version/update URL, and `SIGNEDSTATE_SIGNED`. Its update mode runs previous-signed to final-signed only after the production update endpoint is deployed.
 - Build, AMO-secret signing, signed verification, OIDC attestation, and `contents: write` publication are separate jobs.
 - Repository immutable releases must be enabled. Compatible partial drafts are resumed by verifying existing bytes and uploading only missing assets; publication must return `immutable: true`. Exact reruns are no-ops, while mismatch or orphan tag states fail closed.
 - Internal deployment derives `updates.json` from attested Release metadata and signed XPI bytes, normalizes and reuses the same validated absolute target path before mutation, rejects symlinked, externally owned, or group/world-writable managed paths, and serializes mutation with a process-bound advisory lock. Before release or live-link mutation it fsyncs a private durable snapshot journal; a killed process or reboot therefore releases the lock and the next run restores the previous generation before retrying. Link and release post-verification remain inside the rollback boundary so an unverified generation never stays live.

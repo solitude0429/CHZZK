@@ -1,13 +1,116 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { TextDecoder } from "node:util";
 
 const AMO_API_ROOT = "https://addons.mozilla.org/api/v5/";
 const AMO_DOWNLOAD_DOMAIN = "addons.mozilla.org";
-const MAX_SIGNED_XPI_BYTES = 100 * 1024 * 1024;
+export const MAX_SIGNED_XPI_BYTES = 16 * 1024 * 1024;
+const MAX_SIGNED_XPI_DOWNLOAD_ATTEMPTS = 60;
 const MAX_SIGNED_XPI_REDIRECT_HOPS = 5;
 const MAX_WAIT_MS = 10 * 60 * 1000;
+export const MAX_AMO_JSON_BYTES = 1024 * 1024;
+export const MAX_AMO_JSON_DEPTH = 64;
+export const MAX_AMO_POLL_INTERVAL_MS = 60 * 1000;
+export const MIN_AMO_POLL_INTERVAL_MS = 100;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const SOURCE_DIGEST_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const STRICT_MIN_VERSION_RE = /^\d+(?:\.\d+){1,3}$/;
+const VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+export const RELEASE_ADD_ON_ID = "chzzk@solitude0429.local";
+export const RELEASE_SOURCE_REPOSITORY = "solitude0429/CHZZK";
+export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk-updates.alpha-apple.dedyn.io/updates.json";
+export const RELEASE_PACKAGE_FILES = Object.freeze([
+  "background.js",
+  "diagnostics.html",
+  "diagnostics.js",
+  "icon-32.png",
+  "icon-48.png",
+  "icon-96.png",
+  "icon.png",
+  "manifest.json",
+  "site-observer.js",
+]);
+
+function assertExactKeys(value, expectedKeys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const actualKeys = Object.keys(value).sort();
+  const canonicalKeys = [...expectedKeys].sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(canonicalKeys)) {
+    throw new Error(`${label} has invalid schema keys: ${actualKeys.join(", ")}`);
+  }
+}
+
+function assertSafePositiveSize(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+}
+
+export function assertReleaseMetadata(metadata) {
+  assertExactKeys(
+    metadata,
+    [
+      "addOnId",
+      "files",
+      "schemaVersion",
+      "sourceArchive",
+      "sourceDigest",
+      "sourceRepository",
+      "strictMinVersion",
+      "updateManifestUrl",
+      "version",
+    ],
+    "Release metadata",
+  );
+  if (metadata.schemaVersion !== 1) throw new Error("Unsupported release metadata schema");
+  if (!VERSION_RE.test(metadata.version)) throw new Error("Invalid release metadata version");
+  if (metadata.addOnId !== RELEASE_ADD_ON_ID) throw new Error("Release add-on ID is not canonical");
+  if (metadata.sourceRepository !== RELEASE_SOURCE_REPOSITORY) {
+    throw new Error("Release source repository is not canonical");
+  }
+  if (metadata.updateManifestUrl !== RELEASE_UPDATE_MANIFEST_URL) {
+    throw new Error("Release update manifest URL is not canonical");
+  }
+  if (!STRICT_MIN_VERSION_RE.test(metadata.strictMinVersion)) {
+    throw new Error("Invalid release strict minimum Firefox version");
+  }
+  if (!SOURCE_DIGEST_RE.test(metadata.sourceDigest)) {
+    throw new Error("Invalid release source digest");
+  }
+
+  assertExactKeys(metadata.sourceArchive, ["name", "sha256", "size"], "Release source archive");
+  if (metadata.sourceArchive.name !== `chzzk-${metadata.version}.zip`) {
+    throw new Error("Release source archive name is not canonical");
+  }
+  if (!SHA256_RE.test(metadata.sourceArchive.sha256)) {
+    throw new Error("Invalid release source archive digest");
+  }
+  assertSafePositiveSize(metadata.sourceArchive.size, "Release source archive size");
+
+  if (!Array.isArray(metadata.files) || metadata.files.length !== RELEASE_PACKAGE_FILES.length) {
+    throw new Error("Release metadata file list does not match the runtime allowlist");
+  }
+  const filesByPath = new Map();
+  for (const [index, file] of metadata.files.entries()) {
+    assertExactKeys(file, ["path", "sha256", "size"], `Release metadata file ${index}`);
+    if (typeof file.path !== "string" || filesByPath.has(file.path)) {
+      throw new Error("Release metadata contains a duplicate or invalid file path");
+    }
+    if (!SHA256_RE.test(file.sha256)) throw new Error(`Invalid release file digest: ${file.path}`);
+    assertSafePositiveSize(file.size, `Release file size: ${file.path}`);
+    filesByPath.set(file.path, file);
+  }
+  const actualPaths = [...filesByPath.keys()].sort();
+  const expectedPaths = [...RELEASE_PACKAGE_FILES].sort();
+  if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
+    throw new Error("Release metadata file list does not match the runtime allowlist");
+  }
+  return metadata;
+}
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -142,8 +245,96 @@ function cancelResponseBody(response) {
   }
 }
 
+function cancelReader(reader) {
+  try {
+    const cancellation = reader?.cancel?.();
+    if (cancellation && typeof cancellation.catch === "function") cancellation.catch(() => {});
+  } catch {
+    // Best-effort cancellation only; the bounded-read error remains authoritative.
+  }
+}
+
+function responseContentLength(response, operation, maxBytes) {
+  const rawValue = response?.headers?.get?.("content-length");
+  if (rawValue == null) return null;
+  const value = String(rawValue).trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) {
+    cancelResponseBody(response);
+    throw new Error(`AMO ${operation} response has an invalid Content-Length`);
+  }
+  const length = Number(value);
+  if (!Number.isSafeInteger(length) || length > maxBytes) {
+    cancelResponseBody(response);
+    throw new Error(`AMO ${operation} response size limit exceeded`);
+  }
+  return length;
+}
+
+async function readBoundedResponseBytes(response, { deadline, maxBytes, operation }) {
+  responseContentLength(response, operation, maxBytes);
+  if (!response?.body || typeof response.body.getReader !== "function") {
+    cancelResponseBody(response);
+    throw new Error(`AMO ${operation} response body is not a readable stream`);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let cancelled = false;
+  let totalBytes = 0;
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    cancelReader(reader);
+  };
+  try {
+    let streamComplete = false;
+    while (!streamComplete) {
+      const result = await withDeadline(reader.read(), deadline, `${operation} response`, () => cancel());
+      if (!result || typeof result.done !== "boolean") {
+        throw new Error(`AMO ${operation} response stream is invalid`);
+      }
+      if (result.done) {
+        streamComplete = true;
+        continue;
+      }
+      if (!(result.value instanceof Uint8Array)) {
+        throw new Error(`AMO ${operation} response stream returned an invalid chunk`);
+      }
+      totalBytes += result.value.byteLength;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > maxBytes) {
+        throw new Error(`AMO ${operation} response size limit exceeded`);
+      }
+      chunks.push(Buffer.from(result.value));
+    }
+  } catch (error) {
+    cancel();
+    throw error;
+  } finally {
+    try {
+      reader.releaseLock?.();
+    } catch {
+      // A cancelled or failed stream may already have released its lock.
+    }
+  }
+  return Buffer.concat(chunks, totalBytes);
+}
+
+function assertJsonNesting(value, operation) {
+  const pending = [{ depth: 0, value }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current.depth > MAX_AMO_JSON_DEPTH) {
+      throw new Error(`AMO ${operation} JSON response exceeds the nesting limit`);
+    }
+    if (!current.value || typeof current.value !== "object") continue;
+    for (const child of Array.isArray(current.value) ? current.value : Object.values(current.value)) {
+      pending.push({ depth: current.depth + 1, value: child });
+    }
+  }
+}
+
 async function fetchSignedXpi(fetchImpl, initialUrl, deadline, authorization) {
-  let currentUrl = String(initialUrl);
+  const approvedUrl = String(initialUrl);
+  let currentUrl = approvedUrl;
   for (let hop = 0; hop <= MAX_SIGNED_XPI_REDIRECT_HOPS; hop += 1) {
     if (!isAllowedAmoDownloadUrl(currentUrl)) {
       throw new Error("AMO signed download left the trusted download domain");
@@ -173,10 +364,18 @@ async function fetchSignedXpi(fetchImpl, initialUrl, deadline, authorization) {
       }
       const location = response?.headers?.get?.("location");
       if (!location) throw new Error("AMO signed download redirect omitted its location");
+      cancelResponseBody(response);
       currentUrl = new URL(location, currentUrl).toString();
       continue;
     }
     if (!response?.ok) {
+      if (hop === 0 && currentUrl === approvedUrl && status === 404) {
+        cancelResponseBody(response);
+        const error = new Error("AMO approved signed download is not available yet");
+        error.code = "AMO_SIGNED_DOWNLOAD_NOT_READY";
+        throw error;
+      }
+      cancelResponseBody(response);
       throw new Error(`AMO signed download failed with HTTP ${response?.status ?? "unknown"}`);
     }
     const finalUrl = typeof response.url === "string" && response.url ? response.url : currentUrl;
@@ -196,24 +395,28 @@ function atomicWrite(path, bytes) {
 }
 
 async function readJsonResponse(response, operation, deadline) {
-  if (!response?.ok) throw new Error(`AMO ${operation} failed with HTTP ${response?.status ?? "unknown"}`);
+  if (!response?.ok) {
+    cancelResponseBody(response);
+    throw new Error(`AMO ${operation} failed with HTTP ${response?.status ?? "unknown"}`);
+  }
+  const bytes = await readBoundedResponseBytes(response, {
+    deadline,
+    maxBytes: MAX_AMO_JSON_BYTES,
+    operation: `${operation} JSON`,
+  });
+  let value;
   try {
-    return await withDeadline(response.json(), deadline, `${operation} response`, () =>
-      cancelResponseBody(response),
-    );
-  } catch (error) {
-    if (error.code === "AMO_TIMEOUT") throw error;
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    value = JSON.parse(text);
+  } catch {
     throw new Error(`AMO ${operation} returned invalid JSON`);
   }
+  assertJsonNesting(value, operation);
+  return value;
 }
 
 function validateMetadata(metadata, sourceArchivePath) {
-  if (!metadata || metadata.schemaVersion !== 1) throw new Error("Unsupported release metadata schema");
-  if (!/^\d+\.\d+\.\d+$/.test(String(metadata.version ?? ""))) throw new Error("Invalid release version");
-  if (typeof metadata.addOnId !== "string" || !metadata.addOnId) throw new Error("Invalid Firefox add-on ID");
-  if (!SHA256_RE.test(String(metadata.sourceArchive?.sha256 ?? ""))) {
-    throw new Error("Invalid prepared archive digest");
-  }
+  assertReleaseMetadata(metadata);
   if (metadata.sourceArchive.name !== basename(sourceArchivePath)) {
     throw new Error("Prepared archive name does not match release metadata");
   }
@@ -321,12 +524,22 @@ export async function signPreparedAddon({
   if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 1 || maxWaitMs > MAX_WAIT_MS) {
     throw new Error("AMO signing timeout is invalid");
   }
+  if (
+    !Number.isSafeInteger(pollIntervalMs) ||
+    pollIntervalMs < MIN_AMO_POLL_INTERVAL_MS ||
+    pollIntervalMs > MAX_AMO_POLL_INTERVAL_MS
+  ) {
+    throw new Error("AMO poll interval is invalid");
+  }
   if (!outputDir || !sourceArchivePath) throw new Error("outputDir and sourceArchivePath are required");
   validateMetadata(metadata, sourceArchivePath);
   assertRegularPrivateInput(sourceArchivePath);
   const sourceBytes = readFileSync(sourceArchivePath);
-  if (sha256(sourceBytes) !== metadata.sourceArchive.sha256) {
-    throw new Error("Prepared archive digest does not match release metadata");
+  if (
+    sha256(sourceBytes) !== metadata.sourceArchive.sha256 ||
+    sourceBytes.length !== metadata.sourceArchive.size
+  ) {
+    throw new Error("Prepared archive bytes do not match release metadata");
   }
   mkdirSync(outputDir, { mode: 0o700, recursive: true });
   const deadline = Date.now() + maxWaitMs;
@@ -428,17 +641,30 @@ export async function signPreparedAddon({
   }
   if (!isAllowedAmoDownloadUrl(downloadUrl)) throw new Error("AMO returned an untrusted signed download URL");
 
-  const signedResponse = await fetchSignedXpi(
-    fetchImpl,
-    downloadUrl,
+  let signedResponse;
+  for (let attempt = 1; attempt <= MAX_SIGNED_XPI_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      signedResponse = await fetchSignedXpi(
+        fetchImpl,
+        downloadUrl,
+        deadline,
+        `JWT ${makeJwt(apiKey, apiSecret)}`,
+      );
+      break;
+    } catch (error) {
+      if (error.code !== "AMO_SIGNED_DOWNLOAD_NOT_READY") throw error;
+      if (attempt === MAX_SIGNED_XPI_DOWNLOAD_ATTEMPTS) {
+        throw new Error("AMO signed download exceeded the bounded 404 retry limit");
+      }
+      await withDeadline(sleep(pollIntervalMs), deadline, "signed download availability");
+    }
+  }
+  if (!signedResponse) throw new Error("AMO signed download did not return a response");
+  const signedBytes = await readBoundedResponseBytes(signedResponse, {
     deadline,
-    `JWT ${makeJwt(apiKey, apiSecret)}`,
-  );
-  const signedBytes = Buffer.from(
-    await withDeadline(signedResponse.arrayBuffer(), deadline, "signed download response", () =>
-      cancelResponseBody(signedResponse),
-    ),
-  );
+    maxBytes: MAX_SIGNED_XPI_BYTES,
+    operation: "signed download",
+  });
   if (signedBytes.length <= 0 || signedBytes.length > MAX_SIGNED_XPI_BYTES) {
     throw new Error("AMO signed XPI size is invalid");
   }

@@ -7,7 +7,7 @@
 1. `prepare` job이 protected `main` source commit에서 정확한 runtime allowlist만 mode `0700` staging에 복사합니다.
 2. staging에서 결정적 unsigned ZIP과 `release-metadata.json`을 생성합니다. metadata에는 add-on ID, 버전, 최소 Firefox 버전, runtime file digest, source commit, source repository가 들어갑니다.
 3. 최소 권한 `sign` job이 ZIP/metadata/signer digest를 다시 확인한 뒤 AMO secret으로 exact ZIP만 제출합니다.
-4. 별도 read-only job이 signed XPI의 `manifest.json`은 semantic JSON으로, 나머지 runtime은 prepared ZIP과 바이트 단위로 검증합니다. `META-INF/` 서명 파일 외의 추가 파일은 허용하지 않습니다.
+4. 별도 read-only job이 signed XPI의 exact ZIP/runtime/signature-metadata 구조를 검증합니다. `manifest.json` number는 lossless decimal token으로 비교하고, 나머지 runtime은 prepared ZIP과 바이트 단위로 검증합니다. 이 단계는 Mozilla signature authenticity를 주장하지 않습니다.
 5. 별도 attestation job이 source ZIP, metadata, signed XPI를 같은 source commit과 signing workflow에 묶습니다.
 6. 운영자가 admin-only API로 repository immutable-releases 설정을 사전 확인하고, publish job이 compatible partial draft를 재개해 세 asset을 재검증한 뒤 공개 후 `immutable: true`를 확인합니다.
 7. VPS deploy client가 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
@@ -82,16 +82,18 @@ Deploy client는 로컬 `package.json`이나 `manifest.json`으로 `updates.json
 - add-on ID, version, `strict_min_version`: release metadata/signed manifest와 동일
 - update link path: `/releases/<version>/chzzk-<version>-signed.xpi`
 
-실제 Firefox 엔진의 synthetic E2E:
+실제 Firefox 엔진의 unsigned synthetic functional-only E2E:
 
 ```bash
 npm run setup:firefox-e2e
 FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
 GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
-npm run test:firefox-e2e
+npm run test:firefox-functional-e2e
 ```
 
-이 테스트는 격리된 Developer Edition profile에서 실제 `webRequestBlocking` 재생 redirect와 `AddonManager.findUpdates` 업데이트를 검증합니다. fixture XPI는 테스트 전용 unsigned artifact이므로 해당 profile에서만 signature/update certificate 검사를 끕니다. 실제 배포 artifact는 AMO 서명과 attestation 검증을 반드시 통과해야 합니다.
+이 테스트는 격리된 Developer Edition profile에서 실제 `webRequestBlocking` 재생 redirect와 `AddonManager.findUpdates` 기능을 검증할 뿐 authenticity gate가 아닙니다. fixture XPI는 테스트 전용 unsigned artifact이므로 해당 profile에서만 signature/update certificate 검사를 끕니다.
+
+실제 배포 artifact는 `docs/TESTING.md`의 `test:firefox-signed-smoke`를 추가로 통과해야 합니다. install mode는 최종 AMO-signed XPI를 stock Firefox 기본 서명 설정으로 영구 설치합니다. update mode는 배포 후 이전 signed version의 production `update_url`을 통해 최종 version으로 갱신합니다. 필요한 signed XPI가 없으면 명시적으로 실패하며 skip하지 않습니다.
 
 ## 첫 설치와 사용자 확인
 

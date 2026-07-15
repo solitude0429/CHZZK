@@ -9,6 +9,7 @@ import {
   buildUpdateManifestDocument,
   validateUpdateManifestDocument,
 } from "../../scripts/lib/update-manifest.js";
+import { RELEASE_PACKAGE_FILES } from "../../scripts/lib/release-artifacts.js";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -17,6 +18,11 @@ function sha256(bytes) {
 function metadata() {
   return {
     addOnId: "chzzk@solitude0429.local",
+    files: RELEASE_PACKAGE_FILES.map((path, index) => ({
+      path,
+      sha256: String(index + 1).repeat(64),
+      size: index + 1,
+    })),
     schemaVersion: 1,
     sourceArchive: {
       name: "chzzk-0.1.4.zip",

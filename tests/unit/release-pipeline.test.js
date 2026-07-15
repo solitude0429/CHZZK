@@ -7,15 +7,22 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 
-import { signPreparedAddon } from "../../scripts/lib/amo-client.js";
+import { MAX_SIGNED_XPI_BYTES, signPreparedAddon } from "../../scripts/lib/amo-client.js";
 import {
   RELEASE_PACKAGE_FILES,
   prepareReleaseArtifacts,
-  verifySignedReleaseArtifacts,
+  verifySignedReleaseStructure,
 } from "../../scripts/lib/release-artifacts.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const SYNTHETIC_AMO_CREDENTIAL = ["synthetic", "credential", "value"].join("-");
+const STRUCTURAL_SIGNATURE_FIXTURE = Object.freeze({
+  "META-INF/cose.manifest": Buffer.alloc(512, "m"),
+  "META-INF/cose.sig": Buffer.alloc(1024, "c"),
+  "META-INF/manifest.mf": Buffer.alloc(512, "f"),
+  "META-INF/mozilla.rsa": Buffer.alloc(1024, "r"),
+  "META-INF/mozilla.sf": Buffer.alloc(128, "s"),
+});
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -30,17 +37,29 @@ function makeReleaseFixture() {
   return rootDir;
 }
 
-function syntheticMetadata(sourceArchiveSha256) {
+function addManifestNumericFixture(rootDir, token) {
+  const manifestPath = join(rootDir, "manifest.json");
+  const manifestText = readFileSync(manifestPath, "utf8");
+  writeFileSync(manifestPath, manifestText.replace(/^\{/, `{\n  "numeric_fixture": ${token},`));
+}
+
+function syntheticMetadata(sourceArchiveSha256, sourceArchiveSize) {
   return {
-    addOnId: "chzzk-quality@solitude.local",
+    addOnId: "chzzk@solitude0429.local",
+    files: RELEASE_PACKAGE_FILES.map((path, index) => ({
+      path,
+      sha256: String(index + 1).repeat(64),
+      size: index + 1,
+    })),
     schemaVersion: 1,
     sourceArchive: {
       name: "chzzk-0.1.4.zip",
       sha256: sourceArchiveSha256,
+      size: sourceArchiveSize,
     },
     sourceDigest: "a".repeat(40),
     sourceRepository: "solitude0429/CHZZK",
-    strictMinVersion: "115.0",
+    strictMinVersion: "140.0",
     updateManifestUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
     version: "0.1.4",
   };
@@ -55,7 +74,7 @@ function makeAmoInput(prefix = "chzzk-amo-review-") {
     cleanup() {
       rmSync(outputDir, { force: true, recursive: true });
     },
-    metadata: syntheticMetadata(sha256(sourceBytes)),
+    metadata: syntheticMetadata(sha256(sourceBytes), sourceBytes.length),
     outputDir,
     sourceArchivePath,
   };
@@ -147,6 +166,7 @@ async function buildSyntheticSignedXpi(
   mutateManifest = null,
   transformManifestBytes = null,
   transformEntryName = null,
+  signatureMetadata = STRUCTURAL_SIGNATURE_FIXTURE,
 ) {
   const source = await JSZip.loadAsync(readFileSync(sourceArchivePath));
   const signed = new JSZip();
@@ -166,12 +186,58 @@ async function buildSyntheticSignedXpi(
       date: new Date("1980-01-01T00:00:00.000Z"),
     });
   }
-  signed.file("META-INF/mozilla.rsa", Buffer.from("synthetic signature"));
+  for (const [name, bytes] of Object.entries(signatureMetadata)) {
+    signed.file(name, bytes, { createFolders: false });
+  }
   writeFileSync(outputPath, await signed.generateAsync({ type: "nodebuffer" }), { mode: 0o600 });
 }
 
-describe("signed release verification", () => {
-  it("binds the signed XPI to the prepared archive metadata while allowing only signature metadata extras", async () => {
+async function assertSignedZipResourceRejected({ compression, expected, replaceRuntime }) {
+  const rootDir = makeReleaseFixture();
+  const outputDir = mkdtempSync(join(tmpdir(), "chzzk-zip-resource-"));
+  try {
+    const prepared = await prepareReleaseArtifacts({
+      outputDir,
+      rootDir,
+      sourceDigest: "5".repeat(40),
+      sourceRepository: "solitude0429/CHZZK",
+    });
+    const source = await JSZip.loadAsync(readFileSync(prepared.sourceArchivePath));
+    const signed = new JSZip();
+    for (const entry of Object.values(source.files)) {
+      if (entry.dir) continue;
+      const originalBytes = await entry.async("nodebuffer");
+      signed.file(entry.name, replaceRuntime(entry.name, originalBytes), { createFolders: false });
+    }
+    for (const [name, bytes] of Object.entries(STRUCTURAL_SIGNATURE_FIXTURE)) {
+      signed.file(name, bytes, { createFolders: false });
+    }
+    const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+    writeFileSync(
+      signedXpiPath,
+      await signed.generateAsync({
+        compression,
+        compressionOptions: compression === "DEFLATE" ? { level: 9 } : undefined,
+        type: "nodebuffer",
+      }),
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      verifySignedReleaseStructure({
+        metadataPath: prepared.metadataPath,
+        signedXpiPath,
+        sourceArchivePath: prepared.sourceArchivePath,
+      }),
+      expected,
+    );
+  } finally {
+    rmSync(rootDir, { force: true, recursive: true });
+    rmSync(outputDir, { force: true, recursive: true });
+  }
+}
+
+describe("signed release structural verification", () => {
+  it("binds an AMO-shaped XPI to prepared metadata without claiming signature authenticity", async () => {
     const rootDir = makeReleaseFixture();
     const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signed-release-"));
     try {
@@ -184,7 +250,7 @@ describe("signed release verification", () => {
       const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
       await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath);
 
-      const verified = await verifySignedReleaseArtifacts({
+      const verified = await verifySignedReleaseStructure({
         metadataPath: prepared.metadataPath,
         signedXpiPath,
         sourceArchivePath: prepared.sourceArchivePath,
@@ -192,6 +258,7 @@ describe("signed release verification", () => {
 
       assert.equal(verified.version, prepared.metadata.version);
       assert.equal(verified.signedXpiSha256, sha256(readFileSync(signedXpiPath)));
+      assert.equal(verified.verification, "structural-only");
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
       rmSync(outputDir, { force: true, recursive: true });
@@ -215,7 +282,7 @@ describe("signed release verification", () => {
         manifest.name = name;
       });
 
-      const verified = await verifySignedReleaseArtifacts({
+      const verified = await verifySignedReleaseStructure({
         metadataPath: prepared.metadataPath,
         signedXpiPath,
         sourceArchivePath: prepared.sourceArchivePath,
@@ -225,6 +292,84 @@ describe("signed release verification", () => {
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
       rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("does not collapse distinct JSON numeric tokens during manifest comparison", async () => {
+    const collisions = [
+      ["9007199254740992", "9007199254740993"],
+      ["0", "1e-400"],
+      ["1.0000000000000000", "1.0000000000000001"],
+      ["-0", "0"],
+    ];
+    for (const [sourceToken, signedToken] of collisions) {
+      const rootDir = makeReleaseFixture();
+      const outputDir = mkdtempSync(join(tmpdir(), "chzzk-json-number-"));
+      try {
+        addManifestNumericFixture(rootDir, sourceToken);
+        const prepared = await prepareReleaseArtifacts({
+          outputDir,
+          rootDir,
+          sourceDigest: "2".repeat(40),
+          sourceRepository: "solitude0429/CHZZK",
+        });
+        const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+        await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath, null, (bytes) => {
+          const source = `"numeric_fixture": ${sourceToken}`;
+          assert.equal(bytes.toString("utf8").includes(source), true);
+          return Buffer.from(bytes.toString("utf8").replace(source, `"numeric_fixture": ${signedToken}`));
+        });
+
+        await assert.rejects(
+          verifySignedReleaseStructure({
+            metadataPath: prepared.metadataPath,
+            signedXpiPath,
+            sourceArchivePath: prepared.sourceArchivePath,
+          }),
+          /manifest|metadata|numeric/i,
+          `${sourceToken} and ${signedToken} must remain distinguishable`,
+        );
+      } finally {
+        rmSync(rootDir, { force: true, recursive: true });
+        rmSync(outputDir, { force: true, recursive: true });
+      }
+    }
+  });
+
+  it("normalizes mathematically equivalent JSON exponent spellings losslessly", async () => {
+    for (const [sourceToken, signedToken] of [
+      ["100", "1e2"],
+      ["1.2300e2", "123"],
+    ]) {
+      const rootDir = makeReleaseFixture();
+      const outputDir = mkdtempSync(join(tmpdir(), "chzzk-json-number-"));
+      try {
+        addManifestNumericFixture(rootDir, sourceToken);
+        const prepared = await prepareReleaseArtifacts({
+          outputDir,
+          rootDir,
+          sourceDigest: "3".repeat(40),
+          sourceRepository: "solitude0429/CHZZK",
+        });
+        const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+        await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath, null, (bytes) =>
+          Buffer.from(
+            bytes
+              .toString("utf8")
+              .replace(`"numeric_fixture": ${sourceToken}`, `"numeric_fixture": ${signedToken}`),
+          ),
+        );
+
+        const verified = await verifySignedReleaseStructure({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        });
+        assert.equal(verified.version, prepared.metadata.version);
+      } finally {
+        rmSync(rootDir, { force: true, recursive: true });
+        rmSync(outputDir, { force: true, recursive: true });
+      }
     }
   });
 
@@ -244,7 +389,7 @@ describe("signed release verification", () => {
       });
 
       await assert.rejects(
-        verifySignedReleaseArtifacts({
+        verifySignedReleaseStructure({
           metadataPath: prepared.metadataPath,
           signedXpiPath,
           sourceArchivePath: prepared.sourceArchivePath,
@@ -276,7 +421,7 @@ describe("signed release verification", () => {
       });
 
       await assert.rejects(
-        verifySignedReleaseArtifacts({
+        verifySignedReleaseStructure({
           metadataPath: prepared.metadataPath,
           signedXpiPath,
           sourceArchivePath: prepared.sourceArchivePath,
@@ -305,7 +450,7 @@ describe("signed release verification", () => {
       );
 
       await assert.rejects(
-        verifySignedReleaseArtifacts({
+        verifySignedReleaseStructure({
           metadataPath: prepared.metadataPath,
           signedXpiPath,
           sourceArchivePath: prepared.sourceArchivePath,
@@ -317,6 +462,110 @@ describe("signed release verification", () => {
       rmSync(outputDir, { force: true, recursive: true });
     }
   });
+
+  it("enforces the exact bounded Mozilla signature metadata structure", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signature-structure-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "4".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const exact = Object.fromEntries(
+        Object.entries(STRUCTURAL_SIGNATURE_FIXTURE).map(([name, bytes]) => [name, Buffer.from(bytes)]),
+      );
+      const cases = [
+        { "META-INF/mozilla.rsa": Buffer.from("synthetic signature") },
+        Object.fromEntries(Object.entries(exact).filter(([name]) => name !== "META-INF/cose.sig")),
+        { ...exact, "META-INF/cose.sig": Buffer.alloc(0) },
+        { ...exact, "META-INF/unexpected.sig": Buffer.alloc(1024, "x") },
+        { ...exact, "META-INF/mozilla.rsa": Buffer.alloc(128 * 1024, "x") },
+      ];
+
+      for (const [index, signatureMetadata] of cases.entries()) {
+        const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+        await buildSyntheticSignedXpi(
+          prepared.sourceArchivePath,
+          signedXpiPath,
+          null,
+          null,
+          null,
+          signatureMetadata,
+        );
+        await assert.rejects(
+          verifySignedReleaseStructure({
+            metadataPath: prepared.metadataPath,
+            signedXpiPath,
+            sourceArchivePath: prepared.sourceArchivePath,
+          }),
+          /signature metadata|META-INF|signature.*size/i,
+          `invalid signature metadata case ${index} must fail structurally`,
+        );
+      }
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a signed XPI above the compressed archive cap before ZIP parsing", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-zip-compressed-cap-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "6".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      writeFileSync(signedXpiPath, Buffer.alloc(16 * 1024 * 1024 + 1), { mode: 0o600 });
+      await assert.rejects(
+        verifySignedReleaseStructure({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        }),
+        /compressed archive size limit/i,
+      );
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects oversized compressed and uncompressed entries from central-directory metadata", async () => {
+    await assertSignedZipResourceRejected({
+      compression: "STORE",
+      expected: /compressed entry size limit/i,
+      replaceRuntime: (name, bytes) =>
+        name === "background.js" ? Buffer.alloc(3 * 1024 * 1024, "x") : bytes,
+    });
+    await assertSignedZipResourceRejected({
+      compression: "DEFLATE",
+      expected: /uncompressed entry size limit/i,
+      replaceRuntime: (name, bytes) =>
+        name === "background.js" ? Buffer.alloc(5 * 1024 * 1024, "x") : bytes,
+    });
+  });
+
+  it("rejects excessive aggregate uncompressed size before full inflation", async () => {
+    await assertSignedZipResourceRejected({
+      compression: "STORE",
+      expected: /aggregate uncompressed size limit/i,
+      replaceRuntime: () => Buffer.alloc(1024 * 1024, "a"),
+    });
+  });
+
+  it("rejects excessive central-directory compression ratios before full inflation", async () => {
+    await assertSignedZipResourceRejected({
+      compression: "DEFLATE",
+      expected: /compression ratio limit/i,
+      replaceRuntime: (name, bytes) => (name === "background.js" ? Buffer.alloc(1024 * 1024, 0) : bytes),
+    });
+  });
 });
 
 describe("minimal AMO signing client", () => {
@@ -325,7 +574,7 @@ describe("minimal AMO signing client", () => {
     const sourceArchivePath = join(outputDir, "chzzk-0.1.4.zip");
     const sourceBytes = Buffer.from("synthetic deterministic source archive");
     writeFileSync(sourceArchivePath, sourceBytes, { mode: 0o600 });
-    const metadata = syntheticMetadata(sha256(sourceBytes));
+    const metadata = syntheticMetadata(sha256(sourceBytes), sourceBytes.length);
     const requests = [];
     let validationPolls = 0;
     let approvalPolls = 0;
@@ -394,7 +643,7 @@ describe("minimal AMO signing client", () => {
         fetchImpl,
         metadata,
         outputDir,
-        pollIntervalMs: 0,
+        pollIntervalMs: 100,
         sourceArchivePath,
       });
 
@@ -440,7 +689,7 @@ describe("minimal AMO signing client", () => {
     const sourceArchivePath = join(outputDir, "chzzk-0.1.4.zip");
     const sourceBytes = Buffer.from("synthetic deterministic source archive");
     writeFileSync(sourceArchivePath, sourceBytes, { mode: 0o600 });
-    const metadata = syntheticMetadata(sha256(sourceBytes));
+    const metadata = syntheticMetadata(sha256(sourceBytes), sourceBytes.length);
     const requests = [];
 
     const fetchImpl = async (url, options = {}) => {
@@ -479,7 +728,7 @@ describe("minimal AMO signing client", () => {
         fetchImpl,
         metadata,
         outputDir,
-        pollIntervalMs: 0,
+        pollIntervalMs: 100,
         sourceArchivePath,
       });
 
@@ -495,6 +744,348 @@ describe("minimal AMO signing client", () => {
       assert.equal(requests.length, 2);
     } finally {
       rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("retries only approved-URL 404s with a fresh JWT inside the global deadline", async () => {
+    const input = makeAmoInput("chzzk-amo-retry-");
+    const approvedUrl = "https://addons.mozilla.org/firefox/downloads/file/retry.xpi";
+    const redirectedUrl = "https://cdn.addons.mozilla.org/firefox/downloads/file/retry-final.xpi";
+    const approvedAuthorizations = [];
+    let approvedAttempts = 0;
+    let redirectedAuthorization;
+    const fetchImpl = async (url, options = {}) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: { status: "public", url: approvedUrl },
+              id: 2468,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      if (String(url) === approvedUrl) {
+        approvedAttempts += 1;
+        approvedAuthorizations.push(options.headers.get("Authorization"));
+        if (approvedAttempts < 3) return new Response("not propagated", { status: 404 });
+        return new Response(null, { headers: { location: redirectedUrl }, status: 302 });
+      }
+      if (String(url) === redirectedUrl) {
+        redirectedAuthorization = options.headers.get("Authorization");
+        return new Response(Buffer.from("eventually signed xpi"), { status: 200 });
+      }
+      return new Response("unexpected request", { status: 500 });
+    };
+    try {
+      const result = await signPreparedAddon({
+        apiKey: SYNTHETIC_AMO_CREDENTIAL,
+        apiSecret: "synthetic-secret",
+        fetchImpl,
+        ...input,
+        pollIntervalMs: 100,
+      });
+      assert.deepEqual(readFileSync(result.signedXpiPath), Buffer.from("eventually signed xpi"));
+      assert.equal(approvedAttempts, 3);
+      assert.equal(new Set(approvedAuthorizations).size, 3, "every retry must mint a fresh JWT");
+      assert.equal(
+        approvedAuthorizations.every((authorization) => /^JWT /.test(authorization)),
+        true,
+      );
+      assert.equal(redirectedAuthorization, null, "redirect hops must not receive AMO authorization");
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("stops repeated approved-URL 404 retries at the one global signing deadline", async () => {
+    const input = makeAmoInput("chzzk-amo-retry-deadline-");
+    let downloadAttempts = 0;
+    const fetchImpl = async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: {
+                status: "public",
+                url: "https://addons.mozilla.org/firefox/downloads/file/not-ready.xpi",
+              },
+              id: 1357,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      downloadAttempts += 1;
+      return new Response("not propagated", { status: 404 });
+    };
+    try {
+      await assertControlledAmoTimeout(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          maxWaitMs: 25,
+          pollIntervalMs: 100,
+        }),
+      );
+      assert.equal(downloadAttempts, 1);
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("fails a signed-download 403 immediately without retrying", async () => {
+    const input = makeAmoInput("chzzk-amo-forbidden-");
+    let downloadAttempts = 0;
+    const fetchImpl = async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: {
+                status: "public",
+                url: "https://addons.mozilla.org/firefox/downloads/file/forbidden.xpi",
+              },
+              id: 9753,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      downloadAttempts += 1;
+      return new Response("forbidden", { status: 403 });
+    };
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          pollIntervalMs: 100,
+        }),
+        /HTTP 403/i,
+      );
+      assert.equal(downloadAttempts, 1);
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("validates the AMO poll interval as a bounded safe integer before any request", async () => {
+    for (const pollIntervalMs of [-1, 0, 99, 100.5, Number.NaN, 60_001]) {
+      const input = makeAmoInput("chzzk-amo-poll-interval-");
+      let fetchCalls = 0;
+      try {
+        await assert.rejects(
+          signPreparedAddon({
+            apiKey: SYNTHETIC_AMO_CREDENTIAL,
+            apiSecret: "synthetic-secret",
+            fetchImpl: async () => {
+              fetchCalls += 1;
+              throw new Error("network must not be reached");
+            },
+            ...input,
+            pollIntervalMs,
+          }),
+          /poll interval/i,
+        );
+        assert.equal(fetchCalls, 0);
+      } finally {
+        input.cleanup();
+      }
+    }
+  });
+
+  it("rejects oversized signed Content-Length and cancels before reading the body", async () => {
+    const input = makeAmoInput("chzzk-amo-content-length-");
+    const downloadUrl = "https://addons.mozilla.org/firefox/downloads/file/oversized-length.xpi";
+    let arrayBufferCalls = 0;
+    let cancelCalls = 0;
+    const fetchImpl = async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: { status: "public", url: downloadUrl },
+              id: 8642,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      return {
+        arrayBuffer: async () => {
+          arrayBufferCalls += 1;
+          return new Uint8Array([1]).buffer;
+        },
+        body: {
+          cancel() {
+            cancelCalls += 1;
+            return Promise.resolve();
+          },
+        },
+        headers: new Headers({ "content-length": String(MAX_SIGNED_XPI_BYTES + 1) }),
+        ok: true,
+        status: 200,
+        url: downloadUrl,
+      };
+    };
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          pollIntervalMs: 100,
+        }),
+        /signed download.*size limit/i,
+      );
+      assert.equal(arrayBufferCalls, 0);
+      assert.equal(cancelCalls, 1);
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("streams and cancels an undeclared oversized signed body before aggregate allocation", async () => {
+    const input = makeAmoInput("chzzk-amo-stream-cap-");
+    const downloadUrl = "https://addons.mozilla.org/firefox/downloads/file/oversized-stream.xpi";
+    const chunk = new Uint8Array(1024 * 1024);
+    let cancelCalls = 0;
+    let reads = 0;
+    const fetchImpl = async (url) => {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.endsWith("/versions/")) {
+        return Response.json({
+          next: null,
+          results: [
+            {
+              channel: "unlisted",
+              file: { status: "public", url: downloadUrl },
+              id: 8643,
+              version: input.metadata.version,
+            },
+          ],
+        });
+      }
+      return {
+        arrayBuffer: async () => {
+          throw new Error("arrayBuffer must not be used for signed downloads");
+        },
+        body: {
+          getReader() {
+            return {
+              cancel() {
+                cancelCalls += 1;
+                return Promise.resolve();
+              },
+              async read() {
+                reads += 1;
+                return { done: false, value: chunk };
+              },
+            };
+          },
+        },
+        headers: new Headers(),
+        ok: true,
+        status: 200,
+        url: downloadUrl,
+      };
+    };
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl,
+          ...input,
+          pollIntervalMs: 100,
+        }),
+        /signed download.*size limit/i,
+      );
+      assert.equal(reads, MAX_SIGNED_XPI_BYTES / chunk.byteLength + 1);
+      assert.equal(cancelCalls, 1);
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("bounds AMO JSON response bytes before parsing and cancels oversized bodies", async () => {
+    const input = makeAmoInput("chzzk-amo-json-cap-");
+    let cancelCalls = 0;
+    let jsonCalls = 0;
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl: async () => ({
+            body: {
+              cancel() {
+                cancelCalls += 1;
+                return Promise.resolve();
+              },
+            },
+            headers: new Headers({ "content-length": String(1024 * 1024 + 1) }),
+            json: async () => {
+              jsonCalls += 1;
+              return { next: null, results: [] };
+            },
+            ok: true,
+            status: 200,
+          }),
+          ...input,
+          pollIntervalMs: 100,
+        }),
+        /JSON response.*size limit/i,
+      );
+      assert.equal(jsonCalls, 0);
+      assert.equal(cancelCalls, 1);
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("rejects AMO JSON responses beyond the nesting limit", async () => {
+    const input = makeAmoInput("chzzk-amo-json-depth-");
+    let nested = { version: "not-the-target" };
+    for (let depth = 0; depth < 65; depth += 1) nested = [nested];
+    let fetchCalls = 0;
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl: async () => {
+            fetchCalls += 1;
+            if (fetchCalls > 1) throw new Error("nesting must fail before another request");
+            return Response.json({ next: null, results: [nested] });
+          },
+          ...input,
+          pollIntervalMs: 100,
+        }),
+        /JSON response.*nesting limit/i,
+      );
+      assert.equal(fetchCalls, 1);
+    } finally {
+      input.cleanup();
     }
   });
 
@@ -532,7 +1123,7 @@ describe("minimal AMO signing client", () => {
             apiSecret: "synthetic-secret",
             fetchImpl,
             ...input,
-            pollIntervalMs: 0,
+            pollIntervalMs: 100,
           }),
           /unlisted|release metadata|version/i,
         );
@@ -583,7 +1174,7 @@ describe("minimal AMO signing client", () => {
             apiSecret: "synthetic-secret",
             fetchImpl,
             ...input,
-            pollIntervalMs: 0,
+            pollIntervalMs: 100,
           }),
           /unlisted|release metadata|version/i,
         );
@@ -626,7 +1217,7 @@ describe("minimal AMO signing client", () => {
           apiSecret: "synthetic-secret",
           fetchImpl,
           ...input,
-          pollIntervalMs: 0,
+          pollIntervalMs: 100,
         }),
         /duplicate target versions/i,
       );
@@ -653,7 +1244,7 @@ describe("minimal AMO signing client", () => {
           fetchImpl: async () => new Promise(() => {}),
           ...input,
           maxWaitMs: 25,
-          pollIntervalMs: 0,
+          pollIntervalMs: 100,
         }),
       );
     } finally {
@@ -669,13 +1260,20 @@ describe("minimal AMO signing client", () => {
           apiKey: SYNTHETIC_AMO_CREDENTIAL,
           apiSecret: "synthetic-secret",
           fetchImpl: async () => ({
-            json: async () => new Promise(() => {}),
+            body: {
+              getReader: () => ({
+                cancel: () => Promise.resolve(),
+                read: async () => new Promise(() => {}),
+                releaseLock() {},
+              }),
+            },
+            headers: new Headers(),
             ok: true,
             status: 200,
           }),
           ...input,
           maxWaitMs: 25,
-          pollIntervalMs: 0,
+          pollIntervalMs: 100,
         }),
       );
     } finally {
@@ -713,7 +1311,7 @@ describe("minimal AMO signing client", () => {
           fetchImpl,
           ...input,
           maxWaitMs: 25,
-          pollIntervalMs: 0,
+          pollIntervalMs: 100,
         }),
       );
     } finally {
@@ -740,7 +1338,13 @@ describe("minimal AMO signing client", () => {
         });
       }
       return {
-        arrayBuffer: async () => new Promise(() => {}),
+        body: {
+          getReader: () => ({
+            cancel: () => Promise.resolve(),
+            read: async () => new Promise(() => {}),
+            releaseLock() {},
+          }),
+        },
         headers: new Headers(),
         ok: true,
         status: 200,
@@ -755,7 +1359,7 @@ describe("minimal AMO signing client", () => {
           fetchImpl,
           ...input,
           maxWaitMs: 25,
-          pollIntervalMs: 0,
+          pollIntervalMs: 100,
         }),
       );
     } finally {

@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { basename, join, parse, resolve, sep } from "node:path";
 
-import { assertReleaseMetadata, verifySignedReleaseArtifacts } from "./release-artifacts.js";
+import { assertReleaseMetadata, verifySignedReleaseStructure } from "./release-artifacts.js";
 import { buildUpdateManifestDocument, validateUpdateManifestDocument } from "./update-manifest.js";
 
 const MANAGED_LINK_NAMES = Object.freeze(["current", "index.html", "provenance.json", "updates.json"]);
@@ -615,7 +615,7 @@ export async function deployUpdateRelease({
     releaseDeploymentLock.assertHeld();
     onTransactionStep("lock-acquired");
 
-    const verified = await verifySignedReleaseArtifacts({
+    const verified = await verifySignedReleaseStructure({
       metadataPath,
       signedXpiPath,
       sourceArchivePath,

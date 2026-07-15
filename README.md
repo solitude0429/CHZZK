@@ -56,8 +56,12 @@ npm run build
 npm run setup:firefox-e2e
 FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
 GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
-npm run test:firefox-e2e
+npm run test:firefox-functional-e2e
 ```
+
+That unsigned Developer Edition test is functional-only. Release authenticity uses the separate
+stock-Firefox signed-artifact gate documented in `docs/TESTING.md`; it requires real AMO-signed XPIs
+and never disables Firefox signature enforcement.
 
 Generated runtime files are `background.js`, `diagnostics.js`, and `site-observer.js`. Edit `src/`, `policy/`, or tests, then run `npm run build:runtime`.
 

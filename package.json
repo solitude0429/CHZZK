@@ -24,13 +24,16 @@
     "setup:firefox-e2e": "node scripts/setup-firefox-e2e.js",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
-    "test:firefox-e2e": "node tests/e2e/firefox-update-playback.mjs",
+    "test:firefox-e2e": "npm run test:firefox-functional-e2e",
+    "test:firefox-functional-e2e": "node tests/e2e/firefox-update-playback.mjs",
+    "test:firefox-signed-smoke": "node scripts/firefox-signed-smoke.js",
     "validate:manifest": "node scripts/validate-manifest.js",
     "validate:project": "node scripts/validate-project-cleanliness.js",
     "validate:update-manifest": "node scripts/validate-update-manifest.js",
     "validate:workflows": "node scripts/validate-workflows.js",
     "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run audit:deps && npm run build && npm run audit:package",
-    "verify:signed-release": "node scripts/verify-signed-release.js"
+    "verify:signed-release": "npm run verify:signed-release-structure",
+    "verify:signed-release-structure": "node scripts/verify-signed-release-structure.js"
   },
   "devDependencies": {
     "esbuild": "0.28.1",
