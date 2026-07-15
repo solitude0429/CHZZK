@@ -205,7 +205,6 @@ async function main() {
       let reviews = [];
       let reviewThreads = [];
       let headCommit;
-      let issueReactions;
       let reviewRequestComments;
       if (required) {
         reviews = paginatedArrays(
@@ -220,10 +219,6 @@ async function main() {
         });
         if (!exactReview) {
           headCommit = getJson(`repos/${repository}/commits/${currentHeadSha}`, "Head commit lookup");
-          issueReactions = paginatedArrays(
-            `repos/${repository}/issues/${pullNumber}/reactions?per_page=100`,
-            "Pull request reaction listing",
-          );
           reviewRequestComments = listReviewRequestComments(
             repository,
             pullNumber,
@@ -238,7 +233,6 @@ async function main() {
         files,
         forceReview,
         headCommit,
-        issueReactions,
         labels,
         pullRequest,
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,

@@ -6,6 +6,8 @@ import { join, resolve } from "node:path";
 
 const FIREFOX_VERSION = "153.0b12";
 const GECKODRIVER_VERSION = "0.37.0";
+const MAX_FIREFOX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+const MAX_GECKODRIVER_ARCHIVE_BYTES = 32 * 1024 * 1024;
 const platform = {
   arm64: {
     firefoxArch: "linux-aarch64",
@@ -40,7 +42,50 @@ function digest(path, algorithm) {
   return createHash(algorithm).update(readFileSync(path)).digest("hex");
 }
 
-async function downloadVerified({ algorithm, expectedDigest, path, url }) {
+async function readBoundedDownload(response, maxBytes, url) {
+  const rawLength = response.headers.get("content-length");
+  if (rawLength !== null) {
+    if (!/^(?:0|[1-9]\d*)$/.test(rawLength)) {
+      await response.body?.cancel();
+      throw new Error(`Download returned an invalid Content-Length for ${url}`);
+    }
+    const contentLength = Number(rawLength);
+    if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > maxBytes) {
+      await response.body?.cancel();
+      throw new Error(`Download size limit exceeded for ${url}`);
+    }
+  }
+  if (!response.body || typeof response.body.getReader !== "function") {
+    throw new Error(`Download did not provide a readable stream for ${url}`);
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    let streamComplete = false;
+    while (!streamComplete) {
+      const { done, value } = await reader.read();
+      if (done) {
+        streamComplete = true;
+        continue;
+      }
+      if (!(value instanceof Uint8Array)) throw new Error(`Download stream was invalid for ${url}`);
+      totalBytes += value.byteLength;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error(`Download size limit exceeded for ${url}`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (totalBytes <= 0) throw new Error(`Download was empty for ${url}`);
+  return Buffer.concat(chunks, totalBytes);
+}
+
+async function downloadVerified({ algorithm, expectedDigest, maxBytes, path, url }) {
   try {
     if (digest(path, algorithm) === expectedDigest) return;
   } catch {
@@ -51,7 +96,7 @@ async function downloadVerified({ algorithm, expectedDigest, path, url }) {
   if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS E2E tool URL: ${url}`);
   const response = await fetch(url, { headers: { "user-agent": "CHZZK-Firefox-E2E-setup/1" } });
   if (!response.ok) throw new Error(`Download failed (${response.status}) for ${url}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const bytes = await readBoundedDownload(response, maxBytes, url);
   const actualDigest = createHash(algorithm).update(bytes).digest("hex");
   if (actualDigest !== expectedDigest) {
     throw new Error(`Checksum mismatch for ${url}: expected ${expectedDigest}, got ${actualDigest}`);
@@ -72,12 +117,14 @@ mkdirSync(downloadsDir, { mode: 0o755, recursive: true });
 await downloadVerified({
   algorithm: "sha512",
   expectedDigest: platform.firefoxSha512,
+  maxBytes: MAX_FIREFOX_ARCHIVE_BYTES,
   path: firefoxArchive,
   url: firefoxUrl,
 });
 await downloadVerified({
   algorithm: "sha256",
   expectedDigest: platform.geckodriverSha256,
+  maxBytes: MAX_GECKODRIVER_ARCHIVE_BYTES,
   path: geckodriverArchive,
   url: geckodriverUrl,
 });

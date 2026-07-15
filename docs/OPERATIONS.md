@@ -16,7 +16,7 @@ npm run test:firefox-functional-e2e
 
 This is the unsigned functional-only gate. After AMO signing, the release workflow must run the stock-Firefox install gate from `docs/TESTING.md` with the real final XPI before attestation/publication. After update-host deployment, run its old-signed-to-new-signed update mode. Do not waive either mode because an artifact is missing; the harness intentionally fails instead of skipping.
 
-5. Open a GitHub PR and wait for all required CI/review gates. For release/security paths or the explicit review labels, `CHZZK review completion` requires zero unresolved threads plus either the configured reviewer's exact-head review or its strictly post-head `+1`. Prefer an operator request comment containing the full current SHA; rerequest or manually re-evaluate after every push.
+5. Open a GitHub PR and wait for all required CI/review gates. For release/security paths or the explicit review labels, `CHZZK review completion` requires zero unresolved threads plus either the configured reviewer's exact-head review or its `+1` on an operator request comment containing the full current head SHA. PR-level reactions are not accepted; rerequest or manually re-evaluate after every push.
 6. Merge to protected `main`.
 7. From an Actions-external clean checkout at the exact remote `main` head, authenticate as the configured narrow release operator and run the immutable-release preflight. Do not use the Actions UI or put the administrator credential in Actions.
 

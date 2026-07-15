@@ -159,6 +159,10 @@ describe("release and repository security guardrails", () => {
     const setup = read("scripts/setup-firefox-signed-smoke.js");
     assert.match(setup, /archive\.mozilla\.org\/pub\/firefox\/releases/);
     assert.doesNotMatch(setup, /devedition/i);
+    const functionalSetup = read("scripts/setup-firefox-e2e.js");
+    assert.match(functionalSetup, /MAX_FIREFOX_ARCHIVE_BYTES/);
+    assert.match(functionalSetup, /body\.getReader\(\)/);
+    assert.doesNotMatch(functionalSetup, /response\.arrayBuffer\(\)/);
     assert.equal(structuralIndex >= 0, true);
     assert.equal(setupIndex > structuralIndex, true);
     assert.equal(smokeIndex > setupIndex, true);
@@ -251,7 +255,7 @@ describe("release and repository security guardrails", () => {
     assert.match(text, /CHZZK_POLL_SECONDS/);
     assert.match(text, /CHZZK review completion/);
     assert.match(checker, /pulls\/\$\{pullNumber\}\/reviews/);
-    assert.match(checker, /issues\/\$\{pullNumber\}\/reactions/);
+    assert.doesNotMatch(checker, /issues\/\$\{pullNumber\}\/reactions/);
     assert.match(checker, /issues\/comments\/\$\{comment\.id\}\/reactions/);
     assert.match(checker, /commits\/\$\{currentHeadSha\}/);
     assert.match(settings, /required_status_checks/);

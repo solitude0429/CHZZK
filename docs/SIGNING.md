@@ -42,9 +42,9 @@ CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" npm run release:dispatch
 Release/security-sensitive PR은 path 분류와 `security-review-required`/`release-review-required` label을 함께 사용합니다. gate는 `AUTOMATED_REVIEW_LOGIN`의 정확한 계정(`chatgpt-codex-connector[bot]`)이 남긴 다음 실제 signal 중 하나와 unresolved review thread 0개를 요구합니다.
 
 - dismissed되지 않은 submitted review의 `commit_id`가 현재 PR head SHA와 정확히 일치
-- reviewer의 `+1` reaction `created_at`이 현재 head commit의 `commit.committer.date`보다 엄격히 늦음
+- `RELEASE_OPERATOR_LOGIN`이 작성하고 full current head SHA를 포함한 PR issue comment에 reviewer가 `+1` reaction을 남김
 
-두 번째 경로에서는 `RELEASE_OPERATOR_LOGIN`이 작성하고 full current head SHA를 포함한 PR issue comment의 reaction을 먼저 사용합니다. reaction timestamp는 head commit보다 늦고 comment의 `updated_at`보다 이르지 않아야 하므로, 이 comment reaction은 SHA에 직접 묶인 request anchor입니다. 실제 no-findings 동작처럼 PR 자체에 달린 issue-level `+1`만 있는 경우에는 이를 fallback으로 사용합니다. GitHub의 issue reaction에는 commit SHA가 없으므로 fallback은 timestamp에만 묶입니다. 따라서 head commit timestamp 이전 또는 같은 초의 reaction은 항상 stale로 거부되지만, 비단조적인 committer timestamp가 있는 새 head에 대해서는 과거 reaction을 SHA 차원에서 구분할 수 없다는 잔여 제약이 있습니다. 가능한 경우 operator comment에 full SHA를 넣어 review를 요청합니다. identity, SHA, state, 또는 필요한 timestamp가 없거나 malformed이면 gate는 실패합니다.
+두 번째 경로에서는 reaction timestamp가 head commit보다 늦고 comment의 `updated_at`보다 이르지 않아야 하므로, signal이 full SHA request anchor에 직접 묶입니다. PR 자체에 달린 issue-level `+1`은 commit SHA를 담지 않으며 backdated commit에 재사용될 수 있으므로 gate evidence로 인정하지 않습니다. identity, SHA, state, 또는 필요한 timestamp가 없거나 malformed이면 gate는 실패합니다.
 
 workflow는 `pull_request_target`, review/review-comment, issue-comment event에서 trusted default branch만 checkout하며 PR code를 실행하지 않습니다. reaction 전용 Actions event가 없으므로 PR `opened`/`synchronize`에서는 최대 180초 동안 15초 간격으로 bounded polling하고, 그 밖에는 **Review completion gate**의 `workflow_dispatch`로 안전하게 재평가합니다. schedule과 gate check-run self-trigger는 사용하지 않습니다. 성공/실패 결과는 정확한 current head에 GitHub Actions가 만든 `CHZZK review completion` check로 게시합니다.
 

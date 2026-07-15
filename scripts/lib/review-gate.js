@@ -191,21 +191,12 @@ function hasBoundRequestReaction({
   return false;
 }
 
-function hasIssueReaction({ headTimestamp, issueReactions, reviewerLogin }) {
-  if (!Array.isArray(issueReactions)) throw new Error("Pull request reaction response is missing");
-  return issueReactions.some(
-    (reaction) =>
-      validReviewerReaction(reaction, reviewerLogin, headTimestamp, "Pull request reaction") !== null,
-  );
-}
-
 export function evaluateReviewCompletion({
   automatedReviewLogin,
   expectedHeadSha = "",
   files,
   forceReview = false,
   headCommit,
-  issueReactions,
   labels,
   pullRequest,
   releaseOperatorLogin,
@@ -254,14 +245,5 @@ export function evaluateReviewCompletion({
       state: "success",
     };
   }
-  if (hasIssueReaction({ headTimestamp, issueReactions, reviewerLogin })) {
-    return {
-      description: "Reviewer +1 postdates the PR head commit; no unresolved review threads",
-      headSha,
-      required: true,
-      state: "success",
-    };
-  }
-
-  pending("Automated reviewer has no exact-head review or post-head +1 reaction");
+  pending("Automated reviewer has no exact-head review or exact-head operator-request +1 reaction");
 }

@@ -88,7 +88,7 @@ describe("exact-head release and security review completion", () => {
             reviews: [exactReview({ commit_id: staleSha })],
           }),
         ),
-      /no exact-head review|post-head \+1/i,
+      /no exact-head review|exact-head operator request/i,
     );
     assert.throws(
       () =>
@@ -97,38 +97,25 @@ describe("exact-head release and security review completion", () => {
             reviews: [exactReview({ state: "DISMISSED" })],
           }),
         ),
-      /no exact-head review|post-head \+1/i,
+      /no exact-head review|exact-head operator request/i,
     );
   });
 
-  it("accepts the connector's issue-level +1 only when it strictly postdates the head commit", () => {
-    assert.deepEqual(
-      evaluateReviewCompletion(
-        sensitiveEvaluation({
-          issueReactions: [plusOne()],
-          reviews: [],
-        }),
-      ),
-      {
-        description: "Reviewer +1 postdates the PR head commit; no unresolved review threads",
-        headSha,
-        required: true,
-        state: "success",
-      },
+  it("rejects an unbound issue-level +1 even when a later head is backdated", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            headCommit: {
+              commit: { committer: { date: "2026-07-15T09:00:00Z" } },
+              sha: headSha,
+            },
+            issueReactions: [plusOne()],
+            reviews: [],
+          }),
+        ),
+      /no exact-head review|exact-head operator request/i,
     );
-
-    for (const createdAt of ["2026-07-15T09:59:59Z", headTimestamp]) {
-      assert.throws(
-        () =>
-          evaluateReviewCompletion(
-            sensitiveEvaluation({
-              issueReactions: [plusOne({ created_at: createdAt })],
-              reviews: [],
-            }),
-          ),
-        /no exact-head review|post-head \+1/i,
-      );
-    }
   });
 
   it("prefers a +1 bound to an operator comment containing the full exact head SHA", () => {
@@ -172,7 +159,7 @@ describe("exact-head release and security review completion", () => {
             reviews: [],
           }),
         ),
-      /no exact-head review|post-head \+1/i,
+      /no exact-head review|exact-head operator request/i,
     );
   });
 
@@ -185,7 +172,7 @@ describe("exact-head release and security review completion", () => {
             reviews: [exactReview({ user: { login: "different-reviewer[bot]" } })],
           }),
         ),
-      /no exact-head review|post-head \+1/i,
+      /no exact-head review|exact-head operator request/i,
     );
   });
 
@@ -195,9 +182,7 @@ describe("exact-head release and security review completion", () => {
         headCommit: { commit: { committer: { date: "not-a-date" } }, sha: headSha },
         reviews: [],
       },
-      { issueReactions: [plusOne({ created_at: "not-a-date" })], reviews: [] },
       { reviews: [exactReview({ submitted_at: "not-a-date" })] },
-      { issueReactions: [plusOne({ user: null })], reviews: [] },
       {
         reviewRequestComments: [
           {
