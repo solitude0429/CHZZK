@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertTrustedPermanentAddon,
+  bindGeckodriverService,
   buildProductionFirefoxCapabilities,
   validateSignedSmokeInputs,
 } from "../../scripts/lib/firefox-signed-smoke.js";
@@ -91,6 +92,14 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
       );
     } finally {
       files.cleanup();
+    }
+  });
+
+  it("binds the reserved geckodriver port into every disposable Firefox session", () => {
+    const input = { firefoxBinary: "/opt/firefox/firefox" };
+    assert.deepEqual(bindGeckodriverService(input, { port: 28_282 }), { ...input, port: 28_282 });
+    for (const port of [undefined, 0, 65_536, 1.5]) {
+      assert.throws(() => bindGeckodriverService(input, { port }), /geckodriver.*port/i);
     }
   });
 

@@ -97,6 +97,13 @@ export function validateSignedSmokeInputs({
   };
 }
 
+export function bindGeckodriverService(input, service) {
+  if (!Number.isSafeInteger(service?.port) || service.port < 1 || service.port > 65_535) {
+    throw new Error("geckodriver service did not provide a valid port");
+  }
+  return { ...input, port: service.port };
+}
+
 export function buildProductionFirefoxCapabilities({ firefoxBinary, profileDir }) {
   return {
     alwaysMatch: {
@@ -356,13 +363,14 @@ export async function runFirefoxSignedSmoke(rawInput) {
     expectedUpdateUrl: input.metadata.updateManifestUrl,
     expectedVersion: input.metadata.version,
   };
+  const firefoxInput = bindGeckodriverService(input, service);
   try {
-    const finalInstall = await withDisposableFirefox(input, (driver) =>
+    const finalInstall = await withDisposableFirefox(firefoxInput, (driver) =>
       installAndInspect(driver, input.newSignedXpiPath, expectedFinal),
     );
     let update = null;
     if (input.mode === "update") {
-      update = await withDisposableFirefox(input, async (driver) => {
+      update = await withDisposableFirefox(firefoxInput, async (driver) => {
         const before = await installAndInspect(driver, input.oldSignedXpiPath, {
           ...expectedFinal,
           expectedVersion: input.oldVersion,
