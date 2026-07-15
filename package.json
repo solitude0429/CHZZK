@@ -27,6 +27,7 @@
     "setup:firefox-signed-smoke": "node scripts/setup-firefox-signed-smoke.js",
     "sign:unlisted": "node scripts/sign-unlisted.js",
     "test": "node --test tests/unit/*.test.js",
+    "test:audit-fuzz": "node scripts/audit-fuzz.js",
     "test:firefox-e2e": "npm run test:firefox-functional-e2e",
     "test:firefox-functional-e2e": "node tests/e2e/firefox-update-playback.mjs",
     "test:firefox-signed-smoke": "node scripts/firefox-signed-smoke.js",
@@ -34,7 +35,7 @@
     "validate:project": "node scripts/validate-project-cleanliness.js",
     "validate:update-manifest": "node scripts/validate-update-manifest.js",
     "validate:workflows": "node scripts/validate-workflows.js",
-    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run audit:deps && npm run build && npm run audit:package",
+    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:audit-fuzz && npm run audit:deps && npm run build && npm run audit:package",
     "verify:signed-release": "npm run verify:signed-release-structure",
     "verify:signed-release-structure": "node scripts/verify-signed-release-structure.js"
   },

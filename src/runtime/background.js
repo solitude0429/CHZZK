@@ -6,6 +6,10 @@ import {
   updateRuntimeRedirectDiagnostics,
 } from "../shared/diagnostics.js";
 import {
+  isLikelyHlsPlaylist,
+  isUtf8TextWithinByteLimit,
+} from "../shared/playlist-evidence.js";
+import {
   configuredResourceTypes,
   configuredWebRequestUrls,
   hasContradictoryChzzkMetadata,
@@ -149,17 +153,6 @@ function redirectFailureBackoffMs() {
     : 10_000;
 }
 
-function isLikelyHlsPlaylist(text) {
-  let source = String(text ?? "");
-  if (source.charCodeAt(0) === 0xfeff) source = source.slice(1);
-  for (const line of source.split(/\r\n|[\r\n]/)) {
-    const candidate = line.replace(/^[\t ]+|[\t ]+$/g, "");
-    if (candidate === "") continue;
-    return candidate === "#EXTM3U";
-  }
-  return false;
-}
-
 function responseHeader(response, name) {
   return response?.headers?.get?.(name) ?? null;
 }
@@ -189,7 +182,7 @@ async function readResponseTextWithLimit(response, maxBytes) {
 
   if (!response?.body?.getReader) {
     const text = String(await response.text());
-    return new TextEncoder().encode(text).byteLength > maxBytes ? null : text;
+    return isUtf8TextWithinByteLimit(text, maxBytes) ? text : null;
   }
 
   const reader = response.body.getReader();

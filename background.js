@@ -598,6 +598,22 @@
     return true;
   }
 
+  // src/shared/playlist-evidence.js
+  function isLikelyHlsPlaylist(text) {
+    let source = String(text ?? "");
+    if (source.charCodeAt(0) === 65279) source = source.slice(1);
+    for (const line of source.split(/\r\n|[\r\n]/)) {
+      const candidate = line.replace(/^[\t ]+|[\t ]+$/g, "");
+      if (candidate === "") continue;
+      return candidate === "#EXTM3U";
+    }
+    return false;
+  }
+  function isUtf8TextWithinByteLimit(text, maxBytes) {
+    if (!Number.isFinite(maxBytes) || maxBytes < 0) return false;
+    return new TextEncoder().encode(String(text ?? "")).byteLength <= maxBytes;
+  }
+
   // src/shared/request-policy.js
   var DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
   var DEFAULT_REQUEST_METHODS = ["get"];
@@ -925,16 +941,6 @@
       ? Math.min(configured, MAX_REDIRECT_FAILURE_BACKOFF_MS)
       : 1e4;
   }
-  function isLikelyHlsPlaylist(text) {
-    let source = String(text ?? "");
-    if (source.charCodeAt(0) === 65279) source = source.slice(1);
-    for (const line of source.split(/\r\n|[\r\n]/)) {
-      const candidate = line.replace(/^[\t ]+|[\t ]+$/g, "");
-      if (candidate === "") continue;
-      return candidate === "#EXTM3U";
-    }
-    return false;
-  }
   function responseHeader(response, name) {
     return response?.headers?.get?.(name) ?? null;
   }
@@ -960,7 +966,7 @@
     if (declaredLength > maxBytes) return null;
     if (!response?.body?.getReader) {
       const text = String(await response.text());
-      return new TextEncoder().encode(text).byteLength > maxBytes ? null : text;
+      return isUtf8TextWithinByteLimit(text, maxBytes) ? text : null;
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
