@@ -73,35 +73,40 @@ jobs:
           SIGNED_SHA=""
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "false"
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
             test "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = "false"
-            TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
-            TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
-            if [ "$TYPE" = "tag" ]; then
-              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
+            if [ "$IS_DRAFT" = "false" ]; then
+              test "$(gh release view "$TAG" --json isImmutable --jq .isImmutable)" = "true"
+              TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
+              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
+              if [ "$TYPE" = "tag" ]; then
+                TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
+              fi
+              test "$TAG_SHA" = "$GITHUB_SHA"
+              test "$(gh release view "$TAG" --json assets --jq '.assets | length')" = "3"
+              mkdir -p existing
+              gh release download "$TAG" --dir existing \
+                --pattern "chzzk-${VERSION}.zip" \
+                --pattern "chzzk-${VERSION}-release-metadata.json" \
+                --pattern "chzzk-${VERSION}-signed.xpi"
+              cmp "$SOURCE" "existing/chzzk-${VERSION}.zip"
+              cmp "$METADATA" "existing/chzzk-${VERSION}-release-metadata.json"
+              CHZZK_RELEASE_METADATA="existing/chzzk-${VERSION}-release-metadata.json" \
+                CHZZK_SIGNED_XPI="existing/chzzk-${VERSION}-signed.xpi" \
+                CHZZK_UNSIGNED_XPI="existing/chzzk-${VERSION}.zip" \
+                npm run verify:signed-release
+              for ASSET in existing/*; do
+                gh attestation verify "$ASSET" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --source-digest "$GITHUB_SHA" \
+                  --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
+              done
+              cp "existing/chzzk-${VERSION}-signed.xpi" "$SIGNED"
+              SIGNED_SHA=$(sha256sum "$SIGNED" | cut -d ' ' -f1)
+              REUSE=true
+            else
+              test "$IS_DRAFT" = "true"
             fi
-            test "$TAG_SHA" = "$GITHUB_SHA"
-            test "$(gh release view "$TAG" --json assets --jq '.assets | length')" = "3"
-            mkdir -p existing
-            gh release download "$TAG" --dir existing \
-              --pattern "chzzk-${VERSION}.zip" \
-              --pattern "chzzk-${VERSION}-release-metadata.json" \
-              --pattern "chzzk-${VERSION}-signed.xpi"
-            cmp "$SOURCE" "existing/chzzk-${VERSION}.zip"
-            cmp "$METADATA" "existing/chzzk-${VERSION}-release-metadata.json"
-            CHZZK_RELEASE_METADATA="existing/chzzk-${VERSION}-release-metadata.json" \
-              CHZZK_SIGNED_XPI="existing/chzzk-${VERSION}-signed.xpi" \
-              CHZZK_UNSIGNED_XPI="existing/chzzk-${VERSION}.zip" \
-              npm run verify:signed-release
-            for ASSET in existing/*; do
-              gh attestation verify "$ASSET" \
-                --repo "$GITHUB_REPOSITORY" \
-                --source-digest "$GITHUB_SHA" \
-                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
-            done
-            cp "existing/chzzk-${VERSION}-signed.xpi" "$SIGNED"
-            SIGNED_SHA=$(sha256sum "$SIGNED" | cut -d ' ' -f1)
-            REUSE=true
           fi
 
           {
@@ -264,6 +269,7 @@ jobs:
           path: release-assets
       - name: Publish immutable release assets
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
@@ -276,16 +282,34 @@ jobs:
           test "$(sha256sum "$METADATA" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.metadata_sha256 }}"
           test "$(sha256sum "$SIGNED" | cut -d ' ' -f1)" = "${{ needs.verify-signed.outputs.signed_sha256 }}"
 
-          verify_existing_release() {
+          verify_release_identity() {
             EXPECTED_DRAFT="$1"
+            EXPECTED_IMMUTABLE="$2"
             test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "$EXPECTED_DRAFT"
             test "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = "false"
-            TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
-            TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
-            if [ "$TYPE" = "tag" ]; then
-              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
+            if [ "$EXPECTED_DRAFT" = "true" ]; then
+              if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+                TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
+                TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
+                if [ "$TYPE" = "tag" ]; then
+                  TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
+                fi
+                test "$TAG_SHA" = "$GITHUB_SHA"
+              else
+                test "$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
+              fi
+            else
+              TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
+              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
+              if [ "$TYPE" = "tag" ]; then
+                TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
+              fi
+              test "$TAG_SHA" = "$GITHUB_SHA"
             fi
-            test "$TAG_SHA" = "$GITHUB_SHA"
+            test "$(gh release view "$TAG" --json isImmutable --jq .isImmutable)" = "$EXPECTED_IMMUTABLE"
+          }
+
+          verify_exact_assets() {
             test "$(gh release view "$TAG" --json assets --jq '.assets | length')" = "3"
             VERIFY_DIR=$(mktemp -d)
             gh release download "$TAG" --dir "$VERIFY_DIR" \
@@ -298,34 +322,67 @@ jobs:
             rm -rf "$VERIFY_DIR"
           }
 
+          sync_draft_assets() {
+            REMOTE_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            while IFS= read -r REMOTE_ASSET; do
+              case "$REMOTE_ASSET" in
+                ""|"$(basename "$SOURCE")"|"$(basename "$METADATA")"|"$(basename "$SIGNED")") ;;
+                *) echo "Refusing unexpected draft asset: ${REMOTE_ASSET}" >&2; return 1 ;;
+              esac
+            done <<< "$REMOTE_ASSETS"
+
+            VERIFY_DIR=$(mktemp -d)
+            for ASSET in "$SOURCE" "$METADATA" "$SIGNED"; do
+              NAME=$(basename "$ASSET")
+              FOUND=false
+              while IFS= read -r REMOTE_ASSET; do
+                if [ "$REMOTE_ASSET" = "$NAME" ]; then
+                  FOUND=true
+                  break
+                fi
+              done <<< "$REMOTE_ASSETS"
+              if [ "$FOUND" = "true" ]; then
+                rm -rf "$VERIFY_DIR"
+                VERIFY_DIR=$(mktemp -d)
+                gh release download "$TAG" --dir "$VERIFY_DIR" --pattern "$NAME"
+                cmp "$ASSET" "$VERIFY_DIR/$NAME"
+              else
+                gh release upload "$TAG" "$ASSET"
+              fi
+            done
+            rm -rf "$VERIFY_DIR"
+          }
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            verify_existing_release false
-            exit 0
-          fi
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Refusing to publish over an orphaned existing tag: ${TAG}" >&2
-            exit 1
+            DRAFT_STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            if [ "$DRAFT_STATE" = "false" ]; then
+              verify_release_identity false true
+              verify_exact_assets
+              exit 0
+            fi
+            test "$DRAFT_STATE" = "true"
+            verify_release_identity true false
+          else
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "Refusing to publish over an orphaned existing tag: ${TAG}" >&2
+              exit 1
+            fi
+            if ! gh release create "$TAG" \
+              --draft \
+              --generate-notes \
+              --target "$GITHUB_SHA" \
+              --title "CHZZK ${VERSION}"; then
+              gh release view "$TAG" >/dev/null
+            fi
+            verify_release_identity true false
           fi
 
-          CREATED_DRAFT=false
-          cleanup_draft() {
-            DRAFT_STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
-            if [ "$CREATED_DRAFT" = "true" ] && [ "$DRAFT_STATE" = "true" ]; then
-              gh release delete "$TAG" --cleanup-tag --yes || true
-            fi
-          }
-          trap cleanup_draft ERR
-          CREATED_DRAFT=true
-          gh release create "$TAG" "$SOURCE" "$METADATA" "$SIGNED" \
-            --draft \
-            --generate-notes \
-            --target "$GITHUB_SHA" \
-            --title "CHZZK ${VERSION}"
-          verify_existing_release true
+          sync_draft_assets
+          verify_release_identity true false
+          verify_exact_assets
           gh release edit "$TAG" --draft=false
-          CREATED_DRAFT=false
-          trap - ERR
-          verify_existing_release false
+          verify_release_identity false true
+          verify_exact_assets
 
   complete:
     needs: [attest, prepare, publish, sign, verify-signed]

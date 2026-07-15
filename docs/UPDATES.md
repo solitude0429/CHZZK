@@ -9,7 +9,7 @@
 3. 최소 권한 `sign` job이 ZIP/metadata/signer digest를 다시 확인한 뒤 AMO secret으로 exact ZIP만 제출합니다.
 4. 별도 read-only job이 signed XPI의 runtime을 prepared ZIP과 바이트 단위로 검증합니다. `META-INF/` 서명 파일 외의 추가 파일은 허용하지 않습니다.
 5. 별도 attestation job이 source ZIP, metadata, signed XPI를 같은 source commit과 signing workflow에 묶습니다.
-6. publish job이 세 asset을 draft에서 재검증한 뒤 immutable GitHub Release로 공개합니다.
+6. 운영자가 admin-only API로 repository immutable-releases 설정을 사전 확인하고, publish job이 compatible partial draft를 재개해 세 asset을 재검증한 뒤 공개 후 `immutable: true`를 확인합니다.
 7. VPS deploy client가 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
 
 ## Update host 구조

@@ -1027,6 +1027,11 @@
     ]);
   }
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+    if (changeInfo?.status === "loading") {
+      removeTabTarget(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear tab target for document load", error),
+      );
+    }
     if (!changeInfo?.url) return;
     if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
       prewarmLiveTab(tabId, changeInfo.url).catch((error) =>

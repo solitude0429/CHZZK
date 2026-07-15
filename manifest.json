@@ -14,7 +14,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "content_security_policy": "script-src 'self'; object-src 'none'; base-uri 'none';",
   "permissions": [
     "https://*.akamaized.net/*",

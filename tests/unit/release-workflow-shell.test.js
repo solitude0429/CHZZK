@@ -25,6 +25,7 @@ const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 state.log.push(args);
 function save() { fs.writeFileSync(statePath, JSON.stringify(state)); }
 function fail() { save(); process.exit(1); }
+if (args[0] === "release" && process.env.GH_REPO !== process.env.GITHUB_REPOSITORY) fail();
 if (args[0] === "release" && args[1] === "view") {
   if (!state.releaseExists) fail();
   if (args.includes("--json")) {
@@ -40,7 +41,15 @@ if (args[0] === "release" && args[1] === "view") {
     }
     if (field === "isDraft") process.stdout.write(String(state.isDraft));
     else if (field === "isPrerelease") process.stdout.write(String(state.isPrerelease));
-    else if (field === "assets") process.stdout.write(String(state.assets.length));
+    else if (field === "assets") {
+      const query = args[args.indexOf("--jq") + 1];
+      if (query === ".assets | length") process.stdout.write(String(state.assets.length));
+      else if (query === ".assets[].name") process.stdout.write(state.assets.join("\\n"));
+      else fail();
+    }
+    else if (field === "databaseId") process.stdout.write(String(state.releaseId));
+    else if (field === "isImmutable") process.stdout.write(String(state.immutable));
+    else if (field === "targetCommitish") process.stdout.write(String(state.targetSha));
     else fail();
   }
   save(); process.exit(0);
@@ -49,6 +58,14 @@ if (args[0] === "api" && args[1].includes("/git/ref/tags/")) {
   if (!state.tagExists) fail();
   const query = args[args.indexOf("--jq") + 1];
   process.stdout.write(query === ".object.type" ? "commit" : state.tagSha);
+  save(); process.exit(0);
+}
+if (args[0] === "api" && args[1].includes("/releases/tags/")) {
+  if (!state.releaseExists || state.isDraft) fail();
+  const query = args[args.indexOf("--jq") + 1];
+  if (query === ".immutable") process.stdout.write(String(state.immutable));
+  else if (query === ".target_commitish") process.stdout.write(String(state.targetSha));
+  else fail();
   save(); process.exit(0);
 }
 if (args[0] === "release" && args[1] === "download") {
@@ -60,8 +77,9 @@ if (args[0] === "release" && args[1] === "download") {
 }
 if (args[0] === "release" && args[1] === "create") {
   if (state.releaseExists || state.tagExists) fail();
-  state.releaseExists = true; state.tagExists = true; state.tagSha = process.env.GITHUB_SHA;
-  state.isDraft = args.includes("--draft"); state.isPrerelease = false;
+  state.releaseExists = true; state.targetSha = process.env.GITHUB_SHA;
+  state.isDraft = args.includes("--draft"); state.isPrerelease = false; state.immutable = false;
+  state.tagExists = !state.isDraft; state.tagSha = process.env.GITHUB_SHA;
   state.assets = [];
   fs.mkdirSync(state.assetsDir, { recursive: true });
   for (const argument of args.slice(3)) {
@@ -73,25 +91,43 @@ if (args[0] === "release" && args[1] === "create") {
   if (process.env.FAIL_RELEASE_CREATE_AFTER_DRAFT === "true") process.exit(1);
   process.exit(0);
 }
+if (args[0] === "release" && args[1] === "upload") {
+  if (!state.releaseExists || !state.isDraft) fail();
+  for (const argument of args.slice(3)) {
+    if (argument.startsWith("--")) break;
+    const name = path.basename(argument);
+    if (state.assets.includes(name)) fail();
+    state.assets.push(name);
+    fs.copyFileSync(argument, path.join(state.assetsDir, name));
+  }
+  save(); process.exit(0);
+}
 if (args[0] === "release" && args[1] === "edit") {
-  if (args.includes("--draft=false")) state.isDraft = false;
+  if (args.includes("--draft=false")) {
+    state.isDraft = false;
+    state.immutable = state.immutableReleasesEnabled;
+    state.tagExists = true;
+    state.tagSha = state.targetSha;
+  }
   save();
   if (process.env.FAIL_EDIT_AFTER_PUBLISH === "true") process.exit(1);
   process.exit(0);
 }
 if (args[0] === "release" && args[1] === "delete") {
-  state.releaseExists = false; state.tagExists = false; save(); process.exit(0);
+  state.releaseExists = false; state.tagExists = false; state.immutable = false; save(); process.exit(0);
 }
 fail();
 `;
 }
 
 function runPublisher({
+  assetCount = null,
   existing = false,
   draft = false,
   failCreateAfterDraft = false,
   failEditAfterPublish = false,
   failPostPublishVerify = false,
+  immutableReleasesEnabled = true,
   mismatch = false,
   prerelease = false,
 } = {}) {
@@ -106,13 +142,16 @@ function runPublisher({
     `chzzk-${version}-release-metadata.json`,
     `chzzk-${version}-signed.xpi`,
   ];
+  const existingAssetNames = existing ? names.slice(0, assetCount ?? names.length) : [];
   try {
     for (const path of [binDir, releaseAssetsDir, remoteAssetsDir]) {
       mkdirSync(path, { recursive: true });
     }
     for (const [index, name] of names.entries()) {
       writeFileSync(join(releaseAssetsDir, name), `asset-${index}`);
-      if (existing) cpSync(join(releaseAssetsDir, name), join(remoteAssetsDir, name));
+      if (existingAssetNames.includes(name)) {
+        cpSync(join(releaseAssetsDir, name), join(remoteAssetsDir, name));
+      }
     }
     if (mismatch) writeFileSync(join(remoteAssetsDir, names[2]), "tampered");
 
@@ -125,21 +164,26 @@ function runPublisher({
     writeFileSync(
       statePath,
       JSON.stringify({
-        assets: existing ? names : [],
+        assets: existingAssetNames,
         assetsDir: remoteAssetsDir,
+        immutable: existing && !draft && immutableReleasesEnabled,
+        immutableReleasesEnabled,
         log: [],
         isDraft: draft,
         isPrerelease: prerelease,
         releaseExists: existing,
-        tagExists: existing,
+        releaseId: 9876,
+        tagExists: existing && !draft,
         tagSha: sourceDigest,
+        targetSha: sourceDigest,
       }),
     );
 
     const workflow = parse(readFileSync(join(repoRoot, ".github/workflows/sign-unlisted.yml"), "utf8"));
-    let script = workflow.jobs.publish.steps.find(
+    const publishStep = workflow.jobs.publish.steps.find(
       (step) => step.name === "Publish immutable release assets",
-    ).run;
+    );
+    let script = publishStep.run;
     const replacements = new Map([
       ["${{ needs.prepare.outputs.version }}", version],
       ["${{ needs.prepare.outputs.source_sha256 }}", sha256(join(releaseAssetsDir, names[0]))],
@@ -155,6 +199,7 @@ function runPublisher({
       FAIL_POST_PUBLISH_VERIFY: String(failPostPublishVerify),
       FAKE_GH_STATE: statePath,
       GH_TOKEN: "synthetic-token",
+      GH_REPO: publishStep.env?.GH_REPO === "${{ github.repository }}" ? "solitude0429/CHZZK" : undefined,
       GITHUB_REPOSITORY: "solitude0429/CHZZK",
       GITHUB_SHA: sourceDigest,
       PATH: `${binDir}:${process.env.PATH}`,
@@ -176,6 +221,26 @@ function runPublisher({
 }
 
 describe("immutable release publisher workflow shell", () => {
+  it("fails post-publication verification if GitHub does not mark the release immutable", () => {
+    const run = runPublisher({ immutableReleasesEnabled: false });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.equal(run.state.releaseExists, true);
+      assert.equal(run.state.isDraft, false);
+      assert.equal(run.state.immutable, false);
+      assert.equal(
+        run.state.log.some((args) => args[0] === "api" && args[1].includes("/immutable-releases")),
+        false,
+      );
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
+        false,
+      );
+    } finally {
+      run.cleanup();
+    }
+  });
+
   it("is a true no-op when an existing release has the same tag and exact bytes", () => {
     const run = runPublisher({ existing: true });
     try {
@@ -210,31 +275,54 @@ describe("immutable release publisher workflow shell", () => {
     }
   });
 
-  it("rejects an existing draft or prerelease instead of treating it as published reuse", () => {
-    for (const state of [{ draft: true }, { prerelease: true }]) {
-      const run = runPublisher({ existing: true, ...state });
-      try {
-        assert.notEqual(run.result.status, 0);
-        assert.equal(
-          run.state.log.some((args) => args[0] === "release" && ["create", "edit"].includes(args[1])),
-          false,
-        );
-      } finally {
-        run.cleanup();
-      }
+  it("rejects an existing prerelease instead of treating it as published reuse", () => {
+    const run = runPublisher({ existing: true, prerelease: true });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && ["create", "edit", "upload"].includes(args[1])),
+        false,
+      );
+    } finally {
+      run.cleanup();
     }
   });
 
-  it("removes a partial draft and tag when release creation fails during asset upload", () => {
+  it("resumes a compatible partial draft and publishes the exact asset set", () => {
+    const run = runPublisher({ assetCount: 1, draft: true, existing: true });
+    try {
+      assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
+      assert.equal(run.state.isDraft, false);
+      assert.equal(run.state.immutable, true);
+      assert.deepEqual([...run.state.assets].sort(), [
+        `chzzk-${version}-release-metadata.json`,
+        `chzzk-${version}-signed.xpi`,
+        `chzzk-${version}.zip`,
+      ]);
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "create"),
+        false,
+      );
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "upload"),
+        true,
+      );
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("recovers when release creation reports failure after committing the draft", () => {
     const run = runPublisher({ failCreateAfterDraft: true });
     try {
-      assert.notEqual(run.result.status, 0);
-      assert.equal(run.state.releaseExists, false, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
-      assert.equal(run.state.tagExists, false);
+      assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
+      assert.equal(run.state.releaseExists, true);
+      assert.equal(run.state.tagExists, true);
+      assert.equal(run.state.isDraft, false);
+      assert.equal(run.state.immutable, true);
       assert.equal(
         run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
-        true,
-        `${run.result.stderr}\n${JSON.stringify(run.state.log)}`,
+        false,
       );
     } finally {
       run.cleanup();

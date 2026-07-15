@@ -659,6 +659,34 @@ chunklist_1080p.m3u8?Policy=redacted
     );
   });
 
+  it("clears cached target quality when the same tab reloads the same CHZZK live URL", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const tabUrl = "https://chzzk.naver.com/live/channel-a";
+    const { fetches, listeners, storage } = await loadBackground({
+      availableQualities,
+      tabUrlsById: new Map([[8, tabUrl]]),
+    });
+
+    listeners.onUpdated(8, { url: tabUrl });
+    await waitForDiagnosticsQueue();
+    const firstRedirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(8)));
+    assert.match(firstRedirect.redirectUrl, /2160p/);
+    const fetchCountBeforeReload = fetches.length;
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    listeners.onUpdated(8, { status: "loading" });
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: 8 } });
+    await waitForDiagnosticsQueue();
+    const secondRedirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(8)));
+
+    assert.match(secondRedirect.redirectUrl, /1080p/);
+    assert.equal(fetches.length > fetchCountBeforeReload, true, "same-URL reload must start a new probe set");
+  });
+
   it("does not trust oversized playlist probe responses when selecting a target quality", async () => {
     const oversized1440 =
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1440p/segment/chunklist_1440p.m3u8?Policy=redacted";

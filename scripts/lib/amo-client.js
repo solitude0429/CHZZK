@@ -77,6 +77,19 @@ function isAllowedAmoDownloadUrl(value) {
   }
 }
 
+function isAllowedAuthenticatedAmoDownloadUrl(value) {
+  try {
+    const url = new URL(value);
+    return (
+      isAllowedAmoDownloadUrl(url) &&
+      url.hostname.toLowerCase() === AMO_DOWNLOAD_DOMAIN &&
+      (url.pathname.startsWith("/firefox/downloads/file/") || url.pathname.startsWith("/downloads/file/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function sleep(delayMs) {
   return delayMs > 0 ? new Promise((resolve) => setTimeout(resolve, delayMs)) : Promise.resolve();
 }
@@ -129,17 +142,24 @@ function cancelResponseBody(response) {
   }
 }
 
-async function fetchSignedXpi(fetchImpl, initialUrl, deadline) {
+async function fetchSignedXpi(fetchImpl, initialUrl, deadline, authorization) {
   let currentUrl = String(initialUrl);
   for (let hop = 0; hop <= MAX_SIGNED_XPI_REDIRECT_HOPS; hop += 1) {
     if (!isAllowedAmoDownloadUrl(currentUrl)) {
       throw new Error("AMO signed download left the trusted download domain");
     }
+    const headers = new Headers({ Accept: "application/octet-stream" });
+    if (hop === 0) {
+      if (!isAllowedAuthenticatedAmoDownloadUrl(currentUrl)) {
+        throw new Error("AMO signed download URL cannot receive developer authorization");
+      }
+      headers.set("Authorization", authorization);
+    }
     const response = await fetchWithDeadline(
       fetchImpl,
       currentUrl,
       {
-        headers: new Headers({ Accept: "application/octet-stream" }),
+        headers,
         method: "GET",
         redirect: "manual",
       },
@@ -157,12 +177,6 @@ async function fetchSignedXpi(fetchImpl, initialUrl, deadline) {
       continue;
     }
     if (!response?.ok) {
-      if (status === 404) {
-        cancelResponseBody(response);
-        const error = new Error("AMO signed download is not available yet");
-        error.code = "AMO_SIGNED_DOWNLOAD_NOT_READY";
-        throw error;
-      }
       throw new Error(`AMO signed download failed with HTTP ${response?.status ?? "unknown"}`);
     }
     const finalUrl = typeof response.url === "string" && response.url ? response.url : currentUrl;
@@ -414,15 +428,12 @@ export async function signPreparedAddon({
   }
   if (!isAllowedAmoDownloadUrl(downloadUrl)) throw new Error("AMO returned an untrusted signed download URL");
 
-  let signedResponse;
-  while (!signedResponse) {
-    try {
-      signedResponse = await fetchSignedXpi(fetchImpl, downloadUrl, deadline);
-    } catch (error) {
-      if (error.code !== "AMO_SIGNED_DOWNLOAD_NOT_READY") throw error;
-      await withDeadline(sleep(pollIntervalMs), deadline, "signed download availability");
-    }
-  }
+  const signedResponse = await fetchSignedXpi(
+    fetchImpl,
+    downloadUrl,
+    deadline,
+    `JWT ${makeJwt(apiKey, apiSecret)}`,
+  );
   const signedBytes = Buffer.from(
     await withDeadline(signedResponse.arrayBuffer(), deadline, "signed download response", () =>
       cancelResponseBody(signedResponse),
