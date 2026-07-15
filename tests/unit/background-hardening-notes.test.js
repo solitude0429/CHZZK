@@ -20,7 +20,11 @@ describe("background hardening invariants", () => {
   it("prewarms CHZZK live tabs before the first playlist request is observed", () => {
     const observer = readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8");
     assert.match(observer, /chzzk\.live-page-ready/);
-    assert.match(observer, /sendMessage/);
+    assert.equal(
+      (observer.match(/api\.runtime\.sendMessage\s*\(/g) ?? []).length,
+      1,
+      "site observer must emit exactly one prewarm message per script execution",
+    );
     assert.equal(
       source.includes("sender?.url") || source.includes("sender?.tab?.url") || source.includes("tabUrl"),
       false,
