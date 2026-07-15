@@ -14,19 +14,45 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 다음 값을 GitHub repos
 ## 릴리스 workflow
 
 1. 버전을 올린 PR을 `main`에 병합합니다.
-2. Actions → **Sign and publish unlisted Firefox release** → **Run workflow**를 선택합니다.
-3. workflow는 `main` protected ref인지 확인한 뒤 다음 권한 경계를 유지합니다.
+2. 저장소 관리자/릴리스 운영자는 Actions 밖의 깨끗한 `main` checkout에서 아래 preflight를 실행합니다. 이 명령은 현재 인증 주체, 원격 default branch의 정확한 commit, 로컬 version, repository immutable-releases 설정을 한 번에 고정한 뒤에만 제한된 `repository_dispatch`를 보냅니다.
+
+```bash
+CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" npm run release:dispatch
+```
+
+3. workflow는 직접 `workflow_dispatch`할 수 없습니다. 30분 이내의 `chzzk-release-preflight-v1` handoff에 대해 configured operator, exact payload key set, protected default ref, source SHA, canonical version을 모두 검증하고 하나라도 불명확하면 실패합니다.
+4. workflow는 다음 권한 경계를 유지합니다.
    - `prepare`: read-only checkout, `npm ci`, 전체 검증, 결정적 unsigned ZIP과 release metadata 생성, signer/client를 protected commit의 Git blob에 재고정
+   - AMO 작업 전: 같은 version의 모든 release/tag 상태를 검사해 exact source commit/target commitish, tag 귀속, 허용된 asset 이름, 이미 존재하는 source/metadata/signed asset의 바이트를 검증. compatible draft만 재개
    - `sign`: checkout과 npm 실행 없이 검증된 artifact만 내려받고, `firefox-signing` environment를 통과한 signer step에서만 AMO secret 사용
-   - `verify-signed`: secret 없이 signed XPI 구조, exact Mozilla metadata 파일 집합, ZIP resource bounds를 확인하고 `manifest.json`은 lossless semantic JSON으로, 나머지 runtime 파일은 prepared ZIP/metadata와 바이트 단위로 비교
+   - `verify-signed`: secret 없이 signed XPI 구조, exact Mozilla metadata 파일 집합, ZIP resource bounds를 확인하고 `manifest.json`은 lossless semantic JSON으로, 나머지 runtime 파일은 prepared ZIP/metadata와 바이트 단위로 비교. 이어서 checksum-pinned stock Firefox를 설치하고 기본 서명 강제 상태에서 final AMO-signed XPI를 영구 설치해 ID/version/update URL/`SIGNEDSTATE_SIGNED`를 확인
    - `attest`: AMO secret/checkout 없이 세 release asset에 provenance attestation 생성
    - `publish`: checkout/npm/secret 없이 `contents: write`만 사용해 immutable Release 게시
-4. Release에는 정확히 다음 세 asset만 게시됩니다.
+5. Release에는 정확히 다음 세 asset만 게시됩니다.
    - `chzzk-<version>.zip`
    - `chzzk-<version>-release-metadata.json`
    - `chzzk-<version>-signed.xpi`
 
-같은 tag가 이미 있으면 source commit, 세 asset, signed contents, attestation이 모두 동일한 immutable Release인 경우에만 verified no-op으로 성공합니다. 한 바이트라도 다르면 실패하며 `--clobber`로 덮어쓰지 않습니다. 운영자는 dispatch 전에 admin-only API로 저장소의 immutable releases 설정이 활성 상태인지 확인합니다. workflow는 draft를 먼저 만들고, 기존 asset의 바이트를 검증하면서 누락된 asset만 업로드해 중단된 compatible draft를 재개한 뒤 공개합니다. 공개 직후 서버의 `immutable: true`와 정확한 asset set을 다시 검증합니다. 제한된 `GITHUB_TOKEN`에 Administration 권한을 추가하지 않습니다.
+같은 tag가 이미 있으면 source commit, 세 asset, signed contents, attestation이 모두 동일한 immutable Release인 경우에만 verified no-op으로 성공합니다. 한 바이트라도 다르면 실패하며 `--clobber`로 덮어쓰지 않습니다. AMO 호출보다 먼저 stale/foreign/extra/different-byte draft와 orphan/mismatched tag를 거부합니다. workflow는 기존 asset을 덮어쓰지 않고 compatible draft의 누락 asset만 채웁니다. 공개 직후 서버의 `immutable: true`와 정확한 asset set을 다시 검증합니다.
+
+관리자 preflight의 `gh` 인증은 이 저장소 하나에만 제한하고 `GET /repos/{owner}/{repo}/immutable-releases`용 Administration read와 repository dispatch용 Contents write만 부여합니다. 이 자격 증명은 Actions secret이나 workflow에 넣지 않습니다. Actions의 일반 `GITHUB_TOKEN`에는 Administration 권한이 없으며 이를 넓은 admin PAT로 교체하지 않습니다. `RELEASE_OPERATOR_LOGIN` repository variable은 이 out-of-band 인증 주체와 정확히 일치해야 합니다.
+
+## 저장소 review gate 설정
+
+Release/security-sensitive PR은 path 분류와 `security-review-required`/`release-review-required` label을 함께 사용합니다. gate는 현재 PR head에 대해 configured GitHub App의 정확한 check run이 completed/success이고 모든 review thread가 resolved일 때만 `CHZZK review completion` check를 성공시킵니다. required check는 아무 actor의 같은 이름 status가 아니라 GitHub Actions App ID에 고정합니다. push 후 예전 check/review는 인정하지 않습니다. review app이 authoritative completion check를 제공하지 않거나 app slug/check 이름이 비어 있으면 성공을 추정하지 않고 실패합니다.
+
+관리자는 Actions 밖에서 아래 script로 설정을 먼저 검증하고, 의도적으로 적용할 때만 `--apply`를 사용합니다. script는 기존 default-branch check를 보존하면서 source-bound strict required check, stale-review dismissal, 최소 1개의 last-push approval, conversation resolution, administrator enforcement, review-bypass 없음, labels, repository variables를 적용/검증합니다. 이 저장소 작업 중에는 실행하지 않습니다.
+
+```bash
+export CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK"
+export CHZZK_REVIEW_APP_SLUG="<configured-review-app-slug>"
+export CHZZK_REVIEW_CHECK_NAME="<authoritative-completion-check>"
+export CHZZK_RELEASE_OPERATOR_LOGIN="<release-operator-login>"
+npm run configure:review-gate
+npm run configure:review-gate -- --apply
+```
+
+thread resolution 뒤 자동 event가 발생하지 않는 경우 **Review completion gate** workflow의 manual reevaluation만 사용합니다. 이 manual entry point는 release dispatch 권한이 없습니다.
 
 ## Native AMO client
 
@@ -56,7 +82,7 @@ Signer의 전체 network/polling budget은 10분이며 poll interval은 100~60,0
 - `META-INF/mozilla.sf`: 64 B~16 KiB
 - `META-INF/mozilla.rsa`: 512 B~64 KiB
 
-Signature metadata aggregate는 512 KiB 이하입니다. signed XPI compressed 16 MiB, source ZIP compressed 8 MiB, entry compressed 2 MiB, entry uncompressed 4 MiB, archive aggregate uncompressed 8 MiB, compression ratio 100:1 상한을 JSZip inflation 전에 적용합니다. Mozilla signature authenticity는 자체 COSE/JAR 구현이 아니라 `docs/TESTING.md`의 stock-Firefox permanent-install gate가 판정합니다. 이 worktree는 gate script/interface만 제공하며 release workflow에는 연결하지 않습니다.
+Signature metadata aggregate는 512 KiB 이하입니다. signed XPI compressed 16 MiB, source ZIP compressed 8 MiB, entry compressed 2 MiB, entry uncompressed 4 MiB, archive aggregate uncompressed 8 MiB, compression ratio 100:1 상한을 JSZip inflation 전에 적용합니다. Mozilla signature authenticity는 자체 COSE/JAR 구현이 아니라 `docs/TESTING.md`의 stock-Firefox permanent-install gate가 판정합니다. Release workflow의 `verify-signed` job이 final AMO-signed XPI에 이 gate를 실행하며, 성공하기 전에는 attestation과 publication이 시작되지 않습니다.
 
 ## 로컬 서명
 

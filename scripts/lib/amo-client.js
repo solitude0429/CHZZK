@@ -1,7 +1,19 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import {
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { TextDecoder } from "node:util";
+
+import { assertCanonicalReleaseVersion } from "./release-version.js";
 
 const AMO_API_ROOT = "https://addons.mozilla.org/api/v5/";
 const AMO_DOWNLOAD_DOMAIN = "addons.mozilla.org";
@@ -16,7 +28,6 @@ export const MIN_AMO_POLL_INTERVAL_MS = 100;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SOURCE_DIGEST_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const STRICT_MIN_VERSION_RE = /^\d+(?:\.\d+){1,3}$/;
-const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 export const RELEASE_ADD_ON_ID = "chzzk@solitude0429.local";
 export const RELEASE_SOURCE_REPOSITORY = "solitude0429/CHZZK";
@@ -67,7 +78,7 @@ export function assertReleaseMetadata(metadata) {
     "Release metadata",
   );
   if (metadata.schemaVersion !== 1) throw new Error("Unsupported release metadata schema");
-  if (!VERSION_RE.test(metadata.version)) throw new Error("Invalid release metadata version");
+  assertCanonicalReleaseVersion(metadata.version, "Release metadata version");
   if (metadata.addOnId !== RELEASE_ADD_ON_ID) throw new Error("Release add-on ID is not canonical");
   if (metadata.sourceRepository !== RELEASE_SOURCE_REPOSITORY) {
     throw new Error("Release source repository is not canonical");
@@ -387,11 +398,35 @@ async function fetchSignedXpi(fetchImpl, initialUrl, deadline, authorization) {
   throw new Error("AMO signed download exceeded the redirect limit");
 }
 
+function fsyncDirectory(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function atomicWrite(path, bytes) {
   const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
-  renameSync(temporaryPath, path);
-  chmodSync(path, 0o600);
+  let descriptor;
+  try {
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(descriptor, bytes);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporaryPath, path);
+    fsyncDirectory(dirname(path));
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    try {
+      unlinkSync(temporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== "ENOENT") error.cleanupError = cleanupError;
+    }
+    throw error;
+  }
 }
 
 async function readJsonResponse(response, operation, deadline) {
@@ -417,8 +452,12 @@ async function readJsonResponse(response, operation, deadline) {
 
 function validateMetadata(metadata, sourceArchivePath) {
   assertReleaseMetadata(metadata);
-  if (metadata.sourceArchive.name !== basename(sourceArchivePath)) {
-    throw new Error("Prepared archive name does not match release metadata");
+  const expectedSourceArchiveName = `chzzk-${metadata.version}.zip`;
+  if (
+    metadata.sourceArchive.name !== expectedSourceArchiveName ||
+    basename(sourceArchivePath) !== expectedSourceArchiveName
+  ) {
+    throw new Error("Prepared archive name is not canonical for the release version");
   }
 }
 

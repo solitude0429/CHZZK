@@ -102,4 +102,18 @@ describe("strict Firefox update manifest", () => {
       );
     }
   });
+
+  it("rejects a noncanonical signed XPI basename in direct path-based API use", () => {
+    const directory = mkdtempSync(join(tmpdir(), "chzzk-update-manifest-"));
+    const signedXpiPath = join(directory, "foreign.xpi");
+    writeFileSync(signedXpiPath, "synthetic signed xpi");
+    try {
+      assert.throws(
+        () => buildUpdateManifestDocument({ metadata: metadata(), signedXpiPath }),
+        /canonical|signed XPI.*filename|basename/i,
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
 });

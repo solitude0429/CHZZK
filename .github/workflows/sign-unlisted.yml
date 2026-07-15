@@ -1,18 +1,90 @@
 name: Sign and publish unlisted Firefox release
 
 on:
-  workflow_dispatch:
+  repository_dispatch:
+    types: [chzzk-release-preflight-v1]
 
 permissions:
   contents: read
 
 concurrency:
-  group: sign-unlisted-${{ github.ref }}
+  group: sign-unlisted-${{ github.event.client_payload.source_sha }}
   cancel-in-progress: false
 
 jobs:
+  authorize:
+    permissions:
+      contents: none
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate administrator preflight handoff
+        env:
+          EXPECTED_OPERATOR: ${{ vars.RELEASE_OPERATOR_LOGIN }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+          const payload = event.client_payload;
+          const expectedKeys = [
+            "default_branch",
+            "immutable_releases_verified",
+            "operator_login",
+            "source_sha",
+            "verified_at",
+            "version",
+          ];
+          const actualKeys = Object.keys(payload ?? {}).sort();
+          if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+            throw new Error("release dispatch payload keys are invalid");
+          }
+          if (process.env.GITHUB_EVENT_NAME !== "repository_dispatch" || event.action !== "chzzk-release-preflight-v1") {
+            throw new Error("release dispatch event type is invalid");
+          }
+          if (!process.env.EXPECTED_OPERATOR || event.sender?.login !== process.env.EXPECTED_OPERATOR) {
+            throw new Error("release dispatch sender is not the configured operator");
+          }
+          if (payload.operator_login !== process.env.EXPECTED_OPERATOR || process.env.GITHUB_ACTOR !== process.env.EXPECTED_OPERATOR) {
+            throw new Error("release dispatch operator identity is inconsistent");
+          }
+          if (event.repository?.full_name !== process.env.GITHUB_REPOSITORY) {
+            throw new Error("release dispatch repository is invalid");
+          }
+          if (payload.default_branch !== event.repository?.default_branch) {
+            throw new Error("release dispatch default branch is invalid");
+          }
+          if (process.env.GITHUB_REF !== `refs/heads/${payload.default_branch}` || process.env.REF_PROTECTED !== "true") {
+            throw new Error("release dispatch ref is not the protected default branch");
+          }
+          if (!/^[a-f0-9]{40}$/.test(payload.source_sha) || payload.source_sha !== process.env.GITHUB_SHA) {
+            throw new Error("release dispatch source commit is not the exact default-branch head");
+          }
+          if (!/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(payload.version)) {
+            throw new Error("release dispatch version is not canonical");
+          }
+          if (payload.immutable_releases_verified !== true) {
+            throw new Error("release dispatch did not prove immutable releases were enabled");
+          }
+          if (typeof payload.verified_at !== "string") {
+            throw new Error("release dispatch administrator preflight timestamp is not a string");
+          }
+          const verifiedAt = Date.parse(payload.verified_at);
+          const ageMs = Date.now() - verifiedAt;
+          if (
+            !Number.isFinite(verifiedAt) ||
+            new Date(verifiedAt).toISOString() !== payload.verified_at ||
+            ageMs < -60_000 ||
+            ageMs > 30 * 60_000
+          ) {
+            throw new Error("release dispatch administrator preflight is stale or invalid");
+          }
+          NODE
+
   prepare:
-    if: github.ref == 'refs/heads/main' && github.ref_protected == true
+    needs: authorize
+    if: github.ref == format('refs/heads/{0}', github.event.client_payload.default_branch) && github.ref_protected == true
     permissions:
       attestations: read
       contents: read
@@ -20,12 +92,14 @@ jobs:
     timeout-minutes: 25
     outputs:
       client_sha256: ${{ steps.release.outputs.client_sha256 }}
+      draft_signed_ready: ${{ steps.release.outputs.draft_signed_ready }}
       metadata_sha256: ${{ steps.release.outputs.metadata_sha256 }}
       reuse_existing: ${{ steps.release.outputs.reuse_existing }}
       signed_sha256: ${{ steps.release.outputs.signed_sha256 }}
       signer_sha256: ${{ steps.release.outputs.signer_sha256 }}
       source_sha256: ${{ steps.release.outputs.source_sha256 }}
       version: ${{ steps.release.outputs.version }}
+      version_policy_sha256: ${{ steps.release.outputs.version_policy_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -54,69 +128,36 @@ jobs:
           git diff --cached --exit-code
           cmp scripts/sign-unlisted.js <(git show "$GITHUB_SHA:scripts/sign-unlisted.js")
           cmp scripts/lib/amo-client.js <(git show "$GITHUB_SHA:scripts/lib/amo-client.js")
+          cmp scripts/lib/release-version.js <(git show "$GITHUB_SHA:scripts/lib/release-version.js")
       - id: release
-        name: Verify prepared input and detect an immutable existing release
+        name: Verify prepared input and inspect all existing release state before signing
         env:
+          CHZZK_RELEASE_METADATA: dist/release/chzzk-${{ github.event.client_payload.version }}-release-metadata.json
+          CHZZK_SIGNED_XPI: dist/release/chzzk-${{ github.event.client_payload.version }}-signed.xpi
+          CHZZK_SOURCE_ARCHIVE: dist/release/chzzk-${{ github.event.client_payload.version }}.zip
+          CHZZK_SOURCE_DIGEST: ${{ github.sha }}
+          CHZZK_VERSION: ${{ github.event.client_payload.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          TAG="v${VERSION}"
           SOURCE="dist/release/chzzk-${VERSION}.zip"
           METADATA="dist/release/chzzk-${VERSION}-release-metadata.json"
-          SIGNED="dist/release/chzzk-${VERSION}-signed.xpi"
+          test "$VERSION" = "${{ github.event.client_payload.version }}"
           SOURCE_SHA=$(sha256sum "$SOURCE" | cut -d ' ' -f1)
           METADATA_SHA=$(sha256sum "$METADATA" | cut -d ' ' -f1)
           SIGNER_SHA=$(git show "$GITHUB_SHA:scripts/sign-unlisted.js" | sha256sum | cut -d ' ' -f1)
           CLIENT_SHA=$(git show "$GITHUB_SHA:scripts/lib/amo-client.js" | sha256sum | cut -d ' ' -f1)
-          REUSE=false
-          SIGNED_SHA=""
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
-            test "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = "false"
-            if [ "$IS_DRAFT" = "false" ]; then
-              test "$(gh release view "$TAG" --json isImmutable --jq .isImmutable)" = "true"
-              TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
-              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
-              if [ "$TYPE" = "tag" ]; then
-                TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
-              fi
-              test "$TAG_SHA" = "$GITHUB_SHA"
-              test "$(gh release view "$TAG" --json assets --jq '.assets | length')" = "3"
-              mkdir -p existing
-              gh release download "$TAG" --dir existing \
-                --pattern "chzzk-${VERSION}.zip" \
-                --pattern "chzzk-${VERSION}-release-metadata.json" \
-                --pattern "chzzk-${VERSION}-signed.xpi"
-              cmp "$SOURCE" "existing/chzzk-${VERSION}.zip"
-              cmp "$METADATA" "existing/chzzk-${VERSION}-release-metadata.json"
-              CHZZK_RELEASE_METADATA="existing/chzzk-${VERSION}-release-metadata.json" \
-                CHZZK_SIGNED_XPI="existing/chzzk-${VERSION}-signed.xpi" \
-                CHZZK_UNSIGNED_XPI="existing/chzzk-${VERSION}.zip" \
-                npm run verify:signed-release
-              for ASSET in existing/*; do
-                gh attestation verify "$ASSET" \
-                  --repo "$GITHUB_REPOSITORY" \
-                  --source-digest "$GITHUB_SHA" \
-                  --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
-              done
-              cp "existing/chzzk-${VERSION}-signed.xpi" "$SIGNED"
-              SIGNED_SHA=$(sha256sum "$SIGNED" | cut -d ' ' -f1)
-              REUSE=true
-            else
-              test "$IS_DRAFT" = "true"
-            fi
-          fi
+          VERSION_POLICY_SHA=$(git show "$GITHUB_SHA:scripts/lib/release-version.js" | sha256sum | cut -d ' ' -f1)
+          node scripts/preflight-release-state.js
 
           {
             echo "client_sha256=${CLIENT_SHA}"
             echo "metadata_sha256=${METADATA_SHA}"
-            echo "reuse_existing=${REUSE}"
-            echo "signed_sha256=${SIGNED_SHA}"
             echo "signer_sha256=${SIGNER_SHA}"
             echo "source_sha256=${SOURCE_SHA}"
             echo "version=${VERSION}"
+            echo "version_policy_sha256=${VERSION_POLICY_SHA}"
           } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -126,9 +167,10 @@ jobs:
             dist/release/chzzk-${{ steps.release.outputs.version }}.zip
             dist/release/chzzk-${{ steps.release.outputs.version }}-release-metadata.json
             scripts/lib/amo-client.js
+            scripts/lib/release-version.js
             scripts/sign-unlisted.js
           retention-days: 7
-      - if: steps.release.outputs.reuse_existing == 'true'
+      - if: steps.release.outputs.reuse_existing == 'true' || steps.release.outputs.draft_signed_ready == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           if-no-files-found: error
@@ -138,7 +180,7 @@ jobs:
 
   sign:
     needs: prepare
-    if: needs.prepare.outputs.reuse_existing != 'true'
+    if: needs.prepare.outputs.reuse_existing != 'true' && needs.prepare.outputs.draft_signed_ready != 'true'
     environment: firefox-signing
     permissions:
       actions: read
@@ -158,6 +200,7 @@ jobs:
           test "$(sha256sum "prepared/dist/release/chzzk-${VERSION}-release-metadata.json" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.metadata_sha256 }}"
           test "$(sha256sum prepared/scripts/sign-unlisted.js | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.signer_sha256 }}"
           test "$(sha256sum prepared/scripts/lib/amo-client.js | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.client_sha256 }}"
+          test "$(sha256sum prepared/scripts/lib/release-version.js | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.version_policy_sha256 }}"
       - name: Submit exact prepared archive to AMO
         env:
           AMO_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
@@ -175,12 +218,12 @@ jobs:
 
   verify-signed:
     needs: [prepare, sign]
-    if: always() && needs.prepare.result == 'success' && (needs.sign.result == 'success' || needs.prepare.outputs.reuse_existing == 'true')
+    if: always() && needs.prepare.result == 'success' && (needs.sign.result == 'success' || needs.prepare.outputs.reuse_existing == 'true' || needs.prepare.outputs.draft_signed_ready == 'true')
     permissions:
       actions: read
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     outputs:
       signed_sha256: ${{ steps.verify.outputs.signed_sha256 }}
     steps:
@@ -221,6 +264,15 @@ jobs:
           echo "signed_sha256=${SIGNED_SHA}" >> "$GITHUB_OUTPUT"
           mkdir -p release-assets
           cp "$SOURCE" "$METADATA" "$SIGNED" release-assets/
+      - run: npm run setup:firefox-signed-smoke
+      - name: Require stock Firefox to trust and permanently install the signed XPI
+        env:
+          CHZZK_RELEASE_METADATA: prepared/dist/release/chzzk-${{ needs.prepare.outputs.version }}-release-metadata.json
+          CHZZK_SIGNED_SMOKE_MODE: install
+          CHZZK_SIGNED_XPI: signed/chzzk-${{ needs.prepare.outputs.version }}-signed.xpi
+          FIREFOX_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools/firefox/firefox
+          GECKODRIVER_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools/geckodriver
+        run: npm run test:firefox-signed-smoke
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           if-no-files-found: error
@@ -401,6 +453,10 @@ jobs:
             test "${{ needs.sign.result }}" = "skipped"
             test "${{ needs.attest.result }}" = "skipped"
             test "${{ needs.publish.result }}" = "skipped"
+          elif [ "${{ needs.prepare.outputs.draft_signed_ready }}" = "true" ]; then
+            test "${{ needs.sign.result }}" = "skipped"
+            test "${{ needs.attest.result }}" = "success"
+            test "${{ needs.publish.result }}" = "success"
           else
             test "${{ needs.sign.result }}" = "success"
             test "${{ needs.attest.result }}" = "success"

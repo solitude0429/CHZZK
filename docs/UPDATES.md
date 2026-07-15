@@ -8,9 +8,10 @@
 2. staging에서 결정적 unsigned ZIP과 `release-metadata.json`을 생성합니다. metadata에는 add-on ID, 버전, 최소 Firefox 버전, runtime file digest, source commit, source repository가 들어갑니다.
 3. 최소 권한 `sign` job이 ZIP/metadata/signer digest를 다시 확인한 뒤 AMO secret으로 exact ZIP만 제출합니다.
 4. 별도 read-only job이 signed XPI의 exact ZIP/runtime/signature-metadata 구조를 검증합니다. `manifest.json` number는 lossless decimal token으로 비교하고, 나머지 runtime은 prepared ZIP과 바이트 단위로 검증합니다. 이 단계는 Mozilla signature authenticity를 주장하지 않습니다.
-5. 별도 attestation job이 source ZIP, metadata, signed XPI를 같은 source commit과 signing workflow에 묶습니다.
-6. 운영자가 admin-only API로 repository immutable-releases 설정을 사전 확인하고, publish job이 compatible partial draft를 재개해 세 asset을 재검증한 뒤 공개 후 `immutable: true`를 확인합니다.
-7. VPS deploy client가 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
+5. 같은 read-only job이 checksum-pinned stock Firefox를 준비하고 기본 서명 설정을 바꾸지 않은 disposable profile에 final AMO-signed XPI를 영구 설치해 Mozilla signed state와 exact identity를 확인합니다.
+6. 별도 attestation job이 source ZIP, metadata, signed XPI를 같은 source commit과 signing workflow에 묶습니다. 구조 검사와 stock-Firefox gate가 모두 성공하기 전에는 실행되지 않습니다.
+7. Actions 밖의 운영자 preflight가 admin-only API로 repository immutable-releases 설정의 `enabled: true`, exact default-branch commit/version을 고정한 뒤에만 제한된 dispatch를 보냅니다. publish job은 compatible partial draft만 재개해 세 asset을 재검증한 뒤 공개 후 `immutable: true`를 확인합니다.
+8. VPS deploy client가 Release의 `isImmutable: true`를 독립적으로 다시 요구하고 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
 
 ## Update host 구조
 
@@ -42,7 +43,7 @@ https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 
 ## 버전 규칙
 
-Semantic Versioning `a.b.c`를 사용합니다.
+canonical Semantic Versioning `a.b.c`를 사용합니다. 각 component는 `0` 또는 0이 아닌 숫자로 시작하며 최대 9자리입니다. prerelease/build metadata와 leading zero는 허용하지 않습니다.
 
 - MAJOR: 기존 사용자에게 비호환인 변경
 - MINOR: 하위 호환 기능 추가
@@ -61,7 +62,12 @@ npm run verify
 1. 버전 변경과 생성 파일을 PR에 포함합니다.
 2. CI의 unit/security/package gate와 실제 Firefox temporary-profile E2E를 통과시킵니다.
 3. PR을 `main`에 병합합니다.
-4. Actions에서 **Sign and publish unlisted Firefox release** workflow를 수동 실행합니다.
+4. Actions 밖의 clean exact-default-head checkout에서 administrator preflight를 실행합니다. release workflow에는 UI `workflow_dispatch`가 없습니다.
+
+```bash
+CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" npm run release:dispatch
+```
+
 5. workflow가 성공한 뒤 clean `main` checkout에서 명시적으로 배포합니다.
 
 ```bash
@@ -70,7 +76,7 @@ CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
 npm run deploy:updates:internal
 ```
 
-Deploy client는 로컬 `package.json`이나 `manifest.json`으로 `updates.json`을 만들지 않습니다. attested Release metadata와 signed XPI bytes만 사용하며, tag commit과 metadata source digest가 다르면 실패합니다.
+Deploy client는 로컬 `package.json`이나 `manifest.json`으로 `updates.json`을 만들지 않습니다. verifier가 반환한 동일한 metadata/source/signed byte buffer만 activation까지 사용하며 validated path를 다시 읽지 않습니다. Release가 immutable이 아니거나 tag commit과 metadata source digest가 다르면 실패합니다.
 
 ## 검증
 

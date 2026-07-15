@@ -7,3 +7,6 @@
 - [ ] Diagnostics do not store signed query/hash values.
 - [ ] `npm run verify` passes.
 - [ ] Generated runtime files are refreshed before manual distribution.
+- [ ] Release/security-sensitive changes have a successful configured automated-review check on this exact head.
+- [ ] Every actionable review thread is resolved, and reviews/checks were rerun after the last push.
+- [ ] High-risk release, permissions, deployment, or security-policy changes are marked for Pro/manual or Codex review in the PR body.

@@ -1,0 +1,92 @@
+name: Review completion gate
+
+on:
+  pull_request_target:
+    types: [labeled, opened, ready_for_review, reopened, synchronize, unlabeled]
+  pull_request_review:
+    types: [dismissed, edited, submitted]
+  pull_request_review_comment:
+    types: [created, deleted, edited]
+  check_run:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      force_review:
+        description: Require the automated release/security reviewer even when path and labels do not classify it
+        required: true
+        type: boolean
+        default: true
+      pr_number:
+        description: Pull request number to re-evaluate after resolving review threads
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number || github.event.check_run.head_sha || inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    if: >-
+      github.event_name != 'check_run' ||
+      (github.event.check_run.app.slug == vars.AUTOMATED_REVIEW_APP_SLUG &&
+      github.event.check_run.name == vars.AUTOMATED_REVIEW_CHECK_NAME &&
+      github.event.check_run.pull_requests[0].number != null)
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      description: ${{ steps.gate.outputs.description }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+      required: ${{ steps.gate.outputs.required }}
+      state: ${{ steps.gate.outputs.state }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+      - id: gate
+        name: Evaluate configured reviewer completion and review threads
+        continue-on-error: true
+        env:
+          CHZZK_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.check_run.head_sha || '' }}
+          CHZZK_FORCE_REVIEW: ${{ inputs.force_review || false }}
+          CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.check_run.pull_requests[0].number }}
+          CHZZK_REVIEW_APP_SLUG: ${{ vars.AUTOMATED_REVIEW_APP_SLUG }}
+          CHZZK_REVIEW_CHECK_NAME: ${{ vars.AUTOMATED_REVIEW_CHECK_NAME }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-review-gate.js
+
+  status:
+    needs: evaluate
+    if: always() && needs.evaluate.result != 'skipped'
+    permissions:
+      checks: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish exact-head review completion check
+        env:
+          DESCRIPTION: ${{ needs.evaluate.outputs.description }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          STATE: ${{ needs.evaluate.outputs.state }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          case "$STATE" in success|failure) ;; *) exit 1 ;; esac
+          test -n "$DESCRIPTION"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" \
+            -f name="CHZZK review completion" \
+            -f head_sha="$HEAD_SHA" \
+            -f status="completed" \
+            -f conclusion="$STATE" \
+            -f "output[title]=Exact-head review completion" \
+            -f "output[summary]=$DESCRIPTION"
+          test "$STATE" = "success"

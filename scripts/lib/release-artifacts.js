@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import {
+  constants as fsConstants,
   chmodSync,
-  copyFileSync,
+  closeSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -22,6 +27,7 @@ import {
   MAX_SIGNED_XPI_BYTES,
   assertReleaseMetadata,
 } from "./amo-client.js";
+import { assertCanonicalReleaseVersion } from "./release-version.js";
 
 export { RELEASE_PACKAGE_FILES, assertReleaseMetadata } from "./amo-client.js";
 
@@ -32,7 +38,6 @@ const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_SIGNATURE_METADATA_BYTES = 512 * 1024;
 const MAX_SOURCE_ARCHIVE_BYTES = 8 * 1024 * 1024;
 const SOURCE_DIGEST_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
-const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 export const RELEASE_ZIP_LIMITS = Object.freeze({
   maxAggregateUncompressedBytes: 8 * 1024 * 1024,
@@ -55,16 +60,34 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function readJson(path) {
-  return JSON.parse(readFileSync(path, "utf8"));
-}
-
-function assertRegularFile(path) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`Release input must be a regular file, not a symbolic link: ${path}`);
+export function readStableRegularFile(path, { onDescriptorOpened = () => {} } = {}) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    throw new Error(
+      `Release input must be a readable regular file, not a symbolic link: ${path}: ${error.message}`,
+    );
   }
-  return stat;
+  try {
+    const before = fstatSync(descriptor);
+    if (!before.isFile()) throw new Error(`Release input must be a regular file: ${path}`);
+    onDescriptorOpened(descriptor);
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      bytes.length !== after.size
+    ) {
+      throw new Error(`Release input changed while it was being read: ${path}`);
+    }
+    return { bytes, stat: after };
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function ensurePrivateDirectory(path) {
@@ -72,6 +95,15 @@ function ensurePrivateDirectory(path) {
     mkdirSync(path, { mode: 0o700, recursive: true });
   } catch (error) {
     throw new Error(`Unable to create private release directory ${path}: ${error.message}`);
+  }
+}
+
+function fsyncDirectory(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
   }
 }
 
@@ -86,25 +118,56 @@ function atomicWrite(path, bytes) {
     if (error.code !== "ENOENT") throw error;
   }
   const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
-  renameSync(temporaryPath, path);
-  chmodSync(path, 0o600);
+  let descriptor;
+  try {
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(descriptor, bytes);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporaryPath, path);
+    fsyncDirectory(dirname(path));
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    try {
+      unlinkSync(temporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== "ENOENT") error.cleanupError = cleanupError;
+    }
+    throw error;
+  }
 }
 
-function validateReleaseIdentity(rootDir, sourceDigest, sourceRepository) {
+export function canonicalReleaseAssetNames(version) {
+  assertCanonicalReleaseVersion(version);
+  return Object.freeze({
+    metadata: `chzzk-${version}-release-metadata.json`,
+    signed: `chzzk-${version}-signed.xpi`,
+    source: `chzzk-${version}.zip`,
+  });
+}
+
+function parseJsonBytes(bytes, label) {
+  try {
+    return JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error(`${label} must contain valid JSON`);
+  }
+}
+
+function validateReleaseIdentity({ manifestBytes, packageBytes, sourceDigest, sourceRepository }) {
   if (!SOURCE_DIGEST_RE.test(sourceDigest))
     throw new Error("sourceDigest must be a full hexadecimal Git digest");
   if (sourceRepository !== RELEASE_SOURCE_REPOSITORY) {
     throw new Error("sourceRepository must be the canonical release repository");
   }
 
-  assertRegularFile(join(rootDir, "manifest.json"));
-  assertRegularFile(join(rootDir, "package.json"));
-  const manifest = readJson(join(rootDir, "manifest.json"));
-  const packageJson = readJson(join(rootDir, "package.json"));
+  const manifest = parseJsonBytes(manifestBytes, "manifest.json");
+  const packageJson = parseJsonBytes(packageBytes, "package.json");
   const version = String(manifest.version ?? "");
   const gecko = manifest.browser_specific_settings?.gecko;
-  if (!VERSION_RE.test(version) || packageJson.version !== version) {
+  assertCanonicalReleaseVersion(version, "manifest.json version");
+  if (packageJson.version !== version) {
     throw new Error("manifest.json and package.json must carry the same SemVer version");
   }
   if (gecko?.id !== RELEASE_ADD_ON_ID) throw new Error("Firefox add-on ID is not canonical");
@@ -124,27 +187,34 @@ function validateReleaseIdentity(rootDir, sourceDigest, sourceRepository) {
 
 export async function prepareReleaseArtifacts({ outputDir, rootDir, sourceDigest, sourceRepository }) {
   if (!rootDir || !outputDir) throw new Error("rootDir and outputDir are required");
-  const identity = validateReleaseIdentity(rootDir, sourceDigest, sourceRepository);
   ensurePrivateDirectory(outputDir);
   const stageDir = mkdtempSync(join(outputDir, ".release-stage-"));
   chmodSync(stageDir, 0o700);
 
   try {
-    const files = [];
+    const preparedFiles = [];
     for (const relativePath of RELEASE_PACKAGE_FILES) {
       const sourcePath = join(rootDir, relativePath);
-      const stat = assertRegularFile(sourcePath);
+      const { bytes } = readStableRegularFile(sourcePath);
       const stagedPath = join(stageDir, relativePath);
       ensurePrivateDirectory(dirname(stagedPath));
-      copyFileSync(sourcePath, stagedPath);
+      writeFileSync(stagedPath, bytes, { flag: "wx", mode: 0o600 });
       chmodSync(stagedPath, 0o600);
-      const bytes = readFileSync(stagedPath);
-      files.push({ path: relativePath, sha256: sha256(bytes), size: stat.size });
+      preparedFiles.push({ bytes, path: relativePath, sha256: sha256(bytes), size: bytes.length });
     }
 
+    const manifestBytes = preparedFiles.find((file) => file.path === "manifest.json")?.bytes;
+    const packageBytes = readStableRegularFile(join(rootDir, "package.json")).bytes;
+    const identity = validateReleaseIdentity({
+      manifestBytes,
+      packageBytes,
+      sourceDigest,
+      sourceRepository,
+    });
+
     const zip = new JSZip();
-    for (const file of files) {
-      zip.file(file.path, readFileSync(join(stageDir, file.path)), {
+    for (const file of preparedFiles) {
+      zip.file(file.path, file.bytes, {
         binary: true,
         createFolders: false,
         date: FIXED_ZIP_DATE,
@@ -158,13 +228,18 @@ export async function prepareReleaseArtifacts({ outputDir, rootDir, sourceDigest
       streamFiles: false,
       type: "nodebuffer",
     });
-    const sourceArchiveName = `chzzk-${identity.version}.zip`;
+    const names = canonicalReleaseAssetNames(identity.version);
+    const sourceArchiveName = names.source;
     const sourceArchivePath = join(outputDir, sourceArchiveName);
     atomicWrite(sourceArchivePath, sourceArchiveBytes);
 
     const metadata = {
       addOnId: identity.addOnId,
-      files,
+      files: preparedFiles.map((file) => ({
+        path: file.path,
+        sha256: file.sha256,
+        size: file.size,
+      })),
       schemaVersion: 1,
       sourceArchive: {
         name: sourceArchiveName,
@@ -178,7 +253,7 @@ export async function prepareReleaseArtifacts({ outputDir, rootDir, sourceDigest
       version: identity.version,
     };
     assertReleaseMetadata(metadata);
-    const metadataName = `chzzk-${identity.version}-release-metadata.json`;
+    const metadataName = names.metadata;
     const metadataPath = join(outputDir, metadataName);
     atomicWrite(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
 
@@ -616,29 +691,36 @@ function parseManifest(bytes, label) {
 }
 
 export async function verifySignedReleaseStructure({ metadataPath, signedXpiPath, sourceArchivePath }) {
-  assertRegularFile(metadataPath);
-  const signedXpiStat = assertRegularFile(signedXpiPath);
-  const sourceArchiveStat = assertRegularFile(sourceArchivePath);
-  if (signedXpiStat.size <= 0 || signedXpiStat.size > RELEASE_ZIP_LIMITS.maxSignedCompressedBytes) {
+  const metadataBytes = readStableRegularFile(metadataPath).bytes;
+  let metadata;
+  try {
+    metadata = assertReleaseMetadata(JSON.parse(metadataBytes.toString("utf8")));
+  } catch (error) {
+    throw new Error(`Release metadata is invalid: ${error.message}`);
+  }
+  const names = canonicalReleaseAssetNames(metadata.version);
+  if (basename(metadataPath) !== names.metadata) {
+    throw new Error("Release metadata filename is not canonical");
+  }
+  if (basename(sourceArchivePath) !== names.source) {
+    throw new Error("Source archive filename is not canonical");
+  }
+  if (basename(signedXpiPath) !== names.signed) {
+    throw new Error("Signed XPI filename is not canonical");
+  }
+  const sourceBytes = readStableRegularFile(sourceArchivePath).bytes;
+  const signedBytes = readStableRegularFile(signedXpiPath).bytes;
+  if (signedBytes.length <= 0 || signedBytes.length > RELEASE_ZIP_LIMITS.maxSignedCompressedBytes) {
     throw new Error("Signed XPI compressed archive size limit exceeded");
   }
-  if (sourceArchiveStat.size <= 0 || sourceArchiveStat.size > RELEASE_ZIP_LIMITS.maxSourceCompressedBytes) {
+  if (sourceBytes.length <= 0 || sourceBytes.length > RELEASE_ZIP_LIMITS.maxSourceCompressedBytes) {
     throw new Error("Source archive compressed archive size limit exceeded");
-  }
-  const metadata = assertReleaseMetadata(readJson(metadataPath));
-  const sourceBytes = readFileSync(sourceArchivePath);
-  const signedBytes = readFileSync(signedXpiPath);
-  if (basename(sourceArchivePath) !== metadata.sourceArchive.name) {
-    throw new Error("Source archive filename does not match release metadata");
   }
   if (
     sha256(sourceBytes) !== metadata.sourceArchive.sha256 ||
     sourceBytes.length !== metadata.sourceArchive.size
   ) {
     throw new Error("Source archive bytes do not match release metadata");
-  }
-  if (basename(signedXpiPath) !== `chzzk-${metadata.version}-signed.xpi`) {
-    throw new Error("Signed XPI filename does not match release metadata");
   }
 
   const sourceEntries = inspectZipCentralDirectory(sourceBytes, "Source archive", RELEASE_PACKAGE_FILES);
@@ -683,8 +765,14 @@ export async function verifySignedReleaseStructure({ metadataPath, signedXpiPath
 
   assertSignedManifestIdentity(signedManifest, metadata);
   return {
+    metadata,
+    metadataBytes,
+    metadataSha256: sha256(metadataBytes),
+    signedXpiBytes: signedBytes,
     signedXpiSha256: sha256(signedBytes),
     signedXpiSize: signedBytes.length,
+    sourceArchiveBytes: sourceBytes,
+    sourceArchiveSha256: sha256(sourceBytes),
     sourceDigest: metadata.sourceDigest,
     verification: "structural-only",
     version: metadata.version,

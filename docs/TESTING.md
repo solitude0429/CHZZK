@@ -23,6 +23,8 @@ npm run build
 npm run audit:package
 ```
 
+The unit suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment (no validated-path reread), exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and exact-head review completion. Workflow-policy tests also require SHA-pinned actions and separated secret/write authority.
+
 ## Functional-only Firefox E2E
 
 The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts.
@@ -49,11 +51,17 @@ The fixture XPIs are unsigned and exist only in the disposable Developer Edition
 
 `test:firefox-signed-smoke` is the production-like authenticity gate. It launches stock Firefox with a new mode-`0700` disposable profile, supplies no preference overrides, confirms `xpinstall.signatures.required` is enabled and has no user value, permanently installs the final XPI, and requires the exact release add-on ID, version, update URL, active state, `temporarilyInstalled=false`, and `AddonManager.SIGNEDSTATE_SIGNED`.
 
+The release workflow downloads checksum-pinned stock Firefox and geckodriver with the separate signed-smoke setup, then runs install mode on the final AMO-signed XPI before attestation or publication. To provision the same binaries locally:
+
+```bash
+npm run setup:firefox-signed-smoke
+```
+
 Install mode requires a real final AMO-signed XPI and canonical release metadata:
 
 ```bash
-FIREFOX_BINARY="/path/to/stock/firefox" \
-GECKODRIVER_BINARY="/path/to/geckodriver" \
+FIREFOX_BINARY="$PWD/dist/signed-smoke-tools/firefox/firefox" \
+GECKODRIVER_BINARY="$PWD/dist/signed-smoke-tools/geckodriver" \
 CHZZK_RELEASE_METADATA="/path/to/chzzk-<version>-release-metadata.json" \
 CHZZK_SIGNED_XPI="/path/to/chzzk-<version>-signed.xpi" \
 CHZZK_SIGNED_SMOKE_MODE="install" \

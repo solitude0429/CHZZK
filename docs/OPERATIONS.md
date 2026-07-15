@@ -3,7 +3,7 @@
 ## Release checklist
 
 1. Confirm `git status --short --branch` is clean before starting the release branch.
-2. Choose the SemVer change and update `package.json`, `package-lock.json`, and `manifest.json` together.
+2. Choose the canonical SemVer change (`MAJOR.MINOR.PATCH`, no leading zero, at most 9 digits per component) and update `package.json`, `package-lock.json`, and `manifest.json` together.
 3. Run `npm run build:runtime`, `npm ci`, and `npm run verify`.
 4. Run the checksum-pinned real Firefox E2E:
 
@@ -14,13 +14,19 @@ GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
 npm run test:firefox-functional-e2e
 ```
 
-This is the unsigned functional-only gate. After AMO signing, run the stock-Firefox install gate from `docs/TESTING.md` with the real final XPI. After update-host deployment, run its old-signed-to-new-signed update mode. Do not waive either mode because an artifact is missing; the harness intentionally fails instead of skipping.
+This is the unsigned functional-only gate. After AMO signing, the release workflow must run the stock-Firefox install gate from `docs/TESTING.md` with the real final XPI before attestation/publication. After update-host deployment, run its old-signed-to-new-signed update mode. Do not waive either mode because an artifact is missing; the harness intentionally fails instead of skipping.
 
-5. Open a GitHub PR and wait for all required CI/review gates.
+5. Open a GitHub PR and wait for all required CI/review gates. For release/security paths or the explicit review labels, require the configured reviewer completion check on the exact current head and zero unresolved review threads; rerun/rereview after every push.
 6. Merge to protected `main`.
-7. Manually run **Sign and publish unlisted Firefox release** from `main` and require the full prepare → sign → verify → attest → publish chain.
-8. Confirm the Release has exactly the source ZIP, release metadata, and signed XPI. Never overwrite an existing asset or tag.
-9. Deploy from a clean `main` checkout:
+7. From an Actions-external clean checkout at the exact remote `main` head, authenticate as the configured narrow release operator and run the immutable-release preflight. Do not use the Actions UI or put the administrator credential in Actions.
+
+```bash
+CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" npm run release:dispatch
+```
+
+8. Require the authorize → prepare/pre-sign remote-state inspection → sign → structural verification → stock-Firefox default-signature install smoke → attest → publish chain. A compatible draft may resume, but stale/foreign/extra/different-byte state must stop before AMO. The final AMO-signed XPI must pass the stock-Firefox step before any attestation or publication job can run.
+9. Confirm the Release is immutable and has exactly the source ZIP, release metadata, and signed XPI. Never overwrite an existing asset or tag.
+10. Deploy from a clean `main` checkout:
 
 ```bash
 CHZZK_VERSION="<version>" \
@@ -28,8 +34,8 @@ CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
 npm run deploy:updates:internal
 ```
 
-10. Verify live `updates.json`/XPI MIME, SHA-256, version, add-on ID, minimum Firefox version, and attestation-bound source commit.
-11. Ask the user to trigger Firefox AddonManager update checking. Do not stop Firefox or overwrite the installed profile XPI.
+11. Verify live `updates.json`/XPI MIME, SHA-256, version, add-on ID, minimum Firefox version, and attestation-bound source commit.
+12. Ask the user to trigger Firefox AddonManager update checking. Do not stop Firefox or overwrite the installed profile XPI.
 
 ## Patch response
 

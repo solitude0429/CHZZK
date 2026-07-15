@@ -14,8 +14,15 @@ try {
   ) {
     throw new Error("CHZZK_RELEASE_METADATA, CHZZK_SIGNED_XPI, and CHZZK_UNSIGNED_XPI are required");
   }
+  const verified = await verifySignedReleaseStructure({ metadataPath, signedXpiPath, sourceArchivePath });
   console.log(
-    JSON.stringify(await verifySignedReleaseStructure({ metadataPath, signedXpiPath, sourceArchivePath })),
+    JSON.stringify({
+      signedXpiSha256: verified.signedXpiSha256,
+      signedXpiSize: verified.signedXpiSize,
+      sourceDigest: verified.sourceDigest,
+      verification: verified.verification,
+      version: verified.version,
+    }),
   );
 } catch (error) {
   console.error(`Signed release structural verification failed: ${error.message}`);

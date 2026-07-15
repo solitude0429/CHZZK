@@ -15,13 +15,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 
 import { RELEASE_PACKAGE_FILES, prepareReleaseArtifacts } from "../../scripts/lib/release-artifacts.js";
-import { deployUpdateRelease } from "../../scripts/lib/update-deployment.js";
+import { deployUpdateRelease, waitForLockProcess } from "../../scripts/lib/update-deployment.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const crashFixture = fileURLToPath(new URL("../fixtures/update-deployment-crash.mjs", import.meta.url));
@@ -120,6 +120,15 @@ async function holdAdvisoryLock(lockPath) {
 }
 
 describe("atomic internal update deployment", () => {
+  it("bounds waits for a lock-holder child that never reports cleanup", async () => {
+    const startedAt = Date.now();
+    await assert.rejects(
+      waitForLockProcess(new Promise(() => {}), 20, "synthetic lock cleanup"),
+      /timed out|lock cleanup/i,
+    );
+    assert.equal(Date.now() - startedAt < 250, true);
+  });
+
   it("preserves pre-existing directory modes and reuses an exact immutable release", async () => {
     const targetDir = mkdtempSync(join(tmpdir(), "chzzk-update-root-"));
     mkdirSync(join(targetDir, "releases"), { mode: 0o701 });
@@ -142,6 +151,39 @@ describe("atomic internal update deployment", () => {
         updates.addons["chzzk@solitude0429.local"].updates[0].update_link,
         "https://chzzk-updates.alpha-apple.dedyn.io/releases/0.1.3/chzzk-0.1.3-signed.xpi",
       );
+    } finally {
+      release.cleanup();
+      rmSync(targetDir, { force: true, recursive: true });
+    }
+  });
+
+  it("deploys the verifier-returned bytes even if every validated input path is replaced afterward", async () => {
+    const targetDir = mkdtempSync(join(tmpdir(), "chzzk-update-root-"));
+    const release = await makeSignedRelease("0.1.3", "e".repeat(40));
+    const expected = new Map(
+      [release.metadataPath, release.signedXpiPath, release.sourceArchivePath].map((path) => [
+        basename(path),
+        readFileSync(path),
+      ]),
+    );
+    let replacedAfterVerification = false;
+    try {
+      await deployUpdateRelease({
+        targetDir,
+        ...release,
+        onTransactionStep(step) {
+          if (step !== "artifacts-verified") return;
+          replacedAfterVerification = true;
+          writeFileSync(release.metadataPath, "{}\n");
+          writeFileSync(release.signedXpiPath, "replacement signed bytes");
+          writeFileSync(release.sourceArchivePath, "replacement source bytes");
+        },
+      });
+
+      assert.equal(replacedAfterVerification, true);
+      for (const [name, bytes] of expected) {
+        assert.deepEqual(readFileSync(join(targetDir, "releases/0.1.3", name)), bytes);
+      }
     } finally {
       release.cleanup();
       rmSync(targetDir, { force: true, recursive: true });

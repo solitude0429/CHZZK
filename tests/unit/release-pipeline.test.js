@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -11,8 +20,10 @@ import { MAX_SIGNED_XPI_BYTES, signPreparedAddon } from "../../scripts/lib/amo-c
 import {
   RELEASE_PACKAGE_FILES,
   prepareReleaseArtifacts,
+  readStableRegularFile,
   verifySignedReleaseStructure,
 } from "../../scripts/lib/release-artifacts.js";
+import { isCanonicalReleaseVersion } from "../../scripts/lib/release-version.js";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const SYNTHETIC_AMO_CREDENTIAL = ["synthetic", "credential", "value"].join("-");
@@ -158,6 +169,27 @@ describe("immutable release preparation", () => {
       rmSync(outputDir, { force: true, recursive: true });
     }
   });
+
+  it("reads a source through one pinned descriptor even if its pathname is replaced after open", () => {
+    const directory = mkdtempSync(join(tmpdir(), "chzzk-release-descriptor-"));
+    const path = join(directory, "input.bin");
+    const original = Buffer.from("descriptor-pinned original bytes");
+    let replaced = false;
+    writeFileSync(path, original);
+    try {
+      const result = readStableRegularFile(path, {
+        onDescriptorOpened() {
+          renameSync(path, join(directory, "original.bin"));
+          writeFileSync(path, "replacement pathname bytes");
+          replaced = true;
+        },
+      });
+      assert.equal(replaced, true);
+      assert.deepEqual(result.bytes, original);
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
 });
 
 async function buildSyntheticSignedXpi(
@@ -257,8 +289,56 @@ describe("signed release structural verification", () => {
       });
 
       assert.equal(verified.version, prepared.metadata.version);
+      assert.deepEqual(verified.metadataBytes, readFileSync(prepared.metadataPath));
+      assert.equal(verified.metadataSha256, sha256(verified.metadataBytes));
+      assert.deepEqual(verified.signedXpiBytes, readFileSync(signedXpiPath));
       assert.equal(verified.signedXpiSha256, sha256(readFileSync(signedXpiPath)));
+      assert.deepEqual(verified.sourceArchiveBytes, readFileSync(prepared.sourceArchivePath));
+      assert.equal(verified.sourceArchiveSha256, sha256(verified.sourceArchiveBytes));
       assert.equal(verified.verification, "structural-only");
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects noncanonical metadata and source archive basenames at the verifier API boundary", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-signed-release-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "2".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath);
+
+      const foreignMetadataPath = join(outputDir, "foreign-release-metadata.json");
+      cpSync(prepared.metadataPath, foreignMetadataPath);
+      await assert.rejects(
+        verifySignedReleaseStructure({
+          metadataPath: foreignMetadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        }),
+        /canonical|metadata.*filename|basename/i,
+      );
+
+      const metadata = JSON.parse(readFileSync(prepared.metadataPath, "utf8"));
+      metadata.sourceArchive.name = "foreign-source.zip";
+      writeFileSync(prepared.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+      const foreignSourcePath = join(outputDir, metadata.sourceArchive.name);
+      cpSync(prepared.sourceArchivePath, foreignSourcePath);
+      await assert.rejects(
+        verifySignedReleaseStructure({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: foreignSourcePath,
+        }),
+        /canonical|source archive.*name|basename/i,
+      );
     } finally {
       rmSync(rootDir, { force: true, recursive: true });
       rmSync(outputDir, { force: true, recursive: true });
@@ -569,6 +649,66 @@ describe("signed release structural verification", () => {
 });
 
 describe("minimal AMO signing client", () => {
+  it("rejects a noncanonical prepared ZIP basename before any AMO request", async () => {
+    const input = makeAmoInput();
+    const sourceArchivePath = join(input.outputDir, "renamed-source.zip");
+    renameSync(input.sourceArchivePath, sourceArchivePath);
+    input.metadata.sourceArchive.name = "renamed-source.zip";
+    let requests = 0;
+    try {
+      await assert.rejects(
+        signPreparedAddon({
+          apiKey: SYNTHETIC_AMO_CREDENTIAL,
+          apiSecret: "synthetic-secret",
+          fetchImpl: async () => {
+            requests += 1;
+            return new Response("unexpected", { status: 500 });
+          },
+          metadata: input.metadata,
+          outputDir: input.outputDir,
+          pollIntervalMs: 100,
+          sourceArchivePath,
+        }),
+        /canonical|archive|name/i,
+      );
+      assert.equal(requests, 0);
+    } finally {
+      input.cleanup();
+    }
+  });
+
+  it("rejects leading-zero and overlong release version components before any AMO request", async () => {
+    assert.equal(isCanonicalReleaseVersion("0.1.4"), true);
+    for (const version of ["00.1.4", "01.2.3", "1.2.000", "1234567890.2.3"]) {
+      const input = makeAmoInput();
+      const sourceArchivePath = join(input.outputDir, `chzzk-${version}.zip`);
+      renameSync(input.sourceArchivePath, sourceArchivePath);
+      input.metadata.version = version;
+      input.metadata.sourceArchive.name = `chzzk-${version}.zip`;
+      let requests = 0;
+      try {
+        await assert.rejects(
+          signPreparedAddon({
+            apiKey: SYNTHETIC_AMO_CREDENTIAL,
+            apiSecret: "synthetic-secret",
+            fetchImpl: async () => {
+              requests += 1;
+              return new Response("unexpected", { status: 500 });
+            },
+            metadata: input.metadata,
+            outputDir: input.outputDir,
+            pollIntervalMs: 100,
+            sourceArchivePath,
+          }),
+          /canonical|version|component/i,
+        );
+        assert.equal(requests, 0);
+      } finally {
+        input.cleanup();
+      }
+    }
+  });
+
   it("uploads only the prepared archive and downloads the approved signed XPI", async () => {
     const outputDir = mkdtempSync(join(tmpdir(), "chzzk-amo-output-"));
     const sourceArchivePath = join(outputDir, "chzzk-0.1.4.zip");

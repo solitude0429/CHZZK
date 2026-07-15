@@ -35,13 +35,17 @@ describe("release and repository security guardrails", () => {
     assert.match(client, /url\.password/);
     assert.match(client, /fetchSignedXpi/);
     assert.doesNotMatch(client, /authorizedFetch\(downloadUrl/);
+    assert.match(client, /fsyncDirectory/);
+    assert.match(client, /fsyncSync/);
+    assert.match(read("scripts/lib/release-artifacts.js"), /fsyncDirectory/);
+    assert.match(read("scripts/build-update-manifest.js"), /fsyncDirectory/);
   });
 
   it("pins all actions and semantically separates build, secret, attestation, and publish authority", () => {
     const workflowDir = join(rootDir, ".github/workflows");
     for (const name of readdirSync(workflowDir).filter((entry) => /\.ya?ml$/.test(entry))) {
       const text = read(`.github/workflows/${name}`);
-      for (const match of text.matchAll(/uses:\s*([^\s#]+)/g)) {
+      for (const match of text.matchAll(/^\s*-\s+uses:\s*([^\s#]+)/gm)) {
         if (match[1].startsWith("./")) continue;
         assert.match(match[1], /@[a-f0-9]{40}$/i, `${name} contains an unpinned action: ${match[1]}`);
       }
@@ -94,7 +98,23 @@ describe("release and repository security guardrails", () => {
     const text = read(".github/workflows/sign-unlisted.yml");
     const release = workflow("sign-unlisted.yml");
     const prepareRelease = release.jobs.prepare.steps.find((step) => step.id === "release").run;
+    const operatorPreflight = read("scripts/lib/release-dispatch.js");
+    const statePreflight = read("scripts/lib/github-release-state.js");
+    assert.deepEqual(release.on, {
+      repository_dispatch: { types: ["chzzk-release-preflight-v1"] },
+    });
+    assert.equal(Object.hasOwn(release.on, "workflow_dispatch"), false);
+    assert.equal(release.jobs.prepare.needs, "authorize");
+    assert.match(JSON.stringify(release.jobs.authorize), /RELEASE_OPERATOR_LOGIN|operator_login/);
+    assert.match(
+      JSON.stringify(release.jobs.authorize),
+      /source_sha|verified_at|immutable_releases_verified/,
+    );
+    assert.match(operatorPreflight, /\/immutable-releases/);
+    assert.match(operatorPreflight, /enabled\s*!==\s*true/);
+    assert.match(operatorPreflight, /repos\/\$\{repository\}\/dispatches/);
     assert.match(text, /reuse_existing/);
+    assert.match(text, /draft_signed_ready/);
     assert.match(text, /gh release view/);
     assert.match(text, /cmp "\$SOURCE"/);
     assert.match(text, /--draft/);
@@ -105,18 +125,55 @@ describe("release and repository security guardrails", () => {
     assert.match(text, /gh release upload "\$TAG" "\$ASSET"/);
     assert.match(text, /--json isDraft/);
     assert.match(text, /--json isPrerelease/);
-    assert.match(text, /--source-digest "\$GITHUB_SHA"/);
-    assert.match(text, /--signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/sign-unlisted\.yml"/);
+    assert.match(statePreflight, /--source-digest/);
+    assert.match(statePreflight, /\.github\/workflows\/sign-unlisted\.yml/);
     assert.match(text, /git diff --cached --exit-code/);
     assert.doesNotMatch(text, /--clobber|gh release edit "\$TAG" --target/);
     assert.match(text, /github\.ref_protected == true/);
     assert.match(text, /environment:\s*firefox-signing/);
-    assert.match(prepareRelease, /IS_DRAFT=/);
-    assert.match(prepareRelease, /if \[ "\$IS_DRAFT" = "false" \]/);
+    assert.match(prepareRelease, /preflight-release-state\.js/);
+    assert.match(release.jobs.sign.if, /draft_signed_ready/);
 
     const prepare = read("scripts/prepare-release.js");
     assert.match(prepare, /--porcelain=v1/);
     assert.match(prepare, /does not match checked-out HEAD/);
+  });
+
+  it("runs the final AMO-signed XPI through stock Firefox before attestation and publication", () => {
+    const packageJson = JSON.parse(read("package.json"));
+    const release = workflow("sign-unlisted.yml");
+    const verifySteps = release.jobs["verify-signed"].steps;
+    const setupIndex = verifySteps.findIndex((step) => step.run === "npm run setup:firefox-signed-smoke");
+    const structuralIndex = verifySteps.findIndex(
+      (step) => step.name === "Verify signed runtime against immutable release metadata",
+    );
+    const smokeIndex = verifySteps.findIndex(
+      (step) => step.name === "Require stock Firefox to trust and permanently install the signed XPI",
+    );
+    const uploadIndex = verifySteps.findIndex((step) => step.uses?.startsWith("actions/upload-artifact@"));
+
+    assert.equal(
+      packageJson.scripts["setup:firefox-signed-smoke"],
+      "node scripts/setup-firefox-signed-smoke.js",
+    );
+    const setup = read("scripts/setup-firefox-signed-smoke.js");
+    assert.match(setup, /archive\.mozilla\.org\/pub\/firefox\/releases/);
+    assert.doesNotMatch(setup, /devedition/i);
+    assert.equal(structuralIndex >= 0, true);
+    assert.equal(setupIndex > structuralIndex, true);
+    assert.equal(smokeIndex > setupIndex, true);
+    assert.equal(uploadIndex > smokeIndex, true);
+
+    const smoke = verifySteps[smokeIndex];
+    assert.equal(smoke.run, "npm run test:firefox-signed-smoke");
+    assert.match(smoke.env.FIREFOX_BINARY, /signed-smoke-tools\/firefox\/firefox/);
+    assert.match(smoke.env.GECKODRIVER_BINARY, /signed-smoke-tools\/geckodriver/);
+    assert.match(smoke.env.CHZZK_RELEASE_METADATA, /release-metadata\.json/);
+    assert.match(smoke.env.CHZZK_SIGNED_XPI, /-signed\.xpi/);
+    assert.equal(smoke.env.CHZZK_SIGNED_SMOKE_MODE, "install");
+    assert.doesNotMatch(JSON.stringify(smoke), /xpinstall\.signatures|requiredBuiltInCerts/i);
+    assert.match(JSON.stringify(release.jobs.attest.needs), /verify-signed/);
+    assert.match(JSON.stringify(release.jobs.publish.needs), /verify-signed/);
   });
 
   it("removes generated-file auto-commit workflows and retired external collector code", () => {
@@ -158,11 +215,41 @@ describe("release and repository security guardrails", () => {
     assert.match(cli, /--source-digest/);
     assert.match(cli, /release\.assets\.map/);
     assert.match(cli, /release\.isPrerelease/);
+    assert.match(cli, /isImmutable/);
+    assert.match(cli, /release must be immutable/i);
     assert.match(cli, /deployment client checkout must match/);
     assert.match(transaction, /snapshotLink/);
     assert.match(transaction, /restoreLink/);
     assert.match(transaction, /fsyncDirectory/);
     assert.doesNotMatch(transaction, /chmodSync\(targetDir|chmodSync\(releasesDir/);
+  });
+
+  it("requires a trusted exact-head automated review status for release and security PRs", () => {
+    const gate = workflow("review-gate.yml");
+    const text = read(".github/workflows/review-gate.yml");
+    const settings = read("scripts/configure-review-gate.js");
+    assert.equal(Object.hasOwn(gate.on, "pull_request_target"), true);
+    assert.equal(Object.hasOwn(gate.on, "check_run"), true);
+    assert.equal(Object.hasOwn(gate.on, "workflow_dispatch"), true);
+    assert.deepEqual(gate.jobs.evaluate.permissions, {
+      checks: "read",
+      contents: "read",
+      "pull-requests": "read",
+    });
+    assert.deepEqual(gate.jobs.status.permissions, { checks: "write" });
+    assert.doesNotMatch(JSON.stringify(gate.jobs.status), /actions\/checkout|node scripts\/|npm\s/);
+    assert.match(text, /AUTOMATED_REVIEW_APP_SLUG/);
+    assert.match(text, /AUTOMATED_REVIEW_CHECK_NAME/);
+    assert.match(text, /CHZZK review completion/);
+    assert.match(text, /check-runs/);
+    assert.match(settings, /required_status_checks/);
+    assert.match(settings, /apps\/github-actions/);
+    assert.match(settings, /dismiss_stale_reviews/);
+    assert.match(settings, /require_last_push_approval/);
+    assert.match(settings, /required_conversation_resolution/);
+    assert.match(settings, /protection\/enforce_admins/);
+    assert.match(settings, /Math\.max\(\s*1/);
+    assert.match(settings, /--apply/);
   });
 
   it("keeps extension diagnostics local-only and documented as such", () => {
