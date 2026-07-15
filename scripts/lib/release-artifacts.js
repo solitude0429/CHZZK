@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { TextDecoder } from "node:util";
 import JSZip from "jszip";
 
 export const RELEASE_PACKAGE_FILES = Object.freeze([
@@ -26,6 +27,8 @@ export const RELEASE_PACKAGE_FILES = Object.freeze([
 ]);
 
 const FIXED_ZIP_DATE = new Date("1980-01-01T00:00:00.000Z");
+const MAX_JSON_DEPTH = 128;
+const MAX_MANIFEST_BYTES = 256 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SOURCE_DIGEST_RE = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
@@ -193,6 +196,127 @@ export function assertReleaseMetadata(metadata) {
   return metadata;
 }
 
+function decodeSafeZipName(nameBytes, label) {
+  if ([...nameBytes].some((byte) => byte > 0x7f)) {
+    throw new Error(`${label} ZIP entry names must use ASCII`);
+  }
+  const name = nameBytes.toString("ascii");
+  const parts = name.split("/");
+  if (parts.at(-1) === "") parts.pop();
+  if (
+    !name ||
+    name.startsWith("/") ||
+    name.includes("\\") ||
+    name.includes("\0") ||
+    parts.some((part) => !part || part === "." || part === "..")
+  ) {
+    throw new Error(`${label} ZIP contains an unsafe raw entry path`);
+  }
+  return name;
+}
+
+function findZipEndRecord(bytes, label) {
+  const minimumOffset = Math.max(0, bytes.length - 22 - 0xffff);
+  for (let offset = bytes.length - 22; offset >= minimumOffset; offset -= 1) {
+    if (
+      bytes.readUInt32LE(offset) === 0x06054b50 &&
+      offset + 22 + bytes.readUInt16LE(offset + 20) === bytes.length
+    ) {
+      return offset;
+    }
+  }
+  throw new Error(`${label} ZIP end record is missing or ambiguous`);
+}
+
+function rawZipEntryNames(bytes, label) {
+  if (bytes.length < 22) throw new Error(`${label} ZIP is truncated`);
+  const endOffset = findZipEndRecord(bytes, label);
+  const disk = bytes.readUInt16LE(endOffset + 4);
+  const centralDisk = bytes.readUInt16LE(endOffset + 6);
+  const entriesOnDisk = bytes.readUInt16LE(endOffset + 8);
+  const entryCount = bytes.readUInt16LE(endOffset + 10);
+  const centralSize = bytes.readUInt32LE(endOffset + 12);
+  const centralOffset = bytes.readUInt32LE(endOffset + 16);
+  if (
+    disk !== 0 ||
+    centralDisk !== 0 ||
+    entriesOnDisk !== entryCount ||
+    entryCount === 0xffff ||
+    centralSize === 0xffffffff ||
+    centralOffset === 0xffffffff ||
+    centralOffset + centralSize !== endOffset
+  ) {
+    throw new Error(`${label} ZIP uses an unsupported multi-disk or ZIP64 layout`);
+  }
+
+  const names = [];
+  const seenNames = new Set();
+  const seenLocalOffsets = new Set();
+  let cursor = centralOffset;
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    if (cursor + 46 > endOffset || bytes.readUInt32LE(cursor) !== 0x02014b50) {
+      throw new Error(`${label} ZIP central directory is malformed`);
+    }
+    const flags = bytes.readUInt16LE(cursor + 8);
+    const nameLength = bytes.readUInt16LE(cursor + 28);
+    const extraLength = bytes.readUInt16LE(cursor + 30);
+    const commentLength = bytes.readUInt16LE(cursor + 32);
+    const diskStart = bytes.readUInt16LE(cursor + 34);
+    const localOffset = bytes.readUInt32LE(cursor + 42);
+    const nextCursor = cursor + 46 + nameLength + extraLength + commentLength;
+    if (
+      (flags & 1) !== 0 ||
+      diskStart !== 0 ||
+      nextCursor > endOffset ||
+      localOffset + 30 > centralOffset ||
+      seenLocalOffsets.has(localOffset)
+    ) {
+      throw new Error(`${label} ZIP entry metadata is unsafe`);
+    }
+    const centralNameBytes = bytes.subarray(cursor + 46, cursor + 46 + nameLength);
+    const name = decodeSafeZipName(centralNameBytes, label);
+    if (seenNames.has(name)) throw new Error(`${label} ZIP contains a duplicate raw entry name`);
+    seenNames.add(name);
+    seenLocalOffsets.add(localOffset);
+
+    if (bytes.readUInt32LE(localOffset) !== 0x04034b50) {
+      throw new Error(`${label} ZIP local entry header is malformed`);
+    }
+    const localNameLength = bytes.readUInt16LE(localOffset + 26);
+    const localExtraLength = bytes.readUInt16LE(localOffset + 28);
+    const localNameStart = localOffset + 30;
+    const localNameEnd = localNameStart + localNameLength;
+    if (localNameEnd + localExtraLength > centralOffset) {
+      throw new Error(`${label} ZIP local entry metadata is truncated`);
+    }
+    const localNameBytes = bytes.subarray(localNameStart, localNameEnd);
+    if (!localNameBytes.equals(centralNameBytes)) {
+      throw new Error(`${label} ZIP local and central entry names differ`);
+    }
+    names.push(name);
+    cursor = nextCursor;
+  }
+  if (cursor !== endOffset) throw new Error(`${label} ZIP central directory size is inconsistent`);
+  return names;
+}
+
+function assertSafeZipEntries(zip, bytes, label) {
+  const rawNames = rawZipEntryNames(bytes, label);
+  const rawFiles = rawNames.filter((name) => !name.endsWith("/")).sort();
+  const parsedFiles = Object.values(zip.files)
+    .filter((entry) => !entry.dir)
+    .map((entry) => {
+      if (entry.unsafeOriginalName && entry.unsafeOriginalName !== entry.name) {
+        throw new Error(`${label} ZIP entry name was normalized from an unsafe raw path`);
+      }
+      return entry.name;
+    })
+    .sort();
+  if (JSON.stringify(rawFiles) !== JSON.stringify(parsedFiles)) {
+    throw new Error(`${label} ZIP raw entries do not match parsed entries exactly`);
+  }
+}
+
 function runtimeEntries(zip) {
   return Object.values(zip.files)
     .filter((entry) => !entry.dir && !entry.name.startsWith("META-INF/"))
@@ -220,6 +344,167 @@ function assertSignedManifestIdentity(manifest, metadata) {
   }
 }
 
+function jsonSemanticallyEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== typeof right || left === null || right === null) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((entry, index) => jsonSemanticallyEqual(entry, right[index]))
+    );
+  }
+  if (typeof left !== "object") return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && Object.hasOwn(right, key) && jsonSemanticallyEqual(left[key], right[key]),
+    )
+  );
+}
+
+function parseStrictJson(text, label) {
+  let index = 0;
+
+  const fail = (message) => {
+    throw new Error(`${label} manifest ${message}`);
+  };
+  const skipWhitespace = () => {
+    while (index < text.length && /[\t\n\r ]/.test(text[index])) index += 1;
+  };
+  const parseString = () => {
+    if (text[index] !== '"') fail("is not valid JSON");
+    const start = index;
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      if (character === '"') {
+        index += 1;
+        try {
+          return JSON.parse(text.slice(start, index));
+        } catch {
+          fail("is not valid JSON");
+        }
+      }
+      if (character === "\\") {
+        index += 1;
+        const escape = text[index];
+        if (escape === "u") {
+          if (!/^[a-fA-F0-9]{4}$/.test(text.slice(index + 1, index + 5))) {
+            fail("is not valid JSON");
+          }
+          index += 5;
+        } else if ('"\\/bfnrt'.includes(escape)) {
+          index += 1;
+        } else {
+          fail("is not valid JSON");
+        }
+        continue;
+      }
+      if (character.charCodeAt(0) < 0x20) fail("is not valid JSON");
+      index += 1;
+    }
+    fail("is not valid JSON");
+  };
+  const parseNumber = () => {
+    const match = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!match) fail("is not valid JSON");
+    index += match[0].length;
+    const value = Number(match[0]);
+    if (!Number.isFinite(value)) fail("contains a non-finite number");
+    return value;
+  };
+  const parseValue = (depth) => {
+    if (depth > MAX_JSON_DEPTH) fail("exceeds the nesting limit");
+    skipWhitespace();
+    const character = text[index];
+    if (character === '"') return parseString();
+    if (character === "{") {
+      index += 1;
+      skipWhitespace();
+      const entries = [];
+      const keys = new Set();
+      if (text[index] === "}") {
+        index += 1;
+        return {};
+      }
+      while (index < text.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) fail(`contains duplicate key ${JSON.stringify(key)}`);
+        keys.add(key);
+        skipWhitespace();
+        if (text[index] !== ":") fail("is not valid JSON");
+        index += 1;
+        entries.push([key, parseValue(depth + 1)]);
+        skipWhitespace();
+        if (text[index] === "}") {
+          index += 1;
+          return Object.fromEntries(entries);
+        }
+        if (text[index] !== ",") fail("is not valid JSON");
+        index += 1;
+      }
+      fail("is not valid JSON");
+    }
+    if (character === "[") {
+      index += 1;
+      skipWhitespace();
+      const entries = [];
+      if (text[index] === "]") {
+        index += 1;
+        return entries;
+      }
+      while (index < text.length) {
+        entries.push(parseValue(depth + 1));
+        skipWhitespace();
+        if (text[index] === "]") {
+          index += 1;
+          return entries;
+        }
+        if (text[index] !== ",") fail("is not valid JSON");
+        index += 1;
+      }
+      fail("is not valid JSON");
+    }
+    for (const [literal, value] of [
+      ["true", true],
+      ["false", false],
+      ["null", null],
+    ]) {
+      if (text.startsWith(literal, index)) {
+        index += literal.length;
+        return value;
+      }
+    }
+    return parseNumber();
+  };
+
+  const value = parseValue(0);
+  skipWhitespace();
+  if (index !== text.length) fail("is not valid JSON");
+  return value;
+}
+
+function parseManifest(bytes, label) {
+  if (bytes.length > MAX_MANIFEST_BYTES) throw new Error(`${label} manifest exceeds the size limit`);
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`${label} manifest is not valid UTF-8`);
+  }
+  const manifest = parseStrictJson(text, label);
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error(`${label} manifest root must be an object`);
+  }
+  return manifest;
+}
+
 export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath, sourceArchivePath }) {
   assertRegularFile(metadataPath);
   assertRegularFile(signedXpiPath);
@@ -242,6 +527,8 @@ export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath
 
   const sourceZip = await JSZip.loadAsync(sourceBytes, { checkCRC32: true });
   const signedZip = await JSZip.loadAsync(signedBytes, { checkCRC32: true });
+  assertSafeZipEntries(sourceZip, sourceBytes, "Source archive");
+  assertSafeZipEntries(signedZip, signedBytes, "Signed XPI");
   assertExactRuntimeEntries(sourceZip, "Source archive");
   assertExactRuntimeEntries(signedZip, "Signed XPI");
   const signatureEntries = Object.values(signedZip.files).filter(
@@ -255,6 +542,7 @@ export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath
   if (metadataFiles.size !== RELEASE_PACKAGE_FILES.length) {
     throw new Error("Release metadata file list does not match the runtime allowlist");
   }
+  let signedManifest = null;
   for (const relativePath of RELEASE_PACKAGE_FILES) {
     const sourceFile = sourceZip.file(relativePath);
     const signedFile = signedZip.file(relativePath);
@@ -263,17 +551,21 @@ export async function verifySignedReleaseArtifacts({ metadataPath, signedXpiPath
       throw new Error(`Missing signed runtime file: ${relativePath}`);
     const sourceFileBytes = await sourceFile.async("nodebuffer");
     const signedFileBytes = await signedFile.async("nodebuffer");
-    if (
-      !sourceFileBytes.equals(signedFileBytes) ||
-      sha256(sourceFileBytes) !== recorded.sha256 ||
-      sourceFileBytes.length !== recorded.size
-    ) {
+    if (sha256(sourceFileBytes) !== recorded.sha256 || sourceFileBytes.length !== recorded.size) {
+      throw new Error(`Signed runtime file differs from release metadata: ${relativePath}`);
+    }
+    if (relativePath === "manifest.json") {
+      const sourceManifest = parseManifest(sourceFileBytes, "Source archive");
+      signedManifest = parseManifest(signedFileBytes, "Signed XPI");
+      if (!jsonSemanticallyEqual(sourceManifest, signedManifest)) {
+        throw new Error("Signed runtime file differs from release metadata: manifest.json");
+      }
+    } else if (!sourceFileBytes.equals(signedFileBytes)) {
       throw new Error(`Signed runtime file differs from release metadata: ${relativePath}`);
     }
   }
 
-  const manifest = JSON.parse((await signedZip.file("manifest.json").async("nodebuffer")).toString("utf8"));
-  assertSignedManifestIdentity(manifest, metadata);
+  assertSignedManifestIdentity(signedManifest, metadata);
   return {
     signedXpiSha256: sha256(signedBytes),
     signedXpiSize: signedBytes.length,
