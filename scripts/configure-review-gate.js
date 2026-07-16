@@ -102,7 +102,7 @@ function normalizeChecks(statusProtection) {
     if (typeof check?.context !== "string" || !check.context) {
       throw new Error("Existing required check identity is malformed");
     }
-    if (check.app_id === null || check.app_id === undefined) return { context: check.context };
+    if (check.app_id === null) return { app_id: -1, context: check.context };
     if (!Number.isSafeInteger(check.app_id) || check.app_id < 1) {
       throw new Error("Existing required check source is malformed");
     }
@@ -170,7 +170,6 @@ function fullProtectionUpdate(protection) {
     const checks = normalizeChecks(statusProtection);
     requiredStatusChecks = {
       checks,
-      contexts: checks.map((check) => check.context),
       strict: statusProtection.strict,
     };
   }

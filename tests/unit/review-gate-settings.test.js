@@ -25,6 +25,14 @@ function save() { fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(sta
 function output(value) { save(); process.stdout.write(JSON.stringify(value)); process.exit(0); }
 function fail() { save(); process.stderr.write("unexpected fake gh request: " + method + " " + endpoint); process.exit(1); }
 function notFound() { save(); process.stderr.write("gh: Branch not found (HTTP 404)"); process.exit(1); }
+function statusResponse(value) {
+  if (value === null) return null;
+  const checks = value.checks.map((check) => ({
+    app_id: check.app_id === -1 ? null : check.app_id,
+    context: check.context,
+  }));
+  return { checks, contexts: checks.map((check) => check.context), strict: value.strict };
+}
 
 if (method === "GET" && endpoint === "repos/example/repository") output({ default_branch: "main" });
 if (method === "GET" && endpoint === "apps/github-actions") {
@@ -84,11 +92,15 @@ if (method === "PATCH" && endpoint.startsWith("repos/example/repository/labels/"
   output({});
 }
 if (method === "PATCH" && endpoint.endsWith("/required_status_checks")) {
-  state.statusProtection = body;
+  state.statusProtection = statusResponse(body);
   output({});
 }
 if (method === "PUT" && endpoint === "repos/example/repository/branches/main/protection") {
-  if (!body.required_status_checks || !Array.isArray(body.required_status_checks.contexts)) fail();
+  if (
+    !body.required_status_checks ||
+    Object.hasOwn(body.required_status_checks, "contexts") ||
+    !body.required_status_checks.checks.every((check) => Number.isSafeInteger(check.app_id))
+  ) fail();
   state.adminEnforcement = body.enforce_admins;
   state.allowDeletions = body.allow_deletions;
   state.allowForcePushes = body.allow_force_pushes;
@@ -100,7 +112,7 @@ if (method === "PUT" && endpoint === "repos/example/repository/branches/main/pro
   state.pullRequestReviews = body.required_pull_request_reviews;
   state.requiredLinearHistory = body.required_linear_history;
   state.restrictions = body.restrictions;
-  state.statusProtection = body.required_status_checks;
+  state.statusProtection = statusResponse(body.required_status_checks);
   output({});
 }
 if (method === "POST" && endpoint.endsWith("/enforce_admins")) {
@@ -172,7 +184,11 @@ describe("sole-owner review-gate repository configuration", () => {
         },
         requiredLinearHistory: true,
         statusProtection: {
-          checks: [{ app_id: 7, context: "Existing CI" }],
+          checks: [
+            { app_id: 7, context: "Existing CI" },
+            { app_id: null, context: "Any CI" },
+          ],
+          contexts: ["Existing CI", "Any CI"],
           strict: false,
         },
         variables: [
@@ -215,9 +231,10 @@ describe("sole-owner review-gate repository configuration", () => {
       assert.deepEqual(configured.statusProtection, {
         checks: [
           { app_id: 7, context: "Existing CI" },
+          { app_id: null, context: "Any CI" },
           { app_id: githubActionsAppId, context: "CHZZK review completion" },
         ],
-        contexts: ["Existing CI", "CHZZK review completion"],
+        contexts: ["Existing CI", "Any CI", "CHZZK review completion"],
         strict: true,
       });
       assert.equal(configured.conversationResolution, true);
@@ -236,9 +253,9 @@ describe("sole-owner review-gate repository configuration", () => {
         required_status_checks: {
           checks: [
             { app_id: 7, context: "Existing CI" },
+            { app_id: -1, context: "Any CI" },
             { app_id: githubActionsAppId, context: "CHZZK review completion" },
           ],
-          contexts: ["Existing CI", "CHZZK review completion"],
           strict: true,
         },
         restrictions: null,
