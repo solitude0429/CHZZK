@@ -930,6 +930,39 @@ chunklist_1080p.m3u8?Policy=redacted
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [tabId]);
   });
 
+  it("keeps reload validation active for origin-only CHZZK metadata", async () => {
+    const tabId = 85;
+    const pendingTab = deferred();
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    listeners.onUpdated(tabId, { url: "https://chzzk.naver.com/live/channel-a" });
+    await waitForDiagnosticsQueue();
+
+    listeners.onUpdated(tabId, { status: "loading" });
+    const explicitRedirect = plain(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "origin-only-request"),
+        documentUrl: undefined,
+        originUrl: undefined,
+      }),
+    );
+    assert.match(explicitRedirect.redirectUrl, /chunklist_1080p\.m3u8\?Policy=synthetic#tail$/);
+
+    pendingTab.resolve({ id: tabId, url: "https://chzzk.naver.com/" });
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+
+    const metadataLessRedirect = await listeners.onBeforeRequest({
+      ...familyRequest(tabId, "origin-only-request"),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+    });
+    assert.equal(metadataLessRedirect, undefined);
+  });
+
   it("does not retain reload trust when the authoritative current tab URL is no longer live", async () => {
     const tabId = 82;
     const tabUrlsById = new Map([[tabId, "https://chzzk.naver.com/live/channel-a"]]);

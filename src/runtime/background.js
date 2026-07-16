@@ -731,7 +731,9 @@ async function recordRequestDiagnostics(details, decision) {
 async function handleRequest(details) {
   if (!registerRequestContext(details)) return undefined;
   if (hasTrustedChzzkMetadata(details, policy)) {
-    pendingTrustValidationByTab.delete(details.tabId);
+    if (isChzzkLiveUrl(details.documentUrl, policy)) {
+      pendingTrustValidationByTab.delete(details.tabId);
+    }
   } else if (!(await awaitPendingTrustValidation(details?.tabId))) {
     return undefined;
   }

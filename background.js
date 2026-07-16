@@ -1467,7 +1467,9 @@
   async function handleRequest(details) {
     if (!registerRequestContext(details)) return void 0;
     if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
-      pendingTrustValidationByTab.delete(details.tabId);
+      if (isChzzkLiveUrl(details.documentUrl, quality_policy_default)) {
+        pendingTrustValidationByTab.delete(details.tabId);
+      }
     } else if (!(await awaitPendingTrustValidation(details?.tabId))) {
       return void 0;
     }
