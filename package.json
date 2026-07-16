@@ -22,7 +22,6 @@
     "lint": "eslint .",
     "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs node_modules package-lock.json package.json policy reg scripts src tests",
     "prepare:release": "node scripts/prepare-release.js",
-    "release:dispatch": "node scripts/dispatch-release.js",
     "setup:firefox-e2e": "node scripts/setup-firefox-e2e.js",
     "setup:firefox-signed-smoke": "node scripts/setup-firefox-signed-smoke.js",
     "sign:unlisted": "node scripts/sign-unlisted.js",

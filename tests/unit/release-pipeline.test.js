@@ -192,6 +192,72 @@ describe("immutable release preparation", () => {
   });
 });
 
+function addZipEndComment(zipBytes) {
+  const endSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const endOffset = zipBytes.lastIndexOf(endSignature);
+  assert.notEqual(endOffset, -1, "synthetic ZIP must contain an end-of-central-directory record");
+  const comment = Buffer.from("hidden archive comment");
+  const mutated = Buffer.concat([zipBytes, comment]);
+  mutated.writeUInt16LE(comment.length, endOffset + 20);
+  return mutated;
+}
+
+function addCentralEntryComment(zipBytes) {
+  const endSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const endOffset = zipBytes.lastIndexOf(endSignature);
+  assert.notEqual(endOffset, -1, "synthetic ZIP must contain an end-of-central-directory record");
+  const centralOffset = zipBytes.readUInt32LE(endOffset + 16);
+  assert.equal(zipBytes.readUInt32LE(centralOffset), 0x02014b50);
+  const nameLength = zipBytes.readUInt16LE(centralOffset + 28);
+  const extraLength = zipBytes.readUInt16LE(centralOffset + 30);
+  const commentLength = zipBytes.readUInt16LE(centralOffset + 32);
+  const insertionOffset = centralOffset + 46 + nameLength + extraLength + commentLength;
+  const mutated = Buffer.concat([
+    zipBytes.subarray(0, insertionOffset),
+    Buffer.from("x"),
+    zipBytes.subarray(insertionOffset),
+  ]);
+  mutated.writeUInt16LE(commentLength + 1, centralOffset + 32);
+  mutated.writeUInt32LE(zipBytes.readUInt32LE(endOffset + 12) + 1, endOffset + 1 + 12);
+  return mutated;
+}
+
+function prefixZipWithUnaccountedByte(zipBytes) {
+  const endSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const endOffset = zipBytes.lastIndexOf(endSignature);
+  assert.notEqual(endOffset, -1, "synthetic ZIP must contain an end-of-central-directory record");
+  const centralOffset = zipBytes.readUInt32LE(endOffset + 16);
+  const entryCount = zipBytes.readUInt16LE(endOffset + 10);
+  const mutated = Buffer.concat([Buffer.from([0x41]), zipBytes]);
+  const shiftedEndOffset = endOffset + 1;
+  mutated.writeUInt32LE(centralOffset + 1, shiftedEndOffset + 16);
+  let cursor = centralOffset + 1;
+  for (let index = 0; index < entryCount; index += 1) {
+    assert.equal(mutated.readUInt32LE(cursor), 0x02014b50);
+    mutated.writeUInt32LE(mutated.readUInt32LE(cursor + 42) + 1, cursor + 42);
+    cursor +=
+      46 +
+      mutated.readUInt16LE(cursor + 28) +
+      mutated.readUInt16LE(cursor + 30) +
+      mutated.readUInt16LE(cursor + 32);
+  }
+  return mutated;
+}
+
+function insertUnaccountedByteBeforeCentralDirectory(zipBytes) {
+  const endSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const endOffset = zipBytes.lastIndexOf(endSignature);
+  assert.notEqual(endOffset, -1, "synthetic ZIP must contain an end-of-central-directory record");
+  const centralOffset = zipBytes.readUInt32LE(endOffset + 16);
+  const mutated = Buffer.concat([
+    zipBytes.subarray(0, centralOffset),
+    Buffer.from([0x41]),
+    zipBytes.subarray(centralOffset),
+  ]);
+  mutated.writeUInt32LE(centralOffset + 1, endOffset + 1 + 16);
+  return mutated;
+}
+
 async function buildSyntheticSignedXpi(
   sourceArchivePath,
   outputPath,
@@ -536,6 +602,97 @@ describe("signed release structural verification", () => {
           sourceArchivePath: prepared.sourceArchivePath,
         }),
         /unsafe|raw|entry|path/i,
+      );
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects ZIP archive and central-directory entry comments", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-zip-comments-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "7".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath);
+      const original = readFileSync(signedXpiPath);
+
+      for (const mutate of [addZipEndComment, addCentralEntryComment]) {
+        writeFileSync(signedXpiPath, mutate(original), { mode: 0o600 });
+        await assert.rejects(
+          verifySignedReleaseStructure({
+            metadataPath: prepared.metadataPath,
+            signedXpiPath,
+            sourceArchivePath: prepared.sourceArchivePath,
+          }),
+          /ZIP.*comment|comment.*ZIP/i,
+        );
+      }
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects unaccounted bytes before the first ZIP entry", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-zip-prefix-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "7".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath);
+      writeFileSync(signedXpiPath, prefixZipWithUnaccountedByte(readFileSync(signedXpiPath)), {
+        mode: 0o600,
+      });
+
+      await assert.rejects(
+        verifySignedReleaseStructure({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        }),
+        /unaccounted|prefix|first entry/i,
+      );
+    } finally {
+      rmSync(rootDir, { force: true, recursive: true });
+      rmSync(outputDir, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects unaccounted bytes between the final ZIP entry and central directory", async () => {
+    const rootDir = makeReleaseFixture();
+    const outputDir = mkdtempSync(join(tmpdir(), "chzzk-zip-unaccounted-"));
+    try {
+      const prepared = await prepareReleaseArtifacts({
+        outputDir,
+        rootDir,
+        sourceDigest: "7".repeat(40),
+        sourceRepository: "solitude0429/CHZZK",
+      });
+      const signedXpiPath = join(outputDir, `chzzk-${prepared.metadata.version}-signed.xpi`);
+      await buildSyntheticSignedXpi(prepared.sourceArchivePath, signedXpiPath);
+      writeFileSync(signedXpiPath, insertUnaccountedByteBeforeCentralDirectory(readFileSync(signedXpiPath)), {
+        mode: 0o600,
+      });
+
+      await assert.rejects(
+        verifySignedReleaseStructure({
+          metadataPath: prepared.metadataPath,
+          signedXpiPath,
+          sourceArchivePath: prepared.sourceArchivePath,
+        }),
+        /unaccounted|contiguous|entry data/i,
       );
     } finally {
       rmSync(rootDir, { force: true, recursive: true });

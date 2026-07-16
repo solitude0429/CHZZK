@@ -314,9 +314,46 @@ function assertZipExtraFields(extraBytes, label) {
   }
 }
 
+function dataDescriptorEnd(
+  bytes,
+  dataEnd,
+  centralOffset,
+  { compressedSize, crc32, uncompressedSize },
+  label,
+) {
+  const candidates = [];
+  if (dataEnd + 12 <= centralOffset) {
+    candidates.push({
+      compressedSize: bytes.readUInt32LE(dataEnd + 4),
+      crc32: bytes.readUInt32LE(dataEnd),
+      end: dataEnd + 12,
+      uncompressedSize: bytes.readUInt32LE(dataEnd + 8),
+    });
+  }
+  if (dataEnd + 16 <= centralOffset && bytes.readUInt32LE(dataEnd) === 0x08074b50) {
+    candidates.push({
+      compressedSize: bytes.readUInt32LE(dataEnd + 8),
+      crc32: bytes.readUInt32LE(dataEnd + 4),
+      end: dataEnd + 16,
+      uncompressedSize: bytes.readUInt32LE(dataEnd + 12),
+    });
+  }
+  const matching = candidates.filter(
+    (candidate) =>
+      candidate.crc32 === crc32 &&
+      candidate.compressedSize === compressedSize &&
+      candidate.uncompressedSize === uncompressedSize,
+  );
+  if (matching.length !== 1) throw new Error(`${label} ZIP data descriptor is missing or malformed`);
+  return matching[0].end;
+}
+
 function inspectZipCentralDirectory(bytes, label, expectedNames) {
   if (bytes.length < 22) throw new Error(`${label} ZIP is truncated`);
   const endOffset = findZipEndRecord(bytes, label);
+  if (bytes.readUInt16LE(endOffset + 20) !== 0) {
+    throw new Error(`${label} ZIP archive comments are forbidden`);
+  }
   const disk = bytes.readUInt16LE(endOffset + 4);
   const centralDisk = bytes.readUInt16LE(endOffset + 6);
   const entriesOnDisk = bytes.readUInt16LE(endOffset + 8);
@@ -353,6 +390,7 @@ function inspectZipCentralDirectory(bytes, label, expectedNames) {
     const nameLength = bytes.readUInt16LE(cursor + 28);
     const extraLength = bytes.readUInt16LE(cursor + 30);
     const commentLength = bytes.readUInt16LE(cursor + 32);
+    if (commentLength !== 0) throw new Error(`${label} ZIP entry comments are forbidden`);
     const diskStart = bytes.readUInt16LE(cursor + 34);
     const localOffset = bytes.readUInt32LE(cursor + 42);
     const nextCursor = cursor + 46 + nameLength + extraLength + commentLength;
@@ -410,8 +448,17 @@ function inspectZipCentralDirectory(bytes, label, expectedNames) {
     ) {
       throw new Error(`${label} ZIP local and central entry sizes or CRC differ`);
     }
-    const dataEnd = localExtraEnd + compressedSize;
+    let dataEnd = localExtraEnd + compressedSize;
     if (dataEnd > centralOffset) throw new Error(`${label} ZIP entry data range is unsafe`);
+    if ((flags & 0x0008) !== 0) {
+      dataEnd = dataDescriptorEnd(
+        bytes,
+        dataEnd,
+        centralOffset,
+        { compressedSize, crc32, uncompressedSize },
+        label,
+      );
+    }
     if (compressedSize <= 0 || compressedSize > RELEASE_ZIP_LIMITS.maxEntryCompressedBytes) {
       throw new Error(`${label} ZIP compressed entry size limit exceeded: ${name}`);
     }
@@ -452,9 +499,14 @@ function inspectZipCentralDirectory(bytes, label, expectedNames) {
     throw new Error(`${label} ZIP ${detail} entries do not match the exact release allowlist`);
   }
   const entriesByOffset = [...entries].sort((left, right) => left.localOffset - right.localOffset);
+  if (entriesByOffset[0]?.localOffset !== 0) {
+    throw new Error(`${label} ZIP contains unaccounted bytes before the first entry`);
+  }
   for (const [index, entry] of entriesByOffset.entries()) {
     const nextOffset = entriesByOffset[index + 1]?.localOffset ?? centralOffset;
-    if (entry.dataEnd > nextOffset) throw new Error(`${label} ZIP entry data ranges overlap`);
+    if (entry.dataEnd !== nextOffset) {
+      throw new Error(`${label} ZIP contains unaccounted bytes between entry data records`);
+    }
   }
   return entries;
 }

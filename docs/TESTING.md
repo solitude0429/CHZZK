@@ -51,7 +51,7 @@ The fixture XPIs are unsigned and exist only in the disposable Developer Edition
 
 `test:firefox-signed-smoke` is the production-like authenticity gate. It launches stock Firefox with a new mode-`0700` disposable profile, supplies no preference overrides, confirms `xpinstall.signatures.required` is enabled and has no user value, permanently installs the final XPI, and requires the exact release add-on ID, version, update URL, active state, `temporarilyInstalled=false`, and `AddonManager.SIGNEDSTATE_SIGNED`.
 
-The release workflow downloads checksum-pinned stock Firefox and geckodriver with the separate signed-smoke setup, then runs install mode on the final AMO-signed XPI before attestation or publication. To provision the same binaries locally:
+The release workflow downloads checksum-pinned stock Firefox and geckodriver with the separate signed-smoke setup, then runs install mode on the final AMO-signed XPI before attestation or draft staging. Publication occurs only later in the Actions-external finalizer. To provision the same binaries locally:
 
 ```bash
 npm run setup:firefox-signed-smoke

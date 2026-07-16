@@ -10,8 +10,9 @@
 4. 별도 read-only job이 signed XPI의 exact ZIP/runtime/signature-metadata 구조를 검증합니다. `manifest.json` number는 lossless decimal token으로 비교하고, 나머지 runtime은 prepared ZIP과 바이트 단위로 검증합니다. 이 단계는 Mozilla signature authenticity를 주장하지 않습니다.
 5. 같은 read-only job이 checksum-pinned stock Firefox를 준비하고 기본 서명 설정을 바꾸지 않은 disposable profile에 final AMO-signed XPI를 영구 설치해 Mozilla signed state와 exact identity를 확인합니다.
 6. 별도 attestation job이 source ZIP, metadata, signed XPI를 같은 source commit과 signing workflow에 묶습니다. 구조 검사와 stock-Firefox gate가 모두 성공하기 전에는 실행되지 않습니다.
-7. Actions 밖의 운영자 preflight가 admin-only API로 repository immutable-releases 설정의 `enabled: true`, exact default-branch commit/version을 고정한 뒤에만 제한된 dispatch를 보냅니다. publish job은 compatible partial draft만 재개해 세 asset을 재검증한 뒤 공개 후 `immutable: true`를 확인합니다.
-8. VPS deploy client가 Release의 `isImmutable: true`를 독립적으로 다시 요구하고 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
+7. Actions 밖의 운영자 preflight가 admin-only API로 repository immutable-releases 설정의 `enabled: true`, exact default-branch commit/version을 고정한 뒤에만 제한된 dispatch를 보냅니다. Workflow의 `stage` job은 compatible partial draft만 재개해 세 asset을 채우고 바이트를 재검증하지만 공개하지 않습니다.
+8. Workflow 성공 뒤 같은 clean exact-default-head checkout의 out-of-band finalizer가 Git fsmonitor/hooks/config override를 비활성화하고 finalizer blob을 exact `HEAD`와 검증합니다. 인증된 operator의 protected remote default head와 일치함을 import 전에 확인한 뒤 verified data-URL graph를 실행합니다. 모든 exact-source staging run이 완료되고 최신 run/attempt가 성공했는지 확인하며, deterministic source/metadata, staged signed XPI, 세 attestation을 다시 검증합니다. 다른 durable same-authority release writer가 없는 경계에서 공개 직전에 admin-only API의 `enabled: true`를 다시 확인한 뒤 즉시 exact release ID를 publish하고 exact immutable post-state를 요구합니다.
+9. VPS deploy client가 Release의 `isImmutable: true`를 독립적으로 다시 요구하고 tag commit, 정확한 asset set, 세 attestation, release metadata를 검증한 뒤 update host를 원자적으로 전환합니다.
 
 ## Update host 구조
 
@@ -62,13 +63,41 @@ npm run verify
 1. 버전 변경과 생성 파일을 PR에 포함합니다.
 2. CI의 unit/security/package gate와 실제 Firefox temporary-profile E2E를 통과시킵니다.
 3. PR을 `main`에 병합합니다.
-4. Actions 밖의 clean exact-default-head checkout에서 administrator preflight를 실행합니다. release workflow에는 UI `workflow_dispatch`가 없습니다.
+4. `docs/SIGNING.md`에 따라 protected `main`에서 검증해 저장소 밖에 설치한 operator bootstrap을 Actions 밖의 clean exact-default-head checkout에서 `dispatch` 모드로 실행합니다. Checkout JavaScript를 직접 실행하지 않으며 release workflow에는 UI `workflow_dispatch`가 없습니다.
 
 ```bash
-CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" npm run release:dispatch
+(
+  GH_TOKEN="$CHZZK_RELEASE_ADMIN_TOKEN"
+  export GH_TOKEN PATH="/usr/local/bin:/usr/bin:/bin"
+  unset ALL_PROXY BASH_ENV CHZZK_RELEASE_ADMIN_TOKEN CURL_CA_BUNDLE ENV \
+    GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN HTTPS_PROXY \
+    HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD NODE_EXTRA_CA_CERTS \
+    NODE_OPTIONS NODE_PATH NO_PROXY REQUESTS_CA_BUNDLE SSL_CERT_DIR \
+    SSL_CERT_FILE XDG_CONFIG_HOME all_proxy http_proxy https_proxy no_proxy
+  exec /absolute/path/to/trusted/node \
+    "$HOME/.local/libexec/chzzk-release-bootstrap.mjs" \
+    dispatch "solitude0429/CHZZK" "$PWD"
+)
 ```
 
-5. workflow가 성공한 뒤 clean `main` checkout에서 명시적으로 배포합니다.
+5. Workflow가 exact draft staging까지 성공한 뒤, `docs/SIGNING.md` 절차로 protected `main`에서 검증해 저장소 밖에 설치한 operator bootstrap을 같은 clean checkout에서 실행합니다. Checkout의 `scripts/finalize-release.js`를 직접 실행하지 않습니다.
+
+```bash
+(
+  GH_TOKEN="$CHZZK_RELEASE_ADMIN_TOKEN"
+  export GH_TOKEN PATH="/usr/local/bin:/usr/bin:/bin"
+  unset ALL_PROXY BASH_ENV CHZZK_RELEASE_ADMIN_TOKEN CURL_CA_BUNDLE ENV \
+    GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN HTTPS_PROXY \
+    HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD NODE_EXTRA_CA_CERTS \
+    NODE_OPTIONS NODE_PATH NO_PROXY REQUESTS_CA_BUNDLE SSL_CERT_DIR \
+    SSL_CERT_FILE XDG_CONFIG_HOME all_proxy http_proxy https_proxy no_proxy
+  exec /absolute/path/to/trusted/node \
+    "$HOME/.local/libexec/chzzk-release-bootstrap.mjs" \
+    finalize "solitude0429/CHZZK" "$PWD"
+)
+```
+
+6. Immutable Release 검증이 성공한 뒤 clean `main` checkout에서 명시적으로 배포합니다.
 
 ```bash
 CHZZK_VERSION="<version>" \

@@ -1,4 +1,4 @@
-name: Sign and publish unlisted Firefox release
+name: Sign and stage unlisted Firefox release
 
 on:
   repository_dispatch:
@@ -306,7 +306,7 @@ jobs:
         with:
           subject-path: release-assets/*
 
-  publish:
+  stage:
     needs: [attest, prepare, verify-signed]
     if: needs.prepare.outputs.reuse_existing != 'true'
     permissions:
@@ -319,7 +319,7 @@ jobs:
         with:
           name: chzzk-release-assets-${{ github.sha }}
           path: release-assets
-      - name: Publish immutable release assets
+      - name: Stage exact attested release draft assets
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
@@ -432,19 +432,16 @@ jobs:
           sync_draft_assets
           verify_release_identity true false
           verify_exact_assets
-          gh release edit "$TAG" --draft=false
-          verify_release_identity false true
-          verify_exact_assets
 
   complete:
-    needs: [attest, prepare, publish, sign, verify-signed]
+    needs: [attest, prepare, sign, stage, verify-signed]
     if: always()
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require either verified reuse or the full sign-attest-publish chain
+      - name: Require either verified reuse or the full sign-attest-stage chain
         run: |
           set -euo pipefail
           test "${{ needs.prepare.result }}" = "success"
@@ -452,13 +449,13 @@ jobs:
           if [ "${{ needs.prepare.outputs.reuse_existing }}" = "true" ]; then
             test "${{ needs.sign.result }}" = "skipped"
             test "${{ needs.attest.result }}" = "skipped"
-            test "${{ needs.publish.result }}" = "skipped"
+            test "${{ needs.stage.result }}" = "skipped"
           elif [ "${{ needs.prepare.outputs.draft_signed_ready }}" = "true" ]; then
             test "${{ needs.sign.result }}" = "skipped"
             test "${{ needs.attest.result }}" = "success"
-            test "${{ needs.publish.result }}" = "success"
+            test "${{ needs.stage.result }}" = "success"
           else
             test "${{ needs.sign.result }}" = "success"
             test "${{ needs.attest.result }}" = "success"
-            test "${{ needs.publish.result }}" = "success"
+            test "${{ needs.stage.result }}" = "success"
           fi

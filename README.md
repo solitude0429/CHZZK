@@ -73,7 +73,7 @@ Use the signed XPI from the latest GitHub Release. Firefox automatic updates use
 https://chzzk-updates.alpha-apple.dedyn.io/updates.json
 ```
 
-Mozilla unlisted signing and the immutable release pipeline are documented in `docs/SIGNING.md` and `docs/UPDATES.md`. The signing job receives only a checksum-verified prepared artifact and AMO environment secrets; verification, attestation, and `contents: write` publication run in separate jobs. Published assets are never overwritten. Mozilla signing only means the XPI is installable in Firefox; it is not NAVER approval.
+Mozilla unlisted signing and the immutable release pipeline are documented in `docs/SIGNING.md` and `docs/UPDATES.md`. The signing job receives only a checksum-verified prepared artifact and AMO environment secrets; verification, attestation, and `contents: write` draft staging run in separate jobs. An Actions-external administrator finalizer performs the just-in-time immutable-settings check and publication. Published assets are never overwritten. Mozilla signing only means the XPI is installable in Firefox; it is not NAVER approval.
 
 ## Diagnostics
 

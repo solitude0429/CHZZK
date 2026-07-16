@@ -2,11 +2,16 @@ import { spawn } from "node:child_process";
 import { chmodSync, lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { MAX_AMO_JSON_BYTES, MAX_SIGNED_XPI_BYTES, assertReleaseMetadata } from "./amo-client.js";
 
 const SIGNED_XPI_NAME_RE = /^chzzk-(\d+\.\d+\.\d+)-signed\.xpi$/;
+
+function resolveInputPath(path, environmentName) {
+  if (typeof path !== "string" || !path) throw new Error(`${environmentName} is required`);
+  return resolve(path);
+}
 
 function assertRegularInput(path, environmentName, { executable = false, maxBytes = null } = {}) {
   if (typeof path !== "string" || !path) throw new Error(`${environmentName} is required`);
@@ -54,6 +59,13 @@ export function validateSignedSmokeInputs({
 }) {
   if (!new Set(["install", "update"]).has(mode)) {
     throw new Error("CHZZK_SIGNED_SMOKE_MODE must be install or update");
+  }
+  firefoxBinary = resolveInputPath(firefoxBinary, "FIREFOX_BINARY");
+  geckodriverBinary = resolveInputPath(geckodriverBinary, "GECKODRIVER_BINARY");
+  metadataPath = resolveInputPath(metadataPath, "CHZZK_RELEASE_METADATA");
+  newSignedXpiPath = resolveInputPath(newSignedXpiPath, "CHZZK_SIGNED_XPI");
+  if (mode === "update") {
+    oldSignedXpiPath = resolveInputPath(oldSignedXpiPath, "CHZZK_OLD_SIGNED_XPI");
   }
   assertRegularInput(firefoxBinary, "FIREFOX_BINARY", { executable: true });
   assertRegularInput(geckodriverBinary, "GECKODRIVER_BINARY", { executable: true });

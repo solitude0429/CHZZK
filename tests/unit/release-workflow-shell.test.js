@@ -30,15 +30,6 @@ if (args[0] === "release" && args[1] === "view") {
   if (!state.releaseExists) fail();
   if (args.includes("--json")) {
     const field = args[args.indexOf("--json") + 1];
-    if (
-      field === "isDraft" &&
-      !state.isDraft &&
-      process.env.FAIL_POST_PUBLISH_VERIFY === "true" &&
-      !state.failedPostPublishVerify
-    ) {
-      state.failedPostPublishVerify = true;
-      fail();
-    }
     if (field === "isDraft") process.stdout.write(String(state.isDraft));
     else if (field === "isPrerelease") process.stdout.write(String(state.isPrerelease));
     else if (field === "assets") {
@@ -110,7 +101,6 @@ if (args[0] === "release" && args[1] === "edit") {
     state.tagSha = state.targetSha;
   }
   save();
-  if (process.env.FAIL_EDIT_AFTER_PUBLISH === "true") process.exit(1);
   process.exit(0);
 }
 if (args[0] === "release" && args[1] === "delete") {
@@ -120,20 +110,18 @@ fail();
 `;
 }
 
-function runPublisher({
+function runStager({
   assetCount = null,
   existing = false,
   draft = false,
   failCreateAfterDraft = false,
-  failEditAfterPublish = false,
-  failPostPublishVerify = false,
   immutableReleasesEnabled = true,
   mismatch = false,
   prerelease = false,
 } = {}) {
   const scratchRoot = join(repoRoot, "dist");
   mkdirSync(scratchRoot, { recursive: true });
-  const directory = mkdtempSync(join(scratchRoot, "publisher-test-"));
+  const directory = mkdtempSync(join(scratchRoot, "stager-test-"));
   const binDir = join(directory, "bin");
   const releaseAssetsDir = join(directory, "release-assets");
   const remoteAssetsDir = join(directory, "remote-assets");
@@ -180,10 +168,10 @@ function runPublisher({
     );
 
     const workflow = parse(readFileSync(join(repoRoot, ".github/workflows/sign-unlisted.yml"), "utf8"));
-    const publishStep = workflow.jobs.publish.steps.find(
-      (step) => step.name === "Publish immutable release assets",
+    const stageStep = workflow.jobs.stage.steps.find(
+      (step) => step.name === "Stage exact attested release draft assets",
     );
-    let script = publishStep.run;
+    let script = stageStep.run;
     const replacements = new Map([
       ["${{ needs.prepare.outputs.version }}", version],
       ["${{ needs.prepare.outputs.source_sha256 }}", sha256(join(releaseAssetsDir, names[0]))],
@@ -194,12 +182,10 @@ function runPublisher({
     script = `unset -f gh 2>/dev/null || true\nhash -r\n${script}`;
     const environment = {
       ...process.env,
-      FAIL_EDIT_AFTER_PUBLISH: String(failEditAfterPublish),
       FAIL_RELEASE_CREATE_AFTER_DRAFT: String(failCreateAfterDraft),
-      FAIL_POST_PUBLISH_VERIFY: String(failPostPublishVerify),
       FAKE_GH_STATE: statePath,
       GH_TOKEN: "synthetic-token",
-      GH_REPO: publishStep.env?.GH_REPO === "${{ github.repository }}" ? "solitude0429/CHZZK" : undefined,
+      GH_REPO: stageStep.env?.GH_REPO === "${{ github.repository }}" ? "solitude0429/CHZZK" : undefined,
       GITHUB_REPOSITORY: "solitude0429/CHZZK",
       GITHUB_SHA: sourceDigest,
       PATH: `${binDir}:${process.env.PATH}`,
@@ -220,20 +206,21 @@ function runPublisher({
   }
 }
 
-describe("immutable release publisher workflow shell", () => {
-  it("fails post-publication verification if GitHub does not mark the release immutable", () => {
-    const run = runPublisher({ immutableReleasesEnabled: false });
+describe("attested release draft staging workflow shell", () => {
+  it("stages a new release as a mutable draft without querying the repository immutable setting", () => {
+    const run = runStager({ immutableReleasesEnabled: false });
     try {
-      assert.notEqual(run.result.status, 0);
+      assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
       assert.equal(run.state.releaseExists, true);
-      assert.equal(run.state.isDraft, false);
+      assert.equal(run.state.isDraft, true);
       assert.equal(run.state.immutable, false);
+      assert.equal(run.state.tagExists, false);
       assert.equal(
         run.state.log.some((args) => args[0] === "api" && args[1].includes("/immutable-releases")),
         false,
       );
       assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
+        run.state.log.some((args) => args[0] === "release" && ["delete", "edit"].includes(args[1])),
         false,
       );
     } finally {
@@ -241,16 +228,30 @@ describe("immutable release publisher workflow shell", () => {
     }
   });
 
-  it("is a true no-op when an existing release has the same tag and exact bytes", () => {
-    const run = runPublisher({ existing: true });
+  it("rejects a pre-existing published mutable release without mutating it", () => {
+    const run = runStager({ existing: true, immutableReleasesEnabled: false });
+    try {
+      assert.notEqual(run.result.status, 0);
+      assert.equal(run.state.releaseExists, true);
+      assert.equal(run.state.isDraft, false);
+      assert.equal(run.state.immutable, false);
+      assert.equal(
+        run.state.log.some(
+          (args) => args[0] === "release" && ["create", "delete", "edit", "upload"].includes(args[1]),
+        ),
+        false,
+      );
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("is a true no-op when an existing immutable release has the same tag and exact bytes", () => {
+    const run = runStager({ existing: true });
     try {
       assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
       assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "create"),
-        false,
-      );
-      assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "edit"),
+        run.state.log.some((args) => args[0] === "release" && ["create", "edit", "upload"].includes(args[1])),
         false,
       );
     } finally {
@@ -259,7 +260,7 @@ describe("immutable release publisher workflow shell", () => {
   });
 
   it("fails closed without overwriting an existing release when any byte differs", () => {
-    const run = runPublisher({ existing: true, mismatch: true });
+    const run = runStager({ existing: true, mismatch: true });
     try {
       assert.notEqual(run.result.status, 0);
       assert.equal(
@@ -267,7 +268,7 @@ describe("immutable release publisher workflow shell", () => {
         false,
       );
       assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "create"),
+        run.state.log.some((args) => args[0] === "release" && ["create", "edit", "upload"].includes(args[1])),
         false,
       );
     } finally {
@@ -276,7 +277,7 @@ describe("immutable release publisher workflow shell", () => {
   });
 
   it("rejects an existing prerelease instead of treating it as published reuse", () => {
-    const run = runPublisher({ existing: true, prerelease: true });
+    const run = runStager({ existing: true, prerelease: true });
     try {
       assert.notEqual(run.result.status, 0);
       assert.equal(
@@ -288,12 +289,13 @@ describe("immutable release publisher workflow shell", () => {
     }
   });
 
-  it("resumes a compatible partial draft and publishes the exact asset set", () => {
-    const run = runPublisher({ assetCount: 1, draft: true, existing: true });
+  it("resumes a compatible partial draft and stages the exact asset set", () => {
+    const run = runStager({ assetCount: 1, draft: true, existing: true });
     try {
       assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
-      assert.equal(run.state.isDraft, false);
-      assert.equal(run.state.immutable, true);
+      assert.equal(run.state.isDraft, true);
+      assert.equal(run.state.immutable, false);
+      assert.equal(run.state.tagExists, false);
       assert.deepEqual([...run.state.assets].sort(), [
         `chzzk-${version}-release-metadata.json`,
         `chzzk-${version}-signed.xpi`,
@@ -307,21 +309,25 @@ describe("immutable release publisher workflow shell", () => {
         run.state.log.some((args) => args[0] === "release" && args[1] === "upload"),
         true,
       );
+      assert.equal(
+        run.state.log.some((args) => args[0] === "release" && args[1] === "edit"),
+        false,
+      );
     } finally {
       run.cleanup();
     }
   });
 
   it("recovers when release creation reports failure after committing the draft", () => {
-    const run = runPublisher({ failCreateAfterDraft: true });
+    const run = runStager({ failCreateAfterDraft: true });
     try {
       assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
       assert.equal(run.state.releaseExists, true);
-      assert.equal(run.state.tagExists, true);
-      assert.equal(run.state.isDraft, false);
-      assert.equal(run.state.immutable, true);
+      assert.equal(run.state.tagExists, false);
+      assert.equal(run.state.isDraft, true);
+      assert.equal(run.state.immutable, false);
       assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
+        run.state.log.some((args) => args[0] === "release" && ["delete", "edit"].includes(args[1])),
         false,
       );
     } finally {
@@ -329,46 +335,16 @@ describe("immutable release publisher workflow shell", () => {
     }
   });
 
-  it("preserves a published release when publication succeeds but the CLI reports failure", () => {
-    const run = runPublisher({ failEditAfterPublish: true });
-    try {
-      assert.notEqual(run.result.status, 0);
-      assert.equal(run.state.releaseExists, true, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
-      assert.equal(run.state.tagExists, true);
-      assert.equal(run.state.isDraft, false);
-      assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
-        false,
-      );
-    } finally {
-      run.cleanup();
-    }
-  });
-
-  it("preserves a published release when post-publication verification fails", () => {
-    const run = runPublisher({ failPostPublishVerify: true });
-    try {
-      assert.notEqual(run.result.status, 0);
-      assert.equal(run.state.releaseExists, true, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
-      assert.equal(run.state.tagExists, true);
-      assert.equal(run.state.isDraft, false);
-      assert.equal(
-        run.state.log.some((args) => args[0] === "release" && args[1] === "delete"),
-        false,
-      );
-    } finally {
-      run.cleanup();
-    }
-  });
-
-  it("publishes a new release as a verified draft before making it visible", () => {
-    const run = runPublisher();
+  it("creates and verifies a new draft without making it visible", () => {
+    const run = runStager();
     try {
       assert.equal(run.result.status, 0, `${run.result.stderr}\n${JSON.stringify(run.state.log)}`);
       const operations = run.state.log
         .filter((args) => args[0] === "release" && ["create", "edit"].includes(args[1]))
         .map((args) => args[1]);
-      assert.deepEqual(operations, ["create", "edit"]);
+      assert.deepEqual(operations, ["create"]);
+      assert.equal(run.state.isDraft, true);
+      assert.equal(run.state.immutable, false);
       assert.deepEqual([...run.state.assets].sort(), [
         `chzzk-${version}-release-metadata.json`,
         `chzzk-${version}-signed.xpi`,

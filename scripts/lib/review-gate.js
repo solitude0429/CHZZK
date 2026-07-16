@@ -1,8 +1,8 @@
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/;
 const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const SUBMITTED_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
-const KNOWN_REVIEW_STATES = new Set([...SUBMITTED_REVIEW_STATES, "DISMISSED", "PENDING"]);
+const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
+const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
 const PACKAGED_RUNTIME_PATHS = new Set([
   "background.js",
@@ -24,9 +24,11 @@ function isSensitivePath(path) {
     path.startsWith("src/") ||
     path.startsWith("tests/") ||
     PACKAGED_RUNTIME_PATHS.has(path) ||
+    path === ".npmrc" ||
+    path === "README.md" ||
+    path.startsWith("docs/") ||
     path === "package.json" ||
-    path === "package-lock.json" ||
-    /^docs\/(?:HARDENING|OPERATIONS|SECURITY|SIGNING|UPDATES)\.md$/.test(path)
+    path === "package-lock.json"
   );
 }
 
@@ -59,6 +61,31 @@ function pending(message) {
 
 export function isPendingReviewGateError(error) {
   return error?.code === "REVIEW_GATE_PENDING";
+}
+
+export function changedFilePaths(changedFiles) {
+  if (!Array.isArray(changedFiles)) throw new Error("Pull request changed-file response is missing");
+  const paths = [];
+  const seen = new Set();
+  for (const file of changedFiles) {
+    if (!file || typeof file !== "object" || typeof file.filename !== "string" || !file.filename) {
+      throw new Error("Pull request changed-file entry is missing or malformed");
+    }
+    const previousPath = file.previous_filename;
+    if (previousPath !== undefined && (typeof previousPath !== "string" || !previousPath)) {
+      throw new Error("Pull request previous filename is malformed");
+    }
+    if (file.status === "renamed" && !previousPath) {
+      throw new Error("Renamed pull request file is missing its previous filename");
+    }
+    for (const path of [file.filename, previousPath]) {
+      if (path && !seen.has(path)) {
+        seen.add(path);
+        paths.push(path);
+      }
+    }
+  }
+  return paths;
 }
 
 export function requiresAutomatedSecurityReview({ files, forceReview = false, labels }) {
@@ -101,35 +128,45 @@ function assertNoUnresolvedThreads(reviewThreads) {
   }
 }
 
-export function hasExactHeadReviewerReview({ automatedReviewLogin, headSha, reviews }) {
+function exactHeadReviewerEvidence({ automatedReviewLogin, headSha, reviews }) {
   const reviewerLogin = normalizeLogin(automatedReviewLogin, "Automated reviewer login");
-  if (!FULL_GIT_SHA_RE.test(String(headSha ?? "").toLowerCase())) {
+  const normalizedHeadSha = String(headSha ?? "").toLowerCase();
+  if (!FULL_GIT_SHA_RE.test(normalizedHeadSha)) {
     throw new Error("Review comparison head SHA is missing or malformed");
   }
   if (!Array.isArray(reviews)) throw new Error("Automated reviewer review response is missing");
 
-  let exactReview = false;
+  let latest = null;
   for (const review of reviews) {
     const actorLogin = normalizeLogin(review?.user?.login, "Review actor identity");
     if (actorLogin !== reviewerLogin) continue;
     if (typeof review.state !== "string" || !KNOWN_REVIEW_STATES.has(review.state)) {
       throw new Error("Automated reviewer review state is missing or malformed");
     }
-    if (!SUBMITTED_REVIEW_STATES.has(review.state)) continue;
+    if (!DECISIVE_REVIEW_STATES.has(review.state)) continue;
     const reviewCommitId = String(review.commit_id ?? "").toLowerCase();
     if (!FULL_GIT_SHA_RE.test(reviewCommitId)) {
       throw new Error("Automated reviewer review commit identity is missing or malformed");
     }
-    timestampMilliseconds(review.submitted_at, "Automated reviewer review timestamp");
-    if (reviewCommitId === headSha) exactReview = true;
+    const submittedAt = timestampMilliseconds(review.submitted_at, "Automated reviewer review timestamp");
+    if (reviewCommitId !== normalizedHeadSha) continue;
+    if (
+      latest === null ||
+      submittedAt > latest.submittedAt ||
+      (submittedAt === latest.submittedAt && review.state !== "APPROVED")
+    ) {
+      latest = { state: review.state, submittedAt };
+    }
   }
-  return exactReview;
+  return latest;
 }
 
-function headCommitTimestamp(headCommit, headSha) {
-  const commitSha = String(headCommit?.sha ?? "").toLowerCase();
-  if (commitSha !== headSha) throw new Error("Head commit timestamp response is stale or malformed");
-  return timestampMilliseconds(headCommit?.commit?.committer?.date, "Head commit timestamp");
+export function hasExactHeadReviewerApproval(input) {
+  return exactHeadReviewerEvidence(input)?.state === "APPROVED";
+}
+
+function pullRequestActivityTimestamp(pullRequest) {
+  return timestampMilliseconds(pullRequest?.updated_at, "Pull request activity timestamp");
 }
 
 function fullShaAppearsInComment(body, headSha) {
@@ -185,7 +222,7 @@ function hasBoundRequestReaction({
         headTimestamp,
         "Review-request comment reaction",
       );
-      if (reactionTimestamp !== null && reactionTimestamp >= commentUpdatedTimestamp) return true;
+      if (reactionTimestamp !== null && reactionTimestamp > commentUpdatedTimestamp) return true;
     }
   }
   return false;
@@ -196,7 +233,6 @@ export function evaluateReviewCompletion({
   expectedHeadSha = "",
   files,
   forceReview = false,
-  headCommit,
   labels,
   pullRequest,
   releaseOperatorLogin,
@@ -219,20 +255,24 @@ export function evaluateReviewCompletion({
   normalizeLogin(releaseOperatorLogin, "Release operator login");
   assertNoUnresolvedThreads(reviewThreads);
 
-  if (hasExactHeadReviewerReview({ automatedReviewLogin, headSha, reviews })) {
+  const reviewEvidence = exactHeadReviewerEvidence({ automatedReviewLogin, headSha, reviews });
+  if (reviewEvidence?.state === "APPROVED") {
     return {
-      description: "Automated reviewer reviewed the exact PR head; no unresolved review threads",
+      description: "Automated reviewer approved the exact PR head; no unresolved review threads",
       headSha,
       required: true,
       state: "success",
     };
   }
 
-  const headTimestamp = headCommitTimestamp(headCommit, headSha);
+  const evidenceTimestamp = Math.max(
+    pullRequestActivityTimestamp(pullRequest),
+    reviewEvidence?.submittedAt ?? 0,
+  );
   if (
     hasBoundRequestReaction({
       headSha,
-      headTimestamp,
+      headTimestamp: evidenceTimestamp,
       releaseOperatorLogin,
       reviewRequestComments,
       reviewerLogin,
@@ -245,5 +285,5 @@ export function evaluateReviewCompletion({
       state: "success",
     };
   }
-  pending("Automated reviewer has no exact-head review or exact-head operator-request +1 reaction");
+  pending("Automated reviewer has no exact-head approval or exact-head operator-request +1 reaction");
 }

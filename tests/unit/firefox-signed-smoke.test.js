@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -90,6 +90,29 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
           }),
         /older|version/i,
       );
+    } finally {
+      files.cleanup();
+    }
+  });
+
+  it("normalizes workflow-style relative inputs to absolute WebDriver paths", () => {
+    const files = makeInputFiles();
+    try {
+      const relativeFiles = Object.fromEntries(
+        Object.entries(files)
+          .filter(([name]) => name !== "cleanup")
+          .map(([name, path]) => [name, relative(repoRoot, path)]),
+      );
+      const input = validateSignedSmokeInputs({ ...relativeFiles, mode: "update" });
+      for (const path of [
+        input.firefoxBinary,
+        input.geckodriverBinary,
+        input.metadataPath,
+        input.newSignedXpiPath,
+        input.oldSignedXpiPath,
+      ]) {
+        assert.equal(isAbsolute(path), true, path);
+      }
     } finally {
       files.cleanup();
     }

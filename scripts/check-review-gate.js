@@ -3,8 +3,9 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 import {
+  changedFilePaths,
   evaluateReviewCompletion,
-  hasExactHeadReviewerReview,
+  hasExactHeadReviewerApproval,
   isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "./lib/review-gate.js";
@@ -193,10 +194,12 @@ async function main() {
     try {
       const pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
       currentHeadSha = String(pullRequest?.head?.sha ?? "").toLowerCase();
-      const files = paginatedArrays(
-        `repos/${repository}/pulls/${pullNumber}/files?per_page=100`,
-        "Pull request changed-file listing",
-      ).map((file) => file?.filename);
+      const files = changedFilePaths(
+        paginatedArrays(
+          `repos/${repository}/pulls/${pullNumber}/files?per_page=100`,
+          "Pull request changed-file listing",
+        ),
+      );
       const labels = Array.isArray(pullRequest.labels)
         ? pullRequest.labels.map((label) => label?.name)
         : null;
@@ -204,7 +207,6 @@ async function main() {
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
       let reviews = [];
       let reviewThreads = [];
-      let headCommit;
       let reviewRequestComments;
       if (required) {
         reviews = paginatedArrays(
@@ -212,13 +214,12 @@ async function main() {
           "Pull request review listing",
         );
         reviewThreads = listReviewThreads(repository, pullNumber, currentHeadSha);
-        const exactReview = hasExactHeadReviewerReview({
+        const exactApproval = hasExactHeadReviewerApproval({
           automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
           headSha: currentHeadSha,
           reviews,
         });
-        if (!exactReview) {
-          headCommit = getJson(`repos/${repository}/commits/${currentHeadSha}`, "Head commit lookup");
+        if (!exactApproval) {
           reviewRequestComments = listReviewRequestComments(
             repository,
             pullNumber,
@@ -232,7 +233,6 @@ async function main() {
         expectedHeadSha,
         files,
         forceReview,
-        headCommit,
         labels,
         pullRequest,
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
