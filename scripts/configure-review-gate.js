@@ -146,7 +146,7 @@ function actorNames(value, field, label) {
 }
 
 function actorRestrictions(value, label) {
-  if (value === null) return null;
+  if (value === null || value === undefined) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} is malformed`);
   }
@@ -254,7 +254,8 @@ function planChanges(state, desiredVariables, gateAppId) {
   }
   if (
     state.conversationProtection.enabled !== true ||
-    state.branchProtection.required_pull_request_reviews !== null
+    (state.branchProtection.required_pull_request_reviews !== null &&
+      state.branchProtection.required_pull_request_reviews !== undefined)
   ) {
     changes.push({ action: "enable", kind: "conversation-resolution" });
   }

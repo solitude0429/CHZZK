@@ -37,7 +37,7 @@ if (method === "GET" && endpoint === "repos/example/repository/labels?per_page=1
   output([state.labels]);
 }
 if (method === "GET" && endpoint === "repos/example/repository/branches/main/protection") {
-  output({
+  const protection = {
     allow_deletions: { enabled: state.allowDeletions },
     allow_force_pushes: { enabled: state.allowForcePushes },
     allow_fork_syncing: { enabled: state.allowForkSyncing },
@@ -46,10 +46,11 @@ if (method === "GET" && endpoint === "repos/example/repository/branches/main/pro
     lock_branch: { enabled: state.lockBranch },
     required_conversation_resolution: { enabled: state.conversationResolution },
     required_linear_history: { enabled: state.requiredLinearHistory },
-    required_pull_request_reviews: state.pullRequestReviews,
     required_status_checks: state.statusProtection,
-    restrictions: state.restrictions,
-  });
+  };
+  if (state.pullRequestReviews != null) protection.required_pull_request_reviews = state.pullRequestReviews;
+  if (state.restrictions != null) protection.restrictions = state.restrictions;
+  output(protection);
 }
 if (method === "GET" && endpoint.endsWith("/required_status_checks")) output(state.statusProtection);
 if (method === "GET" && endpoint.endsWith("/required_conversation_resolution")) notFound();
@@ -170,7 +171,6 @@ describe("sole-owner review-gate repository configuration", () => {
           required_approving_review_count: 1,
         },
         requiredLinearHistory: true,
-        restrictions: null,
         statusProtection: {
           checks: [{ app_id: 7, context: "Existing CI" }],
           strict: false,
