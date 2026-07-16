@@ -499,10 +499,8 @@ describe("release and repository security guardrails", () => {
       `${text}\n${checker}\n${settings}`,
       /AUTOMATED_REVIEW_APP_SLUG|AUTOMATED_REVIEW_CHECK_NAME/,
     );
-    assert.doesNotMatch(
-      settings,
-      /required_approving_review_count|require_last_push_approval|required_pull_request_reviews/,
-    );
+    assert.doesNotMatch(settings, /required_approving_review_count|require_last_push_approval/);
+    assert.match(settings, /required_pull_request_reviews:\s*null/);
   });
 
   it("keeps extension diagnostics local-only and documented as such", () => {

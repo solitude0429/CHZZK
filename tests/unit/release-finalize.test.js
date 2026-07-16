@@ -420,7 +420,18 @@ async function inspectFixtureState(fixture, harness) {
   return inspectFinalizationReleaseState({ ...fixture.input, runGh: harness.runGh });
 }
 
-describe("out-of-band immutable release finalizer", () => {
+async function outsideGitHubActions(callback) {
+  const originalActions = process.env.GITHUB_ACTIONS;
+  delete process.env.GITHUB_ACTIONS;
+  try {
+    return await callback();
+  } finally {
+    if (originalActions === undefined) delete process.env.GITHUB_ACTIONS;
+    else process.env.GITHUB_ACTIONS = originalActions;
+  }
+}
+
+describe("out-of-band immutable release finalizer", { concurrency: false }, () => {
   it("exposes only an explicit out-of-band finalization command", async () => {
     const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
     const manifest = JSON.parse(readFileSync(join(repoRoot, "manifest.json"), "utf8"));
@@ -584,7 +595,9 @@ describe("out-of-band immutable release finalizer", () => {
       const { runProtectedReleaseEntrypoint } = await import(
         new URL("../../scripts/admin-release-bootstrap.js", import.meta.url)
       );
-      const result = await runProtectedReleaseEntrypoint({ checkout, repository, runCommand });
+      const result = await outsideGitHubActions(() =>
+        runProtectedReleaseEntrypoint({ checkout, repository, runCommand }),
+      );
       assert.equal(result.sourceSha, sourceSha);
       assert.equal(existsSync(localMarker), false, "the checkout entrypoint must never execute");
       assert.equal(readFileSync(remoteMarker, "utf8"), sourceSha);
@@ -642,13 +655,15 @@ describe("out-of-band immutable release finalizer", () => {
       const { runProtectedReleaseEntrypoint } = await import(
         new URL("../../scripts/admin-release-bootstrap.js", import.meta.url)
       );
-      const result = await runProtectedReleaseEntrypoint({
-        checkout,
-        now: () => new Date("2026-07-16T22:00:00.000Z"),
-        operation: "dispatch",
-        repository,
-        runCommand,
-      });
+      const result = await outsideGitHubActions(() =>
+        runProtectedReleaseEntrypoint({
+          checkout,
+          now: () => new Date("2026-07-16T22:00:00.000Z"),
+          operation: "dispatch",
+          repository,
+          runCommand,
+        }),
+      );
       assert.deepEqual(result, {
         defaultBranch: "main",
         dispatched: true,

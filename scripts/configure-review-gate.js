@@ -42,15 +42,6 @@ function ghApi(method, endpoint, body = null) {
   });
 }
 
-function readOptionalBooleanProtection(endpoint) {
-  try {
-    return readJson(ghApi("GET", endpoint), "Optional branch protection");
-  } catch (error) {
-    if (/\(HTTP 404\)\s*$/.test(error.message)) return { enabled: false };
-    throw error;
-  }
-}
-
 function ghApiPages(endpoint) {
   return command(GH_COMMAND, [
     ...GH_COMMAND_PREFIX,
@@ -139,7 +130,66 @@ function expectedChecks(statusProtection, gateAppId) {
   ];
 }
 
-function readManagedState(repository, statusEndpoint, conversationsEndpoint, adminsEndpoint) {
+function enabledProtection(protection, name) {
+  const enabled = protection?.[name]?.enabled;
+  if (typeof enabled !== "boolean") throw new Error(`${name} branch protection is malformed`);
+  return enabled;
+}
+
+function actorNames(value, field, label) {
+  if (!Array.isArray(value)) throw new Error(`${label} is malformed`);
+  return value.map((actor) => {
+    const name = actor?.[field];
+    if (typeof name !== "string" || !name) throw new Error(`${label} actor identity is malformed`);
+    return name;
+  });
+}
+
+function actorRestrictions(value, label) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} is malformed`);
+  }
+  return {
+    apps: actorNames(value.apps, "slug", `${label} apps`),
+    teams: actorNames(value.teams, "slug", `${label} teams`),
+    users: actorNames(value.users, "login", `${label} users`),
+  };
+}
+
+function fullProtectionUpdate(protection) {
+  if (!protection || typeof protection !== "object" || Array.isArray(protection)) {
+    throw new Error("Branch protection is malformed");
+  }
+  const statusProtection = protection.required_status_checks;
+  let requiredStatusChecks = null;
+  if (statusProtection !== null) {
+    if (typeof statusProtection?.strict !== "boolean") {
+      throw new Error("Required status-check strictness is malformed");
+    }
+    const checks = normalizeChecks(statusProtection);
+    requiredStatusChecks = {
+      checks,
+      contexts: checks.map((check) => check.context),
+      strict: statusProtection.strict,
+    };
+  }
+  return {
+    allow_deletions: enabledProtection(protection, "allow_deletions"),
+    allow_force_pushes: enabledProtection(protection, "allow_force_pushes"),
+    allow_fork_syncing: enabledProtection(protection, "allow_fork_syncing"),
+    block_creations: enabledProtection(protection, "block_creations"),
+    enforce_admins: enabledProtection(protection, "enforce_admins"),
+    lock_branch: enabledProtection(protection, "lock_branch"),
+    required_conversation_resolution: true,
+    required_linear_history: enabledProtection(protection, "required_linear_history"),
+    required_pull_request_reviews: null,
+    required_status_checks: requiredStatusChecks,
+    restrictions: actorRestrictions(protection.restrictions, "Push restrictions"),
+  };
+}
+
+function readManagedState(repository, statusEndpoint, adminsEndpoint, protectionEndpoint) {
   const variables = paginatedField(
     `repos/${repository}/actions/variables?per_page=100`,
     "variables",
@@ -160,9 +210,15 @@ function readManagedState(repository, statusEndpoint, conversationsEndpoint, adm
       throw new Error("Repository label state is malformed");
     }
   }
+  const branchProtection = readJson(ghApi("GET", protectionEndpoint), "Branch protection");
+  const conversationProtection = branchProtection.required_conversation_resolution ?? { enabled: false };
+  if (typeof conversationProtection?.enabled !== "boolean") {
+    throw new Error("Conversation-resolution protection is malformed");
+  }
   return {
     adminProtection: readJson(ghApi("GET", adminsEndpoint), "Administrator enforcement protection"),
-    conversationProtection: readOptionalBooleanProtection(conversationsEndpoint),
+    branchProtection,
+    conversationProtection,
     labels,
     statusProtection: readJson(ghApi("GET", statusEndpoint), "Required status-check protection"),
     variables,
@@ -196,7 +252,10 @@ function planChanges(state, desiredVariables, gateAppId) {
   if (state.statusProtection.strict !== true || !sameChecks(currentChecks, checks)) {
     changes.push({ action: "update", checks, kind: "status-checks", strict: true });
   }
-  if (state.conversationProtection.enabled !== true) {
+  if (
+    state.conversationProtection.enabled !== true ||
+    state.branchProtection.required_pull_request_reviews !== null
+  ) {
     changes.push({ action: "enable", kind: "conversation-resolution" });
   }
   if (state.adminProtection.enabled !== true) {
@@ -205,7 +264,7 @@ function planChanges(state, desiredVariables, gateAppId) {
   return changes;
 }
 
-function applyChange(change, repository, statusEndpoint, conversationsEndpoint, adminsEndpoint) {
+function applyChange(change, repository, statusEndpoint, adminsEndpoint, protectionEndpoint) {
   if (change.kind === "variable") {
     if (change.action === "create") {
       ghApi("POST", `repos/${repository}/actions/variables`, {
@@ -240,7 +299,8 @@ function applyChange(change, repository, statusEndpoint, conversationsEndpoint, 
     return;
   }
   if (change.kind === "conversation-resolution") {
-    ghApi("PUT", conversationsEndpoint, {});
+    const protection = readJson(ghApi("GET", protectionEndpoint), "Branch protection before update");
+    ghApi("PUT", protectionEndpoint, fullProtectionUpdate(protection));
     return;
   }
   if (change.kind === "admin-enforcement") {
@@ -269,8 +329,8 @@ try {
   const branch = repositoryState.default_branch;
   if (typeof branch !== "string" || !branch) throw new Error("Repository default branch is missing");
   const encodedBranch = encodeURIComponent(branch);
+  const protectionEndpoint = `repos/${repository}/branches/${encodedBranch}/protection`;
   const statusEndpoint = `repos/${repository}/branches/${encodedBranch}/protection/required_status_checks`;
-  const conversationsEndpoint = `repos/${repository}/branches/${encodedBranch}/protection/required_conversation_resolution`;
   const adminsEndpoint = `repos/${repository}/branches/${encodedBranch}/protection/enforce_admins`;
   const githubActionsApp = readJson(ghApi("GET", "apps/github-actions"), "GitHub Actions App lookup");
   if (
@@ -285,14 +345,14 @@ try {
     ["AUTOMATED_REVIEW_LOGIN", automatedReviewLogin],
     ["RELEASE_OPERATOR_LOGIN", releaseOperatorLogin],
   ];
-  let state = readManagedState(repository, statusEndpoint, conversationsEndpoint, adminsEndpoint);
+  let state = readManagedState(repository, statusEndpoint, adminsEndpoint, protectionEndpoint);
   const plannedChanges = planChanges(state, desiredVariables, gateAppId);
 
   if (apply) {
     for (const change of plannedChanges) {
-      applyChange(change, repository, statusEndpoint, conversationsEndpoint, adminsEndpoint);
+      applyChange(change, repository, statusEndpoint, adminsEndpoint, protectionEndpoint);
     }
-    state = readManagedState(repository, statusEndpoint, conversationsEndpoint, adminsEndpoint);
+    state = readManagedState(repository, statusEndpoint, adminsEndpoint, protectionEndpoint);
     const remainingChanges = planChanges(state, desiredVariables, gateAppId);
     if (remainingChanges.length > 0) {
       throw new Error(`Review gate settings did not converge: ${JSON.stringify(remainingChanges)}`);

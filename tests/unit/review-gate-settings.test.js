@@ -36,11 +36,23 @@ if (method === "GET" && endpoint === "repos/example/repository/actions/variables
 if (method === "GET" && endpoint === "repos/example/repository/labels?per_page=100") {
   output([state.labels]);
 }
-if (method === "GET" && endpoint.endsWith("/required_status_checks")) output(state.statusProtection);
-if (method === "GET" && endpoint.endsWith("/required_conversation_resolution")) {
-  if (state.conversationResolutionMissing) notFound();
-  output({ enabled: state.conversationResolution });
+if (method === "GET" && endpoint === "repos/example/repository/branches/main/protection") {
+  output({
+    allow_deletions: { enabled: state.allowDeletions },
+    allow_force_pushes: { enabled: state.allowForcePushes },
+    allow_fork_syncing: { enabled: state.allowForkSyncing },
+    block_creations: { enabled: state.blockCreations },
+    enforce_admins: { enabled: state.adminEnforcement },
+    lock_branch: { enabled: state.lockBranch },
+    required_conversation_resolution: { enabled: state.conversationResolution },
+    required_linear_history: { enabled: state.requiredLinearHistory },
+    required_pull_request_reviews: state.pullRequestReviews,
+    required_status_checks: state.statusProtection,
+    restrictions: state.restrictions,
+  });
 }
+if (method === "GET" && endpoint.endsWith("/required_status_checks")) output(state.statusProtection);
+if (method === "GET" && endpoint.endsWith("/required_conversation_resolution")) notFound();
 if (method === "GET" && endpoint.endsWith("/enforce_admins")) {
   output({ enabled: state.adminEnforcement });
 }
@@ -74,9 +86,20 @@ if (method === "PATCH" && endpoint.endsWith("/required_status_checks")) {
   state.statusProtection = body;
   output({});
 }
-if (method === "PUT" && endpoint.endsWith("/required_conversation_resolution")) {
-  state.conversationResolution = true;
-  state.conversationResolutionMissing = false;
+if (method === "PUT" && endpoint === "repos/example/repository/branches/main/protection") {
+  if (!body.required_status_checks || !Array.isArray(body.required_status_checks.contexts)) fail();
+  state.adminEnforcement = body.enforce_admins;
+  state.allowDeletions = body.allow_deletions;
+  state.allowForcePushes = body.allow_force_pushes;
+  state.allowForkSyncing = body.allow_fork_syncing;
+  state.blockCreations = body.block_creations;
+  state.conversationResolution = body.required_conversation_resolution;
+  state.lastProtectionUpdate = body;
+  state.lockBranch = body.lock_branch;
+  state.pullRequestReviews = body.required_pull_request_reviews;
+  state.requiredLinearHistory = body.required_linear_history;
+  state.restrictions = body.restrictions;
+  state.statusProtection = body.required_status_checks;
   output({});
 }
 if (method === "POST" && endpoint.endsWith("/enforce_admins")) {
@@ -114,7 +137,7 @@ function mutationCount(state) {
 }
 
 describe("sole-owner review-gate repository configuration", () => {
-  it("plans without mutation, applies exactly, preserves checks, and is idempotent", () => {
+  it("plans without mutation, applies exactly, preserves branch protection, and is idempotent", () => {
     const directory = mkdtempSync(join(tmpdir(), "chzzk-review-gate-settings-"));
     const statePath = join(directory, "state.json");
     const ghPath = join(directory, "gh");
@@ -124,8 +147,11 @@ describe("sole-owner review-gate repository configuration", () => {
       statePath,
       JSON.stringify({
         adminEnforcement: false,
+        allowDeletions: false,
+        allowForcePushes: false,
+        allowForkSyncing: true,
+        blockCreations: true,
         conversationResolution: false,
-        conversationResolutionMissing: true,
         githubActionsAppId,
         labels: [
           {
@@ -136,6 +162,15 @@ describe("sole-owner review-gate repository configuration", () => {
           { color: "ededed", description: "preserved", name: "unrelated" },
         ],
         log: [],
+        lockBranch: false,
+        pullRequestReviews: {
+          dismiss_stale_reviews: true,
+          require_code_owner_reviews: false,
+          require_last_push_approval: true,
+          required_approving_review_count: 1,
+        },
+        requiredLinearHistory: true,
+        restrictions: null,
         statusProtection: {
           checks: [{ app_id: 7, context: "Existing CI" }],
           strict: false,
@@ -182,10 +217,32 @@ describe("sole-owner review-gate repository configuration", () => {
           { app_id: 7, context: "Existing CI" },
           { app_id: githubActionsAppId, context: "CHZZK review completion" },
         ],
+        contexts: ["Existing CI", "CHZZK review completion"],
         strict: true,
       });
       assert.equal(configured.conversationResolution, true);
       assert.equal(configured.adminEnforcement, true);
+      assert.equal(configured.pullRequestReviews, null);
+      assert.deepEqual(configured.lastProtectionUpdate, {
+        allow_deletions: false,
+        allow_force_pushes: false,
+        allow_fork_syncing: true,
+        block_creations: true,
+        enforce_admins: false,
+        lock_branch: false,
+        required_conversation_resolution: true,
+        required_linear_history: true,
+        required_pull_request_reviews: null,
+        required_status_checks: {
+          checks: [
+            { app_id: 7, context: "Existing CI" },
+            { app_id: githubActionsAppId, context: "CHZZK review completion" },
+          ],
+          contexts: ["Existing CI", "CHZZK review completion"],
+          strict: true,
+        },
+        restrictions: null,
+      });
       assert.equal(
         configured.log.some((entry) => entry.endpoint.includes("required_pull_request_reviews")),
         false,
