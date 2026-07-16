@@ -905,6 +905,31 @@ chunklist_1080p.m3u8?Policy=redacted
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [tabId]);
   });
 
+  it("uses explicit live request evidence when reload tab validation fails", async () => {
+    const tabId = 84;
+    const tabUrl = "https://chzzk.naver.com/live/channel-a";
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => {
+        throw new Error("synthetic tabs.get failure");
+      },
+    });
+    listeners.onUpdated(tabId, { url: tabUrl });
+    await waitForDiagnosticsQueue();
+
+    listeners.onUpdated(tabId, { status: "loading" });
+    const redirect = plain(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "reload-explicit-request"),
+        documentUrl: tabUrl,
+      }),
+    );
+
+    assert.match(redirect.redirectUrl, /chunklist_1080p\.m3u8\?Policy=synthetic#tail$/);
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [tabId]);
+  });
+
   it("does not retain reload trust when the authoritative current tab URL is no longer live", async () => {
     const tabId = 82;
     const tabUrlsById = new Map([[tabId, "https://chzzk.naver.com/live/channel-a"]]);

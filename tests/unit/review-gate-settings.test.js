@@ -60,7 +60,13 @@ if (method === "GET" && endpoint === "repos/example/repository/branches/main/pro
   if (state.restrictions != null) protection.restrictions = state.restrictions;
   output(protection);
 }
-if (method === "GET" && endpoint.endsWith("/required_status_checks")) output(state.statusProtection);
+if (method === "GET" && endpoint.endsWith("/required_status_checks")) {
+  if (state.statusProtection === null) notFound();
+  if (state.contextOnlyStatusProtection) {
+    output({ contexts: state.statusProtection.contexts, strict: state.statusProtection.strict });
+  }
+  output(state.statusProtection);
+}
 if (method === "GET" && endpoint.endsWith("/required_conversation_resolution")) notFound();
 if (method === "GET" && endpoint.endsWith("/enforce_admins")) {
   output({ enabled: state.adminEnforcement });
@@ -271,6 +277,74 @@ describe("sole-owner review-gate repository configuration", () => {
       const reappliedResult = JSON.parse(reapplied.stdout);
       assert.deepEqual(reappliedResult.plannedChanges, []);
       assert.equal(mutationCount(readState(statePath)), mutationsAfterFirstApply);
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("bootstraps missing status-check protection and accepts contexts-only responses", () => {
+    const directory = mkdtempSync(join(tmpdir(), "chzzk-review-gate-settings-empty-"));
+    const statePath = join(directory, "state.json");
+    const ghPath = join(directory, "gh");
+    writeFileSync(ghPath, fakeGhSource());
+    chmodSync(ghPath, 0o755);
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        adminEnforcement: true,
+        allowDeletions: false,
+        allowForcePushes: false,
+        allowForkSyncing: false,
+        blockCreations: false,
+        conversationResolution: true,
+        githubActionsAppId,
+        labels: [
+          {
+            color: "b60205",
+            description: "Force the exact-head automated security review gate",
+            name: "security-review-required",
+          },
+          {
+            color: "d93f0b",
+            description: "Force the exact-head automated release review gate",
+            name: "release-review-required",
+          },
+        ],
+        log: [],
+        lockBranch: false,
+        pullRequestReviews: null,
+        requiredLinearHistory: false,
+        restrictions: null,
+        statusProtection: null,
+        variables: [
+          { name: "AUTOMATED_REVIEW_LOGIN", value: reviewerLogin },
+          { name: "RELEASE_OPERATOR_LOGIN", value: operatorLogin },
+        ],
+      }),
+    );
+
+    try {
+      const applied = runConfigure(directory, statePath, ["--apply"]);
+      assert.equal(applied.status, 0, applied.stderr);
+      const configured = readState(statePath);
+      assert.deepEqual(configured.statusProtection, {
+        checks: [{ app_id: githubActionsAppId, context: "CHZZK review completion" }],
+        contexts: ["CHZZK review completion"],
+        strict: true,
+      });
+
+      configured.contextOnlyStatusProtection = true;
+      writeFileSync(statePath, JSON.stringify(configured));
+      const reapplied = runConfigure(directory, statePath);
+      assert.equal(reapplied.status, 0, reapplied.stderr);
+      assert.deepEqual(JSON.parse(reapplied.stdout).plannedChanges, [
+        {
+          action: "update",
+          checks: [{ app_id: githubActionsAppId, context: "CHZZK review completion" }],
+          kind: "status-checks",
+          strict: true,
+        },
+      ]);
     } finally {
       rmSync(directory, { force: true, recursive: true });
     }

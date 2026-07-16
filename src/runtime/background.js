@@ -13,6 +13,7 @@ import {
   configuredResourceTypes,
   configuredWebRequestUrls,
   hasContradictoryChzzkMetadata,
+  hasTrustedChzzkMetadata,
   isChzzkLiveUrl,
   isTrustedMasterPlaylistRequest,
   isTrustedRequestDomain,
@@ -728,8 +729,12 @@ async function recordRequestDiagnostics(details, decision) {
 }
 
 async function handleRequest(details) {
-  if (!(await awaitPendingTrustValidation(details?.tabId))) return undefined;
   if (!registerRequestContext(details)) return undefined;
+  if (hasTrustedChzzkMetadata(details, policy)) {
+    pendingTrustValidationByTab.delete(details.tabId);
+  } else if (!(await awaitPendingTrustValidation(details?.tabId))) {
+    return undefined;
+  }
   const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
   const shouldRecord = shouldRecordDiagnostics(details, policy, redirectOptions);
   let decision = shouldRedirectRequest(details, policy, redirectOptions);

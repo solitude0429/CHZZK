@@ -152,6 +152,11 @@ export function hasContradictoryChzzkMetadata(details, policy) {
   return requestContextEvidence(details, policy).veto;
 }
 
+export function hasTrustedChzzkMetadata(details, policy) {
+  const evidence = requestContextEvidence(details, policy);
+  return evidence.trusted && !evidence.veto;
+}
+
 export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
   const evidence = requestContextEvidence(details, policy);

@@ -746,6 +746,10 @@
   function hasContradictoryChzzkMetadata(details, policy) {
     return requestContextEvidence(details, policy).veto;
   }
+  function hasTrustedChzzkMetadata(details, policy) {
+    const evidence = requestContextEvidence(details, policy);
+    return evidence.trusted && !evidence.veto;
+  }
   function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
     const evidence = requestContextEvidence(details, policy);
@@ -1461,8 +1465,12 @@
     });
   }
   async function handleRequest(details) {
-    if (!(await awaitPendingTrustValidation(details?.tabId))) return void 0;
     if (!registerRequestContext(details)) return void 0;
+    if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
+      pendingTrustValidationByTab.delete(details.tabId);
+    } else if (!(await awaitPendingTrustValidation(details?.tabId))) {
+      return void 0;
+    }
     const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default, redirectOptions);
     let decision = shouldRedirectRequest(details, quality_policy_default, redirectOptions);

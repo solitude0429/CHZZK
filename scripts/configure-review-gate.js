@@ -95,14 +95,16 @@ function normalizeChecks(statusProtection) {
   const checks = Array.isArray(statusProtection?.checks)
     ? statusProtection.checks
     : Array.isArray(statusProtection?.contexts)
-      ? statusProtection.contexts.map((context) => ({ context }))
+      ? statusProtection.contexts.map((context) => ({ app_id: -1, context }))
       : null;
   if (!checks) throw new Error("Required status-check protection is malformed");
   const normalized = checks.map((check) => {
     if (typeof check?.context !== "string" || !check.context) {
       throw new Error("Existing required check identity is malformed");
     }
-    if (check.app_id === null) return { app_id: -1, context: check.context };
+    if (check.app_id === null || check.app_id === -1) {
+      return { app_id: -1, context: check.context };
+    }
     if (!Number.isSafeInteger(check.app_id) || check.app_id < 1) {
       throw new Error("Existing required check source is malformed");
     }
@@ -214,12 +216,25 @@ function readManagedState(repository, statusEndpoint, adminsEndpoint, protection
   if (typeof conversationProtection?.enabled !== "boolean") {
     throw new Error("Conversation-resolution protection is malformed");
   }
+  const embeddedStatusProtection = branchProtection.required_status_checks;
+  if (
+    embeddedStatusProtection !== null &&
+    (!embeddedStatusProtection ||
+      typeof embeddedStatusProtection !== "object" ||
+      Array.isArray(embeddedStatusProtection))
+  ) {
+    throw new Error("Required status-check protection is malformed");
+  }
+  const statusProtection =
+    embeddedStatusProtection === null
+      ? { checks: [], contexts: [], strict: false }
+      : readJson(ghApi("GET", statusEndpoint), "Required status-check protection");
   return {
     adminProtection: readJson(ghApi("GET", adminsEndpoint), "Administrator enforcement protection"),
     branchProtection,
     conversationProtection,
     labels,
-    statusProtection: readJson(ghApi("GET", statusEndpoint), "Required status-check protection"),
+    statusProtection,
     variables,
   };
 }
