@@ -340,9 +340,13 @@ describe("release and repository security guardrails", () => {
     assert.match(persistForceText, /actions\/runs\/\$\{RUN_ID\}\/cancel/);
     assert.match(persistForceRun, /display_title == \\"Review gate PR #\$\{PR_NUMBER\} ordinary\\"/);
     assert.match(persistForceRun, /\.event != \\"workflow_dispatch\\"/);
-    const activeRunFilterMatch = persistForceRun.match(/--jq "((?:\\.|[^"])*)"/);
-    assert.ok(activeRunFilterMatch, "the active-run jq filter must remain extractable for behavior tests");
-    const activeRunFilter = activeRunFilterMatch[1]
+    const activeRunFilterLine = persistForceRun.split("\n").find((line) => line.includes('--jq "'));
+    assert.ok(activeRunFilterLine, "the active-run jq filter must remain extractable for behavior tests");
+    const trimmedFilterLine = activeRunFilterLine.trimEnd();
+    assert.equal(trimmedFilterLine.endsWith('"'), true);
+    const filterStart = trimmedFilterLine.indexOf('--jq "') + '--jq "'.length;
+    const activeRunFilter = trimmedFilterLine
+      .slice(filterStart, -1)
       .replaceAll('\\"', '"')
       .replaceAll("${GITHUB_RUN_ID}", "1000")
       .replaceAll("${PR_NUMBER}", "65");
