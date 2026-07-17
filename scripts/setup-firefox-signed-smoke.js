@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
-const FIREFOX_VERSION = "153.0b12";
+const FIREFOX_VERSION = "152.0.6";
 const GECKODRIVER_VERSION = "0.37.0";
 const MAX_FIREFOX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_GECKODRIVER_ARCHIVE_BYTES = 32 * 1024 * 1024;
@@ -12,34 +23,45 @@ const platform = {
   arm64: {
     firefoxArch: "linux-aarch64",
     firefoxSha512:
-      "d36edb7c4925b236ef825101ae56e245032fa7dea3ec9fe5c6638f6ce5aafb3d55dba111e17fffd3aee38da4cf35879f1d77f4a19f1e32376cfba6d0b99f2d6f",
+      "774a05b4512bb25c32a242f023803fdd8c36411dc618a7a352aca683cb9c7222dd71206fe253ed95511c758c90e6191a17b3dfe1a15a40d6d7efd3a543a377e9",
     geckodriverAsset: `geckodriver-v${GECKODRIVER_VERSION}-linux-aarch64.tar.gz`,
     geckodriverSha256: "a16bc29598e1776da78b45dc78a6aa876abe125f5d82a5c8b9d7366204ad4158",
   },
   x64: {
     firefoxArch: "linux-x86_64",
     firefoxSha512:
-      "0d1bebff153339957f3bb6417fcaff64a9e1486da921714d67a07ae51670e3c6af2626919536960941c6e025193f7ab19c73f59deb97c7b56a8ebb3360a16e9b",
+      "414b060f5e28e1b9c8818dee51896a81bd273c6cf6a4cffa53c4d7214f2c1d26d0416b9088518294435a7ead014a320a8deb910e93f3345ab6fbbbe596b4a336",
     geckodriverAsset: `geckodriver-v${GECKODRIVER_VERSION}-linux64.tar.gz`,
     geckodriverSha256: "90d4e33bd9816684400c160d1309aaffec23a3f65103511d5a62d8501062e548",
   },
 }[process.arch];
 
 if (!platform || process.platform !== "linux") {
-  throw new Error(`Firefox E2E setup supports Linux x64/arm64 only, got ${process.platform}/${process.arch}`);
+  throw new Error(
+    `Stock Firefox signed-smoke setup supports Linux x64/arm64 only, got ${process.platform}/${process.arch}`,
+  );
 }
 
-const toolsDir = resolve(process.env.CHZZK_E2E_TOOLS_DIR ?? "dist/e2e-tools");
+const toolsDir = resolve(process.env.CHZZK_SIGNED_SMOKE_TOOLS_DIR ?? "dist/signed-smoke-tools");
 const downloadsDir = join(toolsDir, "downloads");
 const firefoxDir = join(toolsDir, "firefox");
 const firefoxArchive = join(downloadsDir, `firefox-${FIREFOX_VERSION}-${platform.firefoxArch}.tar.xz`);
 const geckodriverArchive = join(downloadsDir, platform.geckodriverAsset);
 const geckodriverPath = join(toolsDir, "geckodriver");
-const firefoxUrl = `https://archive.mozilla.org/pub/devedition/releases/${FIREFOX_VERSION}/${platform.firefoxArch}/en-US/firefox-${FIREFOX_VERSION}.tar.xz`;
+const firefoxUrl = `https://archive.mozilla.org/pub/firefox/releases/${FIREFOX_VERSION}/${platform.firefoxArch}/en-US/firefox-${FIREFOX_VERSION}.tar.xz`;
 const geckodriverUrl = `https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/${platform.geckodriverAsset}`;
 
 function digest(path, algorithm) {
   return createHash(algorithm).update(readFileSync(path)).digest("hex");
+}
+
+function fsyncDirectory(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 async function readBoundedDownload(response, maxBytes, url) {
@@ -58,7 +80,6 @@ async function readBoundedDownload(response, maxBytes, url) {
   if (!response.body || typeof response.body.getReader !== "function") {
     throw new Error(`Download did not provide a readable stream for ${url}`);
   }
-
   const reader = response.body.getReader();
   const chunks = [];
   let totalBytes = 0;
@@ -87,23 +108,49 @@ async function readBoundedDownload(response, maxBytes, url) {
 
 async function downloadVerified({ algorithm, expectedDigest, maxBytes, path, url }) {
   try {
-    if (digest(path, algorithm) === expectedDigest) return;
-  } catch {
-    // Best-effort removal only; a later checksum/extraction step still fails closed.
+    const stat = lstatSync(path);
+    if (
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      stat.size > 0 &&
+      stat.size <= maxBytes &&
+      digest(path, algorithm) === expectedDigest
+    ) {
+      return;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
   }
+  rmSync(path, { force: true });
 
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS E2E tool URL: ${url}`);
-  const response = await fetch(url, { headers: { "user-agent": "CHZZK-Firefox-E2E-setup/1" } });
+  if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS tool URL: ${url}`);
+  const response = await fetch(url, {
+    headers: { "user-agent": "CHZZK-stock-Firefox-signed-smoke-setup/1" },
+    redirect: "follow",
+  });
   if (!response.ok) throw new Error(`Download failed (${response.status}) for ${url}`);
   const bytes = await readBoundedDownload(response, maxBytes, url);
   const actualDigest = createHash(algorithm).update(bytes).digest("hex");
   if (actualDigest !== expectedDigest) {
     throw new Error(`Checksum mismatch for ${url}: expected ${expectedDigest}, got ${actualDigest}`);
   }
+
   const temporaryPath = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
-  renameSync(temporaryPath, path);
+  const descriptor = openSync(temporaryPath, "wx", 0o600);
+  try {
+    writeFileSync(descriptor, bytes);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  try {
+    renameSync(temporaryPath, path);
+    fsyncDirectory(dirname(path));
+  } catch (error) {
+    rmSync(temporaryPath, { force: true });
+    throw error;
+  }
 }
 
 function run(command, args) {
@@ -136,9 +183,17 @@ rmSync(geckodriverPath, { force: true });
 run("tar", ["-xzf", geckodriverArchive, "-C", toolsDir, "geckodriver"]);
 chmodSync(geckodriverPath, 0o755);
 
+const firefoxPath = join(firefoxDir, "firefox");
+for (const path of [firefoxPath, geckodriverPath]) {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) {
+    throw new Error(`Signed-smoke tool is not a regular executable: ${path}`);
+  }
+}
+
 console.log(
   JSON.stringify({
-    firefox: join(firefoxDir, "firefox"),
+    firefox: firefoxPath,
     firefoxVersion: FIREFOX_VERSION,
     geckodriver: geckodriverPath,
     geckodriverVersion: GECKODRIVER_VERSION,

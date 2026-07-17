@@ -11,21 +11,25 @@
   "maxDiagnosticsSamples": 200,
   "maxPendingDiagnosticsMutations": 50,
   "blockingProbeBudgetMs": 150,
+  "markerEvidenceTtlMs": 10000,
   "probeMaxBytes": 256000,
   "probeResolutionBudgetMs": 3000,
   "probeTimeoutMs": 1500,
+  "redirectFailureBackoffMs": 10000,
   "notes": [
     "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
     "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
-    "The persistent background page uses blocking webRequest, but an unresolved candidate search can delay a request only for blockingProbeBudgetMs before failing open while one shared per-tab/context resolution continues in the background.",
-    "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token is current.",
-    "Numeric quality replacement changes pathname markers only and preserves signed query strings and fragments byte-for-byte.",
-    "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; concurrent requests share the same in-flight resolution.",
-    "The generated quality regex matches numeric qualities lower than the resolved per-tab target; it does not enumerate only today's menu values.",
+    "The persistent background page uses blocking webRequest, but an unresolved candidate search can delay a request only for blockingProbeBudgetMs before failing open while one shared per-tab/live-context/playlist-family resolution continues in the background.",
+    "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
+    "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
+    "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
+    "URL-marker-only media evidence expires after markerEvidenceTtlMs, and redirect failures suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
+    "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
     "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-    "Request URL, initiator, method, resource type, trusted request domain, CHZZK live context, and known CHZZK/livecloud HLS URL shape constrain redirects; CHZZK-originated or CHZZK-marked numeric playlist URLs are covered even when Firefox omits page request metadata.",
+    "Request URL, initiator, method, resource type, trusted request domain, and CHZZK live context constrain redirects; explicit foreign metadata vetoes cache, and metadata-free contextless compatibility is limited to the two dedicated CHZZK livecloud host suffixes rather than generic CDN path markers.",
     "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
-    "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies are capped by probeMaxBytes, and numeric/master evidence must prove the requested candidate before it can seed a target.",
-    "Navigation and tab close abort pending probes and invalidate their context token before clearing state so stale completions cannot restore a target."
+    "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
+    "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
+    "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports."
   ]
 }

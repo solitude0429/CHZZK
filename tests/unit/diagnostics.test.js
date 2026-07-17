@@ -5,6 +5,7 @@ import {
   analyzeDiagnostics,
   createDiagnosticsSnapshot,
   createEmptyDiagnostics,
+  normalizeDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
   updateRuntimeRedirectDiagnostics,
@@ -78,5 +79,122 @@ describe("diagnostics helpers", () => {
     assert.equal(snapshot.decisions[0].reason, "eligible-chzzk-hls-quality");
     assert.equal(snapshot.decisions[0].targetQuality, "1440p");
     assert.equal(snapshot.decisions[0].redirectedCurrentRequest, true);
+  });
+
+  it("normalizes persisted diagnostics to an exact bounded schema and tail-trims arrays", () => {
+    const timestamp = "2026-07-15T00:00:00.000Z";
+    const validSample = {
+      extra: "drop-me",
+      quality: "720p",
+      seenAt: timestamp,
+      tabId: 7,
+      type: "media",
+      url: "https://stream-identifier.pstatic.net:8443/private/720p/chunklist.m3u8?Policy=synthetic",
+    };
+    const validDecision = {
+      extra: "drop-me",
+      ok: false,
+      quality: "720p",
+      reason: "contradictory-quality-markers",
+      redirectedCurrentRequest: false,
+      seenAt: timestamp,
+      tabId: 7,
+      targetQuality: null,
+      type: "xmlhttprequest",
+      url: validSample.url,
+    };
+    const normalized = normalizeDiagnostics(
+      {
+        decisions: [validDecision, validDecision, { ...validDecision, ok: "false" }],
+        generatedAt: "not-a-date",
+        maxSamples: Number.MAX_SAFE_INTEGER,
+        qualities: {
+          "720p": -1,
+          "1080p": "3",
+          "1440p": Number.MAX_SAFE_INTEGER,
+          unknown: 4,
+        },
+        runtimeRedirects: {
+          activeTabIds: [-1, 7, 7, Number.MAX_SAFE_INTEGER, "8"],
+          extra: "drop-me",
+          lastError: "x".repeat(1000),
+          targetsByTab: { 7: "1080p", 8: "invalid", bad: "2160p" },
+          updatedAt: "not-a-date",
+        },
+        samples: [validSample, validSample, { ...validSample, quality: [] }],
+        totalHlsRequests: "7",
+        unknownTopLevel: "drop-me",
+      },
+      { maxSamples: 2 },
+    );
+
+    assert.deepEqual(Object.keys(normalized), [
+      "decisions",
+      "generatedAt",
+      "maxSamples",
+      "qualities",
+      "runtimeRedirects",
+      "samples",
+      "totalHlsRequests",
+    ]);
+    assert.equal(normalized.maxSamples, 2);
+    assert.equal(normalized.generatedAt, new Date(0).toISOString());
+    assert.equal(normalized.totalHlsRequests, 0, "wrongly typed counters reset to zero");
+    assert.deepEqual(normalized.qualities, { "1440p": Number.MAX_SAFE_INTEGER });
+    assert.equal(normalized.samples.length, 1, "tail trim occurs before invalid records are dropped");
+    assert.deepEqual(Object.keys(normalized.samples[0]), ["quality", "seenAt", "tabId", "type", "url"]);
+    assert.equal(normalized.samples[0].url, "https://pstatic.net/[redacted-path]/720p.m3u8?[redacted]");
+    assert.equal(normalized.decisions.length, 1);
+    assert.deepEqual(Object.keys(normalized.decisions[0]), [
+      "ok",
+      "quality",
+      "reason",
+      "redirectedCurrentRequest",
+      "seenAt",
+      "tabId",
+      "targetQuality",
+      "type",
+      "url",
+    ]);
+    assert.deepEqual(normalized.runtimeRedirects.activeTabIds, [7, Number.MAX_SAFE_INTEGER]);
+    assert.deepEqual(normalized.runtimeRedirects.targetsByTab, { 7: "1080p" });
+    assert.equal(normalized.runtimeRedirects.lastError, "runtime-error");
+    assert.deepEqual(Object.keys(normalized.runtimeRedirects), [
+      "activeTabIds",
+      "lastError",
+      "targetsByTab",
+      "updatedAt",
+    ]);
+  });
+
+  it("saturates valid counters and resets corrupt counters before recording", () => {
+    const saturated = createEmptyDiagnostics({ maxSamples: 2 });
+    saturated.totalHlsRequests = Number.MAX_SAFE_INTEGER;
+    saturated.qualities["720p"] = Number.MAX_SAFE_INTEGER;
+    recordDiagnosticUrl(saturated, "https://edge.pstatic.net/live/chunklist_720p.m3u8");
+    assert.equal(saturated.totalHlsRequests, Number.MAX_SAFE_INTEGER);
+    assert.equal(saturated.qualities["720p"], Number.MAX_SAFE_INTEGER);
+
+    const reset = normalizeDiagnostics(
+      {
+        qualities: { "720p": -5, "1080p": 1.5 },
+        totalHlsRequests: Number.POSITIVE_INFINITY,
+      },
+      { maxSamples: 2 },
+    );
+    assert.equal(reset.totalHlsRequests, 0);
+    assert.deepEqual(reset.qualities, {});
+  });
+
+  it("does not retain a full CDN host, port, or signed URL in runtime error diagnostics", () => {
+    const normalized = normalizeDiagnostics({
+      runtimeRedirects: {
+        lastError:
+          "fetch failed for https://stream-account-identifier.pstatic.net:8443/private/master.m3u8?Policy=synthetic",
+      },
+    });
+
+    assert.equal(normalized.runtimeRedirects.lastError, "runtime-error");
+    assert.doesNotMatch(JSON.stringify(normalized), /stream-account-identifier|8443|Policy=synthetic/);
   });
 });

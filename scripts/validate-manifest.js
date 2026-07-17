@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
+import { assertCanonicalReleaseVersion } from "./lib/release-version.js";
+
 const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const policy = JSON.parse(await readFile(new URL("../policy/quality-policy.json", import.meta.url), "utf8"));
@@ -14,6 +16,11 @@ assert.equal(
 assert.equal(manifest.name, "CHZZK", "extension name must be CHZZK");
 assert.equal(manifest.description, undefined, "manifest description should be omitted from about:addons");
 assert.equal(manifest.version, packageJson.version, "manifest version must match package.json");
+assert.equal(
+  assertCanonicalReleaseVersion(packageJson.version, "project version"),
+  packageJson.version,
+  "project version must be canonical MAJOR.MINOR.PATCH",
+);
 assert.deepEqual(
   manifest.permissions,
   [

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
-import { assertReleaseMetadata } from "./release-artifacts.js";
+import { assertReleaseMetadata, canonicalReleaseAssetNames } from "./release-artifacts.js";
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 
@@ -52,6 +53,12 @@ export function buildUpdateManifestDocument({ metadata, signedXpiBytes = null, s
     throw new Error("Provide exactly one of signedXpiBytes or signedXpiPath");
   }
   validateReleaseUpdateMetadata(metadata);
+  if (
+    signedXpiPath !== null &&
+    basename(signedXpiPath) !== canonicalReleaseAssetNames(metadata.version).signed
+  ) {
+    throw new Error("Signed XPI filename is not canonical for release metadata");
+  }
   const bytes = signedXpiBytes === null ? readFileSync(signedXpiPath) : Buffer.from(signedXpiBytes);
   if (bytes.length === 0) throw new Error("Signed XPI is empty");
   return {

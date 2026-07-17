@@ -23,7 +23,9 @@ npm run build
 npm run audit:package
 ```
 
-## Real Firefox E2E
+The unit suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment (no validated-path reread), exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and exact-head review completion. Review-gate cases cover exact/stale reviews, rejection of unbound PR-level reactions, wrong actors, malformed dates, unresolved threads, ordinary paths, full-SHA operator-comment reaction binding, and stubbed dry-run/idempotent sole-owner protection configuration. Workflow-policy tests also require SHA-pinned actions and separated secret/write authority.
+
+## Functional-only Firefox E2E
 
 The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts.
 
@@ -31,7 +33,7 @@ The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver b
 npm run setup:firefox-e2e
 FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
 GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
-npm run test:firefox-e2e
+npm run test:firefox-functional-e2e
 ```
 
 The test exercises real Firefox rather than a VM mock:
@@ -43,7 +45,42 @@ The test exercises real Firefox rather than a VM mock:
 5. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.
 6. Calls `AddonManager.findUpdates` and confirms the installed version becomes `0.1.4`.
 
-The fixture XPIs are unsigned and exist only in the disposable Developer Edition profile, so signature/update certificate checks are disabled only for this test. Production Release artifacts must remain AMO-signed and attested.
+The fixture XPIs are unsigned and exist only in the disposable Developer Edition profile, so signature/update certificate checks are disabled only for this functional test. This test makes no authenticity claim about a Release artifact.
+
+## Stock Firefox signed-release gate
+
+`test:firefox-signed-smoke` is the production-like authenticity gate. It launches stock Firefox with a new mode-`0700` disposable profile, supplies no preference overrides, confirms `xpinstall.signatures.required` is enabled and has no user value, permanently installs the final XPI, and requires the exact release add-on ID, version, update URL, active state, `temporarilyInstalled=false`, and `AddonManager.SIGNEDSTATE_SIGNED`.
+
+The release workflow downloads checksum-pinned stock Firefox and geckodriver with the separate signed-smoke setup, then runs install mode on the final AMO-signed XPI before attestation or draft staging. Publication occurs only later in the Actions-external finalizer. To provision the same binaries locally:
+
+```bash
+npm run setup:firefox-signed-smoke
+```
+
+Install mode requires a real final AMO-signed XPI and canonical release metadata:
+
+```bash
+FIREFOX_BINARY="$PWD/dist/signed-smoke-tools/firefox/firefox" \
+GECKODRIVER_BINARY="$PWD/dist/signed-smoke-tools/geckodriver" \
+CHZZK_RELEASE_METADATA="/path/to/chzzk-<version>-release-metadata.json" \
+CHZZK_SIGNED_XPI="/path/to/chzzk-<version>-signed.xpi" \
+CHZZK_SIGNED_SMOKE_MODE="install" \
+npm run test:firefox-signed-smoke
+```
+
+Update mode first performs the same direct final-XPI install in one disposable profile. In a second disposable profile it permanently installs an older AMO-signed XPI, invokes `AddonManager.findUpdates`, and requires a permanent, active, Mozilla-signed installation at the final version:
+
+```bash
+FIREFOX_BINARY="/path/to/stock/firefox" \
+GECKODRIVER_BINARY="/path/to/geckodriver" \
+CHZZK_RELEASE_METADATA="/path/to/chzzk-<version>-release-metadata.json" \
+CHZZK_SIGNED_XPI="/path/to/chzzk-<version>-signed.xpi" \
+CHZZK_OLD_SIGNED_XPI="/path/to/chzzk-<older-version>-signed.xpi" \
+CHZZK_SIGNED_SMOKE_MODE="update" \
+npm run test:firefox-signed-smoke
+```
+
+Update mode deliberately uses the older XPI's canonical production `update_url`; run it only after the versioned final XPI and `updates.json` are deployed. Missing binaries, metadata, or required signed artifacts are hard failures, never skips. Fake or cryptographically tampered metadata that can satisfy the structural ZIP bounds is rejected by Firefox installation/signed-state enforcement rather than by home-grown cryptography.
 
 ## Manual Firefox smoke test
 

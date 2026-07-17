@@ -33,8 +33,9 @@
   <body>
     <h1>CHZZK diagnostics</h1>
     <p>
-      CHZZK live tab에서 관측된 HLS 요청만 이 브라우저의 확장 프로그램 저장소에 로컬로 저장합니다.
-      외부 collector로 전송하지 않습니다. HLS URL query/hash와 서명성 path 값은 저장 전에 제거됩니다.
+      CHZZK live tab에서 관측된 HLS 요청만 이 브라우저의 확장 프로그램 저장소에 로컬로 저장합니다. 외부
+      collector로 전송하지 않습니다. HLS URL query/hash, 서명성 path 값, 전체 subdomain과 port는 저장 전에
+      제거되며 허용 목록의 canonical domain label만 남습니다.
     </p>
     <p class="warning">
       이 popup은 네이버 공식 승인 상태를 의미하지 않습니다. Firefox 설치용 서명과 서비스 제공자 승인은

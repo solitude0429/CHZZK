@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 
-import { verifySignedReleaseArtifacts } from "./lib/release-artifacts.js";
+import { verifySignedReleaseStructure } from "./lib/release-artifacts.js";
 
 try {
   const metadataPath = resolve(process.env.CHZZK_RELEASE_METADATA ?? "");
@@ -14,10 +14,17 @@ try {
   ) {
     throw new Error("CHZZK_RELEASE_METADATA, CHZZK_SIGNED_XPI, and CHZZK_UNSIGNED_XPI are required");
   }
+  const verified = await verifySignedReleaseStructure({ metadataPath, signedXpiPath, sourceArchivePath });
   console.log(
-    JSON.stringify(await verifySignedReleaseArtifacts({ metadataPath, signedXpiPath, sourceArchivePath })),
+    JSON.stringify({
+      signedXpiSha256: verified.signedXpiSha256,
+      signedXpiSize: verified.signedXpiSize,
+      sourceDigest: verified.sourceDigest,
+      verification: verified.verification,
+      version: verified.version,
+    }),
   );
 } catch (error) {
-  console.error(`Signed release verification failed: ${error.message}`);
+  console.error(`Signed release structural verification failed: ${error.message}`);
   process.exitCode = 1;
 }

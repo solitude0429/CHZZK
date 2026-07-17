@@ -18,16 +18,44 @@ import {
 } from "node:fs";
 import { basename, join, parse, resolve, sep } from "node:path";
 
-import { assertReleaseMetadata, verifySignedReleaseArtifacts } from "./release-artifacts.js";
+import { canonicalReleaseAssetNames, verifySignedReleaseStructure } from "./release-artifacts.js";
+import { assertCanonicalReleaseVersion } from "./release-version.js";
 import { buildUpdateManifestDocument, validateUpdateManifestDocument } from "./update-manifest.js";
 
 const MANAGED_LINK_NAMES = Object.freeze(["current", "index.html", "provenance.json", "updates.json"]);
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const TRANSACTION_ID_RE = /^[a-f0-9]{16}$/;
-const VERSION_RE = /^\d+\.\d+\.\d+$/;
+const LOCK_ACQUIRE_TIMEOUT_MS = 5000;
+const LOCK_RELEASE_TIMEOUT_MS = 5000;
+const LOCK_TERMINATION_TIMEOUT_MS = 1000;
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+export async function waitForLockProcess(processPromise, timeoutMs, operation) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+    throw new Error("Deployment lock wait timeout is invalid");
+  }
+  let timeout;
+  try {
+    return await Promise.race([
+      Promise.resolve(processPromise),
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function terminateLockChild(child, closed, operation) {
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  return waitForLockProcess(closed, LOCK_TERMINATION_TIMEOUT_MS, operation);
 }
 
 function assertSafeDirectoryChain(path, expectedUid) {
@@ -146,9 +174,16 @@ function startProcessBoundLock(lockPath) {
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
-      reject(new Error(`Timed out while acquiring deployment lock: ${lockPath}`));
-    }, 5000);
+      void terminateLockChild(child, closed, "Deployment lock acquisition cleanup").then(
+        () => reject(new Error(`Timed out while acquiring deployment lock: ${lockPath}`)),
+        (cleanupError) =>
+          reject(
+            new Error(
+              `Timed out while acquiring deployment lock: ${lockPath}; cleanup failed: ${cleanupError.message}`,
+            ),
+          ),
+      );
+    }, LOCK_ACQUIRE_TIMEOUT_MS);
     const rejectOnce = (error) => {
       if (settled) return;
       settled = true;
@@ -174,7 +209,22 @@ function startProcessBoundLock(lockPath) {
           if (released) return;
           released = true;
           child.stdin.end();
-          const { code, signal } = await closed;
+          let closedState;
+          try {
+            closedState = await waitForLockProcess(
+              closed,
+              LOCK_RELEASE_TIMEOUT_MS,
+              "Deployment lock holder release",
+            );
+          } catch (releaseError) {
+            try {
+              await terminateLockChild(child, closed, "Deployment lock holder forced cleanup");
+            } catch (cleanupError) {
+              throw new Error(`${releaseError.message}; forced cleanup failed: ${cleanupError.message}`);
+            }
+            throw releaseError;
+          }
+          const { code, signal } = closedState;
           if (code !== 0 || signal !== null) {
             throw new Error(
               `Deployment lock holder failed during release: ${code ?? signal ?? "unknown"}: ${stderr.trim()}`,
@@ -338,9 +388,7 @@ function assertTransaction(transaction) {
     "Deployment transaction",
   );
   if (transaction.schemaVersion !== 1) throw new Error("Unsupported deployment transaction schema");
-  if (!VERSION_RE.test(String(transaction.version ?? ""))) {
-    throw new Error("Deployment transaction version is invalid");
-  }
+  assertCanonicalReleaseVersion(transaction.version, "Deployment transaction version");
   if (!TRANSACTION_ID_RE.test(String(transaction.transactionId ?? ""))) {
     throw new Error("Deployment transaction ID is invalid");
   }
@@ -615,20 +663,34 @@ export async function deployUpdateRelease({
     releaseDeploymentLock.assertHeld();
     onTransactionStep("lock-acquired");
 
-    const verified = await verifySignedReleaseArtifacts({
+    const verified = await verifySignedReleaseStructure({
       metadataPath,
       signedXpiPath,
       sourceArchivePath,
     });
-    const metadataBytes = readFileSync(metadataPath);
-    const metadata = assertReleaseMetadata(JSON.parse(metadataBytes.toString("utf8")));
-    const signedXpiBytes = readFileSync(signedXpiPath);
-    const sourceArchiveBytes = readFileSync(sourceArchivePath);
+    const metadataBytes = verified.metadataBytes;
+    const metadata = verified.metadata;
+    const signedXpiBytes = verified.signedXpiBytes;
+    const sourceArchiveBytes = verified.sourceArchiveBytes;
+    onTransactionStep("artifacts-verified");
     if (verified.sourceDigest !== metadata.sourceDigest || verified.version !== metadata.version) {
       throw new Error("Verified signed release identity differs from release metadata");
     }
 
-    const signedXpiSha256 = sha256(signedXpiBytes);
+    const names = canonicalReleaseAssetNames(metadata.version);
+    const returnedDigests = {
+      metadata: sha256(metadataBytes),
+      signed: sha256(signedXpiBytes),
+      source: sha256(sourceArchiveBytes),
+    };
+    if (
+      returnedDigests.metadata !== verified.metadataSha256 ||
+      returnedDigests.signed !== verified.signedXpiSha256 ||
+      returnedDigests.source !== verified.sourceArchiveSha256
+    ) {
+      throw new Error("Verifier-returned release bytes do not match their verified digests");
+    }
+    const signedXpiSha256 = returnedDigests.signed;
     const updateManifest = buildUpdateManifestDocument({ metadata, signedXpiBytes });
     validateUpdateManifestDocument(updateManifest, {
       expectedMetadata: metadata,
@@ -636,9 +698,9 @@ export async function deployUpdateRelease({
     });
     const provenance = {
       assets: {
-        [basename(metadataPath)]: sha256(metadataBytes),
-        [basename(signedXpiPath)]: signedXpiSha256,
-        [basename(sourceArchivePath)]: sha256(sourceArchiveBytes),
+        [names.metadata]: returnedDigests.metadata,
+        [names.signed]: signedXpiSha256,
+        [names.source]: returnedDigests.source,
       },
       schemaVersion: 1,
       sourceDigest: metadata.sourceDigest,
@@ -646,9 +708,9 @@ export async function deployUpdateRelease({
       version: metadata.version,
     };
     const files = new Map([
-      [basename(metadataPath), metadataBytes],
-      [basename(signedXpiPath), signedXpiBytes],
-      [basename(sourceArchivePath), sourceArchiveBytes],
+      [names.metadata, metadataBytes],
+      [names.signed, signedXpiBytes],
+      [names.source, sourceArchiveBytes],
       ["index.html", indexHtml(metadata)],
       ["provenance.json", Buffer.from(`${JSON.stringify(provenance, null, 2)}\n`)],
       ["updates.json", Buffer.from(`${JSON.stringify(updateManifest, null, 2)}\n`)],

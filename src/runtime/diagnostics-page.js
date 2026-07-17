@@ -1,27 +1,15 @@
+import policy from "../../policy/quality-policy.json";
+import { normalizeDiagnostics } from "../shared/diagnostics.js";
+
 const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
 const summary = document.querySelector("#summary");
 const payload = document.querySelector("#payload");
-
-function emptyDiagnostics() {
-  return {
-    decisions: [],
-    generatedAt: new Date(0).toISOString(),
-    qualities: {},
-    runtimeRedirects: {
-      activeTabIds: [],
-      lastError: null,
-      targetsByTab: {},
-      updatedAt: new Date(0).toISOString(),
-    },
-    samples: [],
-    totalHlsRequests: 0,
-  };
-}
+const NORMALIZATION_OPTIONS = { maxSamples: policy.maxDiagnosticsSamples };
 
 async function loadDiagnostics() {
   const stored = await api.storage.local.get(STORAGE_KEY);
-  return stored?.[STORAGE_KEY] ?? emptyDiagnostics();
+  return normalizeDiagnostics(stored?.[STORAGE_KEY], NORMALIZATION_OPTIONS);
 }
 
 function renderQualitySummary(diagnostics) {
@@ -38,9 +26,10 @@ function renderTargetSummary(runtimeRedirects) {
   return targets.join(", ") || "none";
 }
 
-function render(diagnostics) {
-  const runtimeRedirects = diagnostics.runtimeRedirects ?? emptyDiagnostics().runtimeRedirects;
-  const decisions = diagnostics.decisions ?? [];
+function render(value) {
+  const diagnostics = normalizeDiagnostics(value, NORMALIZATION_OPTIONS);
+  const runtimeRedirects = diagnostics.runtimeRedirects;
+  const decisions = diagnostics.decisions;
   const lastDecision = decisions.at(-1);
   const qualities = renderQualitySummary(diagnostics);
   summary.textContent = [

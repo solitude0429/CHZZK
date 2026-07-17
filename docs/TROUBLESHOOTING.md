@@ -16,7 +16,7 @@ The core behavior is network/webRequest level, so it does not depend on CHZZK pl
 
 ## Popup shows no active redirect target
 
-The extension does not ship a global static ruleset. CHZZK live tab identity may be prewarmed as soon as a live page starts, but the first redirect must still work from the numeric HLS playlist request itself when Firefox omits page metadata. Firefox may omit message sender URL fields, so the background queries the current tab and prewarms only if its current URL is still a CHZZK live page.
+The extension does not ship a global static ruleset. CHZZK live tab identity may be prewarmed as soon as a live page starts. On a URL-less same-page reload, the background clears quality evidence separately and rechecks the authoritative tab URL so a generic-CDN first playlist can still work before the content message. Explicit foreign page metadata vetoes cached trust. With no page metadata or cached trust, only the two documented dedicated livecloud host suffixes receive the compatibility fallback; generic CDN path markers do not.
 
 Check:
 
@@ -31,7 +31,7 @@ Check:
 
 ## Network request is not the maximum supported quality
 
-The runtime treats prewarm as a supporting signal only. A trusted master playlist starts non-blocking variant scoring by resolution, frame rate, and bitrate and supersedes an older pending numeric probe in the same tab/context. Without a master, the first numeric request starts one shared candidate resolution per tab/context. The blocking listener waits only the configured latency budget; if resolution is not ready it fails open while background probing continues, and subsequent lower requests use the resolved target. Each probe and the whole resolution have time/size limits. Candidate redirects fail closed because Firefox hides manual redirect hops, and returned playlist evidence must match the requested candidate. Navigation or tab close aborts and invalidates pending work.
+The runtime treats prewarm as a supporting signal only. A trusted master playlist starts non-blocking variant scoring by resolution, frame rate, and bitrate and supersedes an older pending numeric probe only in the same tab/context/playlist family. Without a master, the first numeric request starts one shared candidate resolution per family. The blocking listener waits only the configured latency budget; if resolution is not ready it fails open while background probing continues. URL-marker-only evidence expires after `markerEvidenceTtlMs`, and a visible redirected-request failure causes temporary downgrade suppression. Each probe and the whole resolution have time/size limits. Candidate bodies require an exact first meaningful `#EXTM3U` line and are capped in UTF-8 bytes. Navigation or tab close aborts and invalidates pending work.
 
 Check:
 
@@ -43,6 +43,8 @@ Check:
 4. If a master playlist was observed, inspect its `RESOLUTION`, `FRAME-RATE`, `BANDWIDTH`, and `AVERAGE-BANDWIDTH` attributes.
 5. If fallback probing was used, confirm the candidate quality is listed in `policy/quality-policy.json`.
 6. If CHZZK introduces a new URL shape or HLS attribute shape, add a fixture/test and update `src/shared/quality.js` / `src/shared/request-policy.js`.
+
+Diagnostics exports contain only normalized bounded records. CDN hosts are reduced to canonical allowlist domain labels; subdomains and ports are not available for troubleshooting by design.
 
 ## A higher quality appears later
 

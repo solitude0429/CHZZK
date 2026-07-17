@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { deployUpdateRelease } from "./lib/update-deployment.js";
+import { canonicalReleaseAssetNames } from "./lib/release-artifacts.js";
+import { assertCanonicalReleaseVersion } from "./lib/release-version.js";
 
 function capture(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
@@ -40,7 +42,7 @@ const workDir = mkdtempSync(join(tmpdir(), "chzzk-update-deploy-"));
 chmodSync(workDir, 0o700);
 
 try {
-  assert.match(version ?? "", /^\d+\.\d+\.\d+$/, "CHZZK_VERSION is required and must be SemVer");
+  assertCanonicalReleaseVersion(version, "CHZZK_VERSION");
   assert.match(
     sourceRepository ?? "",
     /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
@@ -61,17 +63,15 @@ try {
       "--repo",
       sourceRepository,
       "--json",
-      "assets,isDraft,isPrerelease,tagName",
+      "assets,isDraft,isImmutable,isPrerelease,tagName",
     ]),
   );
   assert.equal(release.isDraft, false, "release must be published before deployment");
   assert.equal(release.isPrerelease, false, "prereleases cannot be deployed to the stable update channel");
+  assert.equal(release.isImmutable, true, "release must be immutable before deployment");
   assert.equal(release.tagName, tag, "release tag mismatch");
-  const expectedAssetNames = [
-    `chzzk-${version}-release-metadata.json`,
-    `chzzk-${version}-signed.xpi`,
-    `chzzk-${version}.zip`,
-  ].sort();
+  const names = canonicalReleaseAssetNames(version);
+  const expectedAssetNames = [names.metadata, names.signed, names.source].sort();
   assert.deepEqual(
     release.assets.map((asset) => asset.name).sort(),
     expectedAssetNames,

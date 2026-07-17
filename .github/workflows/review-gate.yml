@@ -1,0 +1,255 @@
+name: Review completion gate
+run-name: >-
+  Review gate PR #${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number || 'reconciliation' }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.force_review && 'force' || github.event_name == 'workflow_dispatch' && inputs.force_generation != '' && 'forced-evaluation' || 'ordinary' }}
+
+on:
+  pull_request_target:
+    types: [labeled, opened, ready_for_review, reopened, synchronize, unlabeled]
+  pull_request_review:
+    types: [dismissed, edited, submitted]
+  pull_request_review_comment:
+    types: [created, deleted, edited]
+  issue_comment:
+    types: [created, deleted, edited]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_generation:
+        description: Internal generation binding for a forced-review follow-up
+        required: false
+        type: string
+        default: ""
+      force_review:
+        description: Require the automated release/security reviewer even when path and labels do not classify it
+        required: true
+        type: boolean
+        default: true
+      pr_number:
+        description: Pull request number to re-evaluate after resolving review threads
+        required: true
+        type: number
+      reconcile:
+        description: Quiet periodic reconciliation of reaction-backed review evidence
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    review-gate-${{
+      github.event_name == 'workflow_dispatch' && (inputs.force_review || inputs.force_generation != '') &&
+      format('force-{0}-{1}', inputs.pr_number, github.run_id) ||
+      github.event.pull_request.number ||
+      github.event.issue.number ||
+      inputs.pr_number ||
+      github.run_id
+    }}
+  cancel-in-progress: >-
+    ${{ !(github.event_name == 'workflow_dispatch' && (inputs.force_review || inputs.force_generation != '')) }}
+
+jobs:
+  persist-force-review:
+    if: github.event_name == 'workflow_dispatch' && inputs.force_review
+    permissions:
+      actions: write
+      checks: write
+      issues: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Persist manual force-review request as a durable label
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          publish_force_marker() {
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" \
+              -f name="CHZZK review completion" \
+              -f head_sha="$HEAD_SHA" \
+              -f external_id="force-review-${GITHUB_RUN_ID}" \
+              -f status="completed" \
+              -f conclusion="failure" \
+              -f "output[title]=Exact-head review required" \
+              -f "output[summary]=Forced automated review is pending" >/dev/null
+          }
+          list_active_runs() {
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/review-gate.yml/runs?per_page=100" \
+              --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | select(.status != \"completed\") | select(.display_title == \"Review gate PR #${PR_NUMBER} ordinary\" or (.event != \"workflow_dispatch\" and any(.pull_requests[]?; .number == ${PR_NUMBER}))) | .id"
+          }
+          publish_force_marker
+          ACTIVE_RUNS="$RUNNER_TEMP/chzzk-active-review-runs"
+          for ATTEMPT in {1..30}; do
+            list_active_runs > "$ACTIVE_RUNS"
+            test -s "$ACTIVE_RUNS" || break
+            while IFS= read -r RUN_ID; do
+              [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/cancel" \
+                >/dev/null 2>&1 || true
+            done < "$ACTIVE_RUNS"
+            sleep 2
+          done
+          list_active_runs > "$ACTIVE_RUNS"
+          test ! -s "$ACTIVE_RUNS"
+          publish_force_marker
+          LABEL="security-review-required"
+          LABEL_ENDPOINT="repos/${GITHUB_REPOSITORY}/labels/${LABEL}"
+          if ! gh api "$LABEL_ENDPOINT" >/dev/null 2>&1; then
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="$LABEL" \
+              -f color="b60205" \
+              -f description="Require exact-head automated security review"; then
+              gh api "$LABEL_ENDPOINT" >/dev/null
+            fi
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            -f "labels[]=$LABEL"
+          gh workflow run review-gate.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$DEFAULT_BRANCH" \
+            -f force_generation="$GITHUB_RUN_ID" \
+            -f force_review=false \
+            -f pr_number="$PR_NUMBER" \
+            -f reconcile=true
+
+  evaluate:
+    needs: [persist-force-review]
+    if: >-
+      always() &&
+      (needs.persist-force-review.result == 'success' || needs.persist-force-review.result == 'skipped') &&
+      !(github.event_name == 'workflow_dispatch' && inputs.force_review) &&
+      github.event_name != 'schedule' &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request != null)
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      description: ${{ steps.gate.outputs.description }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+      required: ${{ steps.gate.outputs.required }}
+      state: ${{ steps.gate.outputs.state }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+      - id: gate
+        name: Evaluate exact-head reviewer evidence and review threads
+        continue-on-error: true
+        env:
+          CHZZK_AUTOMATED_REVIEW_LOGIN: ${{ vars.AUTOMATED_REVIEW_LOGIN }}
+          CHZZK_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          CHZZK_FORCE_REVIEW: >-
+            ${{ github.event_name == 'workflow_dispatch' && (inputs.force_review || inputs.force_generation != '') || false }}
+          CHZZK_POLL_INTERVAL_SECONDS: "15"
+          CHZZK_POLL_SECONDS: ${{ github.event_name == 'pull_request_target' && (github.event.action == 'opened' || github.event.action == 'synchronize') && '180' || '0' }}
+          CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
+          CHZZK_RELEASE_OPERATOR_LOGIN: ${{ vars.RELEASE_OPERATOR_LOGIN }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-review-gate.js
+
+  status:
+    needs: evaluate
+    if: always() && needs.evaluate.result != 'skipped'
+    permissions:
+      checks: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish exact-head review completion check
+        env:
+          DESCRIPTION: ${{ needs.evaluate.outputs.description }}
+          FORCE_GENERATION: ${{ inputs.force_generation || '' }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          RECONCILE: ${{ github.event_name == 'workflow_dispatch' && inputs.reconcile || false }}
+          STATE: ${{ needs.evaluate.outputs.state }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          case "$STATE" in success|failure) ;; *) exit 1 ;; esac
+          test -n "$DESCRIPTION"
+          CHECKS_ENDPOINT="repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?check_name=CHZZK%20review%20completion&per_page=100"
+          CURRENT_CHECKS="$RUNNER_TEMP/chzzk-current-review-checks.json"
+          CHECK_FILTER='([.check_runs[] | select(.app.slug == "github-actions")] | max_by(.id))'
+          read_current_check() {
+            gh api "$CHECKS_ENDPOINT" > "$CURRENT_CHECKS"
+            CURRENT_STATE=$(jq -r "$CHECK_FILTER.conclusion // \"\"" "$CURRENT_CHECKS")
+            CURRENT_SUMMARY=$(jq -r "$CHECK_FILTER.output.summary // \"\"" "$CURRENT_CHECKS")
+            CURRENT_EXTERNAL_ID=$(jq -r "$CHECK_FILTER.external_id // \"\"" "$CURRENT_CHECKS")
+          }
+          assert_force_generation() {
+            if [ -n "$FORCE_GENERATION" ]; then
+              [[ "$FORCE_GENERATION" =~ ^[1-9][0-9]*$ ]]
+            fi
+            case "$CURRENT_EXTERNAL_ID" in
+              force-review-*)
+                test -n "$FORCE_GENERATION"
+                test "$CURRENT_EXTERNAL_ID" = "force-review-${FORCE_GENERATION}"
+                ;;
+              *)
+                test -z "$FORCE_GENERATION"
+                ;;
+            esac
+          }
+          read_current_check
+          assert_force_generation
+          if [ "$CURRENT_STATE" != "$STATE" ] || [ "$CURRENT_SUMMARY" != "$DESCRIPTION" ]; then
+            read_current_check
+            assert_force_generation
+            if [ "$CURRENT_STATE" != "$STATE" ] || [ "$CURRENT_SUMMARY" != "$DESCRIPTION" ]; then
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" \
+                -f name="CHZZK review completion" \
+                -f head_sha="$HEAD_SHA" \
+                -f external_id="review-gate-${GITHUB_RUN_ID}" \
+                -f status="completed" \
+                -f conclusion="$STATE" \
+                -f "output[title]=Exact-head review completion" \
+                -f "output[summary]=$DESCRIPTION"
+            fi
+          fi
+          if [ "$RECONCILE" != "true" ]; then
+            test "$STATE" = "success"
+          fi
+
+  reconcile:
+    if: github.event_name == 'schedule'
+    permissions:
+      actions: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-evaluate every open non-draft pull request
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PULLS_FILE="$RUNNER_TEMP/chzzk-open-pulls"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.draft == false) | .number' > "$PULLS_FILE"
+          while IFS= read -r PULL_NUMBER; do
+            test -n "$PULL_NUMBER"
+            gh workflow run review-gate.yml \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref "$DEFAULT_BRANCH" \
+              -f force_review=false \
+              -f pr_number="$PULL_NUMBER" \
+              -f reconcile=true
+          done < "$PULLS_FILE"

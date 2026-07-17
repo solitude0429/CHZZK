@@ -1,12 +1,30 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 
 import { buildUpdateManifestDocument, validateUpdateManifestDocument } from "./lib/update-manifest.js";
 
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function fsyncDirectory(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function atomicWrite(path, content) {
@@ -18,9 +36,24 @@ function atomicWrite(path, content) {
     if (error.code !== "ENOENT") throw error;
   }
   const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temporaryPath, content, { flag: "wx", mode: 0o600 });
-  renameSync(temporaryPath, path);
-  chmodSync(path, 0o600);
+  let descriptor;
+  try {
+    descriptor = openSync(temporaryPath, "wx", 0o600);
+    writeFileSync(descriptor, content);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporaryPath, path);
+    fsyncDirectory(dirname(path));
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    try {
+      unlinkSync(temporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== "ENOENT") error.cleanupError = cleanupError;
+    }
+    throw error;
+  }
 }
 
 try {

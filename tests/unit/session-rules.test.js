@@ -31,7 +31,7 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     assert.deepEqual([...configuredResourceTypes(policy)].sort(), ["media", "other", "xmlhttprequest"]);
   });
 
-  it("trusts CHZZK live context, CHZZK initiator, or known CHZZK/livecloud HLS URL shapes", () => {
+  it("trusts CHZZK context or the narrowly scoped dedicated-livecloud fallback", () => {
     const eligible = {
       documentUrl: "https://chzzk.naver.com/live/example-channel",
       initiator: "https://chzzk.naver.com",
@@ -103,7 +103,7 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
         reason: "eligible-chzzk-hls-quality",
         tabId: 7,
       },
-      "CHZZK-marked HLS URLs must redirect without content-script prewarm or page request metadata",
+      "the dedicated livecloud host must work without content prewarm or page request metadata",
     );
     assert.equal(
       shouldRedirectRequest(
@@ -181,6 +181,25 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     );
   });
 
+  it("reports contradictory quality markers as a distinct fail-closed decision", () => {
+    const request = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      originUrl: undefined,
+      tabId: 14,
+      type: "xmlhttprequest",
+      url: "https://edge.pstatic.net/chzzk/session/1080p/segment/chunklist_2160p.m3u8?Policy=redacted",
+    };
+
+    assert.deepEqual(shouldRedirectRequest(request, policy), {
+      ok: false,
+      quality: "1080p",
+      reason: "contradictory-quality-markers",
+      tabId: 14,
+    });
+  });
+
   it("trusts a prewarmed CHZZK live tab even when Firefox omits documentUrl on the first HLS request", () => {
     const eligible = {
       documentUrl: undefined,
@@ -218,6 +237,74 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       ),
       false,
     );
+  });
+
+  it("lets explicit non-CHZZK document and origin metadata veto stale prewarmed trust", () => {
+    const cachedTrust = { trustedLiveTabIds: new Set([9]) };
+    const request = {
+      documentUrl: undefined,
+      initiator: undefined,
+      method: "GET",
+      originUrl: undefined,
+      tabId: 9,
+      type: "xmlhttprequest",
+      url: "https://example.pstatic.net/live/chunklist_480p.m3u8?Policy=redacted",
+    };
+
+    assert.equal(
+      shouldRedirectRequest(
+        { ...request, documentUrl: "https://unrelated.example/watch" },
+        policy,
+        cachedTrust,
+      ).ok,
+      false,
+    );
+    assert.equal(
+      shouldRedirectRequest({ ...request, originUrl: "https://unrelated.example/watch" }, policy, cachedTrust)
+        .ok,
+      false,
+    );
+    assert.equal(
+      shouldRedirectRequest(
+        {
+          ...request,
+          documentUrl: "https://chzzk.naver.com/live/example-channel",
+          originUrl: "https://unrelated.example/watch",
+        },
+        policy,
+        cachedTrust,
+      ).ok,
+      false,
+      "contradictory page metadata must fail closed even when one field is CHZZK live",
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        {
+          ...request,
+          documentUrl: "https://unrelated.example/watch",
+          url: "https://example.pstatic.net/live/master.m3u8?Policy=redacted",
+        },
+        policy,
+        cachedTrust,
+      ),
+      false,
+      "master requests must use the same stale-trust veto",
+    );
+  });
+
+  it("rejects generic-CDN CHZZK path markers without page context", () => {
+    const request = {
+      documentUrl: undefined,
+      initiator: undefined,
+      method: "GET",
+      originUrl: undefined,
+      tabId: 13,
+      type: "media",
+      url: "https://edge.pstatic.net/chzzk/live/360p/chunklist_480p.m3u8?Policy=redacted",
+    };
+
+    assert.equal(shouldRedirectRequest(request, policy).ok, false);
+    assert.equal(shouldRecordDiagnostics(request, policy), false);
   });
 
   it("does not trust generic livecloud-looking CDN HLS outside CHZZK request context", () => {
@@ -289,6 +376,19 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
         tabId: 8,
       },
       "known CHZZK livecloud playlist host must not depend on content-script or tab prewarm timing",
+    );
+    assert.equal(
+      shouldRedirectRequest(
+        {
+          ...eligible,
+          documentUrl: "https://unrelated.example/watch",
+          initiator: "https://unrelated.example",
+          originUrl: undefined,
+        },
+        policy,
+      ).ok,
+      false,
+      "the dedicated-host compatibility fallback must never override contradictory metadata",
     );
   });
 

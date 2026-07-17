@@ -9,11 +9,13 @@ function plain(value) {
 
 async function loadBackground({
   availableQualities = new Set(),
+  clockStartMs = Date.now(),
   existingLiveTabs = [],
   fetchImplementation = null,
   maxInternalTimerMs = null,
   responsesByUrl = new Map(),
   storageSetImplementation = null,
+  tabsGetImplementation = null,
   tabUrlsById = new Map(),
 } = {}) {
   const listeners = {};
@@ -21,10 +23,20 @@ async function loadBackground({
   const fetches = [];
   const fetchOptions = [];
   const tabQueries = [];
+  let clockMs = clockStartMs;
+  class HarnessDate extends Date {
+    constructor(...args) {
+      super(...(args.length > 0 ? args : [clockMs]));
+    }
+
+    static now() {
+      return clockMs;
+    }
+  }
   const context = {
     AbortController,
     Boolean,
-    Date,
+    Date: HarnessDate,
     Map,
     Number,
     Object,
@@ -32,6 +44,8 @@ async function loadBackground({
     RegExp,
     Set,
     String,
+    TextDecoder,
+    TextEncoder,
     URL,
     clearTimeout,
     console,
@@ -110,6 +124,7 @@ async function loadBackground({
     },
     tabs: {
       async get(tabId) {
+        if (tabsGetImplementation) return tabsGetImplementation(tabId);
         const existing = existingLiveTabs.find((tab) => tab.id === tabId);
         return existing ?? { id: tabId, url: tabUrlsById.get(tabId) };
       },
@@ -136,6 +151,16 @@ async function loadBackground({
           listeners.extraInfoSpec = extraInfoSpec;
         },
       },
+      onCompleted: {
+        addListener(fn) {
+          listeners.onCompleted = fn;
+        },
+      },
+      onErrorOccurred: {
+        addListener(fn) {
+          listeners.onErrorOccurred = fn;
+        },
+      },
     },
   };
 
@@ -144,7 +169,16 @@ async function loadBackground({
     filename: "background.js",
   });
 
-  return { fetches, fetchOptions, listeners, storage, tabQueries };
+  return {
+    advanceClock(ms) {
+      clockMs += ms;
+    },
+    fetches,
+    fetchOptions,
+    listeners,
+    storage,
+    tabQueries,
+  };
 }
 
 async function waitForDiagnosticsQueue(delayMs = 50) {
@@ -180,6 +214,19 @@ function firstLowQualityRequest(tabId) {
     tabId,
     type: "xmlhttprequest",
     url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/360p/segment/chunklist_480p.m3u8?Policy=redacted",
+  };
+}
+
+function familyRequest(tabId, family, requestId = undefined) {
+  return {
+    documentUrl: "https://chzzk.naver.com/live/example-channel",
+    initiator: "https://chzzk.naver.com",
+    method: "GET",
+    originUrl: undefined,
+    requestId,
+    tabId,
+    type: "xmlhttprequest",
+    url: `https://edge.pstatic.net/chzzk/${family}/chunklist_480p.m3u8?Policy=synthetic#tail`,
   };
 }
 
@@ -247,6 +294,127 @@ describe("background runtime quality resolution", () => {
       true,
     );
     assert.equal(fetches.length, 1, "concurrent requests for one tab/context must share one probe set");
+  });
+
+  it("isolates resolved targets across independent playlist families in one live context", async () => {
+    const { fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async (url) => {
+        const supported =
+          (url.includes("/family-a/") && url.includes("2160p")) ||
+          (url.includes("/family-b/") && url.includes("720p"));
+        return supported
+          ? playlistResponse(url)
+          : { headers: { get: () => null }, ok: false, status: 404, text: async () => "not found", url };
+      },
+    });
+
+    const familyA = plain(await listeners.onBeforeRequest(familyRequest(610, "family-a")));
+    const familyB = plain(await listeners.onBeforeRequest(familyRequest(610, "family-b")));
+
+    assert.match(familyA.redirectUrl, /family-a\/chunklist_2160p\.m3u8\?Policy=synthetic#tail$/);
+    assert.match(familyB.redirectUrl, /family-b\/chunklist_720p\.m3u8\?Policy=synthetic#tail$/);
+    assert.equal(
+      fetches.some((url) => url.includes("/family-b/") && url.includes("720p")),
+      true,
+      "family B must run its own resolution instead of inheriting family A",
+    );
+    await waitForDiagnosticsQueue();
+    assert.doesNotMatch(JSON.stringify(storage.chzzkDiagnostics), /family-a|family-b|synthetic/);
+  });
+
+  it("does not share in-flight probes across concurrent independent playlist families", async () => {
+    const familyAProbe = deferred();
+    const familyBProbe = deferred();
+    const requestedByFamily = new Map();
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async (url) => {
+        const family = url.includes("/family-a/") ? "family-a" : "family-b";
+        requestedByFamily.set(family, url);
+        return family === "family-a" ? familyAProbe.promise : familyBProbe.promise;
+      },
+    });
+
+    const first = listeners.onBeforeRequest(familyRequest(611, "family-a"));
+    const second = listeners.onBeforeRequest(familyRequest(611, "family-b"));
+    await waitForDiagnosticsQueue(20);
+    const independentProbeCount = fetches.length;
+    familyAProbe.resolve(playlistResponse(requestedByFamily.get("family-a")));
+    familyBProbe.resolve(playlistResponse(requestedByFamily.get("family-b")));
+    await Promise.all([first, second]);
+
+    assert.equal(independentProbeCount, 2, "each family must own an independent in-flight promise");
+  });
+
+  it("expires URL-marker-only targets within the bounded family evidence TTL", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners } = await loadBackground({ availableQualities });
+
+    const first = plain(await listeners.onBeforeRequest(familyRequest(612, "ttl-family")));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    const fetchCountBeforeExpiry = fetches.length;
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    advanceClock(60_000);
+    const afterExpiry = plain(await listeners.onBeforeRequest(familyRequest(612, "ttl-family")));
+
+    assert.match(afterExpiry.redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length > fetchCountBeforeExpiry, true, "expired evidence must be re-probed");
+  });
+
+  it("invalidates a redirected family target on exposed 404/error events and downgrades without looping", async () => {
+    for (const eventName of ["onCompleted", "onErrorOccurred"]) {
+      const { fetches, listeners } = await loadBackground({
+        availableQualities: new Set(["2160p", "1080p"]),
+      });
+      const requestId = `${eventName}-redirect`;
+      const first = plain(
+        await listeners.onBeforeRequest(familyRequest(613, `failure-${eventName}`, requestId)),
+      );
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+      assert.equal(typeof listeners[eventName], "function", `${eventName} listener must be registered`);
+
+      listeners[eventName]({
+        error: eventName === "onErrorOccurred" ? "NS_ERROR_NET_RESET" : undefined,
+        requestId,
+        statusCode: eventName === "onCompleted" ? 404 : undefined,
+        tabId: 613,
+        url: first.redirectUrl,
+      });
+      const second = plain(
+        await listeners.onBeforeRequest(familyRequest(613, `failure-${eventName}`, `${requestId}-retry`)),
+      );
+
+      assert.match(second.redirectUrl, /chunklist_1080p/);
+      assert.equal(
+        fetches.filter((url) => url.includes(`failure-${eventName}`) && url.includes("2160p")).length,
+        1,
+        "a recently failed target must not be selected again in a redirect loop",
+      );
+    }
+  });
+
+  it("remembers every recent failed target while repeatedly downgrading a playlist family", async () => {
+    const { fetches, listeners } = await loadBackground({
+      availableQualities: new Set(["2160p", "1440p", "1080p"]),
+    });
+    const family = "failure-chain";
+
+    const first = plain(await listeners.onBeforeRequest(familyRequest(614, family, "chain-1")));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    listeners.onCompleted({ requestId: "chain-1", statusCode: 404 });
+
+    const second = plain(await listeners.onBeforeRequest(familyRequest(614, family, "chain-2")));
+    assert.match(second.redirectUrl, /chunklist_1440p/);
+    listeners.onCompleted({ requestId: "chain-2", statusCode: 404 });
+
+    const third = plain(await listeners.onBeforeRequest(familyRequest(614, family, "chain-3")));
+    assert.match(third.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.filter((url) => url.includes(family) && url.includes("2160p")).length,
+      1,
+      "a failure chain must not revisit an earlier target during the bounded backoff",
+    );
   });
 
   it("aborts the whole background resolution after a bounded total budget", async () => {
@@ -449,7 +617,7 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     );
   });
 
-  it("redirects CHZZK/livecloud playlist URLs even when Firefox omits both page URL and initiator", async () => {
+  it("uses the dedicated livecloud fallback when Firefox omits all page metadata", async () => {
     const { listeners } = await loadBackground({ availableQualities: new Set(["1080p"]) });
 
     const redirect = plain(
@@ -486,6 +654,30 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
       url: "https://example.pstatic.net/video/chunklist_480p.m3u8?Policy=redacted",
     });
     assert.equal(redirect, undefined);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+  });
+
+  it("evicts stale tab trust when explicit request metadata proves a non-CHZZK document", async () => {
+    const tabId = 514;
+    const { listeners, storage } = await loadBackground({ availableQualities: new Set(["1080p"]) });
+    listeners.onUpdated(tabId, { url: "https://chzzk.naver.com/live/channel-a" });
+    await waitForDiagnosticsQueue();
+
+    const contradicted = await listeners.onBeforeRequest({
+      ...familyRequest(tabId, "foreign-context"),
+      documentUrl: "https://unrelated.example/watch",
+      initiator: undefined,
+    });
+    assert.equal(contradicted, undefined);
+
+    const metadataAbsent = await listeners.onBeforeRequest({
+      ...familyRequest(tabId, "foreign-context"),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+    });
+    await waitForDiagnosticsQueue();
+    assert.equal(metadataAbsent, undefined, "stale cached trust must not survive an explicit veto");
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
   });
 
@@ -605,7 +797,8 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
 
   it("lets newer master-playlist evidence supersede an older numeric probe", async () => {
     const pendingNumeric = deferred();
-    const masterUrl = "https://example.pstatic.net/chzzk/live/master.m3u8?Policy=redacted";
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/master.m3u8?Policy=redacted";
     const masterPlaylist = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
 chunklist_1080p.m3u8?Policy=redacted
@@ -687,6 +880,130 @@ chunklist_1080p.m3u8?Policy=redacted
     assert.equal(fetches.length > fetchCountBeforeReload, true, "same-URL reload must start a new probe set");
   });
 
+  it("retains authoritatively live trust across a URL-less same-URL reload before content prewarm", async () => {
+    const tabId = 81;
+    const tabUrl = "https://chzzk.naver.com/live/channel-a";
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabUrlsById: new Map([[tabId, tabUrl]]),
+    });
+    listeners.onUpdated(tabId, { url: tabUrl });
+    await waitForDiagnosticsQueue();
+
+    listeners.onUpdated(tabId, { status: "loading" });
+    const redirect = plain(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "reload-first-request"),
+        documentUrl: undefined,
+        initiator: undefined,
+        originUrl: undefined,
+      }),
+    );
+
+    assert.match(redirect.redirectUrl, /chunklist_1080p\.m3u8\?Policy=synthetic#tail$/);
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [tabId]);
+  });
+
+  it("uses explicit live request evidence when reload tab validation fails", async () => {
+    const tabId = 84;
+    const tabUrl = "https://chzzk.naver.com/live/channel-a";
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => {
+        throw new Error("synthetic tabs.get failure");
+      },
+    });
+    listeners.onUpdated(tabId, { url: tabUrl });
+    await waitForDiagnosticsQueue();
+
+    listeners.onUpdated(tabId, { status: "loading" });
+    const redirect = plain(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "reload-explicit-request"),
+        documentUrl: tabUrl,
+      }),
+    );
+
+    assert.match(redirect.redirectUrl, /chunklist_1080p\.m3u8\?Policy=synthetic#tail$/);
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [tabId]);
+  });
+
+  it("keeps reload validation active for origin-only CHZZK metadata", async () => {
+    const tabId = 85;
+    const pendingTab = deferred();
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    listeners.onUpdated(tabId, { url: "https://chzzk.naver.com/live/channel-a" });
+    await waitForDiagnosticsQueue();
+
+    listeners.onUpdated(tabId, { status: "loading" });
+    const explicitRedirect = plain(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "origin-only-request"),
+        documentUrl: undefined,
+        originUrl: undefined,
+      }),
+    );
+    assert.match(explicitRedirect.redirectUrl, /chunklist_1080p\.m3u8\?Policy=synthetic#tail$/);
+
+    pendingTab.resolve({ id: tabId, url: "https://chzzk.naver.com/" });
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+
+    const metadataLessRedirect = await listeners.onBeforeRequest({
+      ...familyRequest(tabId, "origin-only-request"),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+    });
+    assert.equal(metadataLessRedirect, undefined);
+  });
+
+  it("does not retain reload trust when the authoritative current tab URL is no longer live", async () => {
+    const tabId = 82;
+    const tabUrlsById = new Map([[tabId, "https://chzzk.naver.com/live/channel-a"]]);
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabUrlsById,
+    });
+    listeners.onUpdated(tabId, { url: tabUrlsById.get(tabId) });
+    await waitForDiagnosticsQueue();
+
+    tabUrlsById.set(tabId, "https://unrelated.example/watch");
+    listeners.onUpdated(tabId, { status: "loading" });
+    const redirect = await listeners.onBeforeRequest({
+      ...familyRequest(tabId, "navigation-first-request"),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+    });
+
+    assert.equal(redirect, undefined);
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+  });
+
+  it("does not restore trust when a tab closes during URL-less reload validation", async () => {
+    const tabId = 83;
+    const pendingTab = deferred();
+    const { listeners, storage } = await loadBackground({
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    listeners.onUpdated(tabId, { url: "https://chzzk.naver.com/live/channel-a" });
+    await waitForDiagnosticsQueue();
+
+    listeners.onUpdated(tabId, { status: "loading" });
+    listeners.onRemoved(tabId);
+    pendingTab.resolve({ id: tabId, url: "https://chzzk.naver.com/live/channel-a" });
+    await waitForDiagnosticsQueue();
+
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+  });
+
   it("does not trust oversized playlist probe responses when selecting a target quality", async () => {
     const oversized1440 =
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1440p/segment/chunklist_1440p.m3u8?Policy=redacted";
@@ -705,6 +1022,63 @@ chunklist_1080p.m3u8?Policy=redacted
     const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(66));
 
     assert.equal(redirect, undefined, "oversized probe bodies must not seed a redirect target");
+  });
+
+  it("requires EXTM3U to be the first meaningful line and rejects obvious error MIME types", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const deceptiveResponses = [
+      { body: "<!doctype html>\n#EXTM3U\n#EXT-X-VERSION:3\n" },
+      {
+        body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+        headers: { "content-type": "text/html; charset=utf-8" },
+      },
+      {
+        body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+        headers: { "content-type": "application/problem+json" },
+      },
+    ];
+
+    for (const [index, response] of deceptiveResponses.entries()) {
+      const { listeners } = await loadBackground({
+        responsesByUrl: new Map([[requested2160, response]]),
+      });
+      const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(700 + index));
+      assert.equal(redirect, undefined, `deceptive response ${index} must not seed a target`);
+    }
+  });
+
+  it("accepts BOM/whitespace-prefixed playlists with real CDN-compatible MIME types", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const { listeners } = await loadBackground({
+      responsesByUrl: new Map([
+        [
+          requested2160,
+          {
+            body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-VERSION:3\r\n",
+            headers: { "content-type": "application/vnd.apple.mpegurl; charset=utf-8" },
+          },
+        ],
+      ]),
+    });
+
+    const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(704)));
+    assert.match(redirect.redirectUrl, /2160p/);
+  });
+
+  it("enforces the fallback probe body cap in UTF-8 bytes", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const body = `#EXTM3U\n${"가".repeat(100_000)}`;
+    assert.equal(body.length < 256_000, true, "fixture must fit under the old UTF-16 code-unit check");
+    assert.equal(new TextEncoder().encode(body).byteLength > 256_000, true);
+    const { listeners } = await loadBackground({
+      responsesByUrl: new Map([[requested2160, { body }]]),
+    });
+
+    const redirect = await listeners.onBeforeRequest(firstLowQualityRequest(705));
+    assert.equal(redirect, undefined, "UTF-8 bytes above probeMaxBytes must not seed a target");
   });
 
   it("does not trust playlist probes that finally resolve outside trusted HLS domains", async () => {
@@ -799,5 +1173,55 @@ chunklist_1080p.m3u8?Policy=redacted
     assert.equal(Array.isArray(storage.chzzkDiagnostics.samples), true);
     assert.equal(typeof storage.chzzkDiagnostics.qualities, "object");
     assert.equal(typeof storage.chzzkDiagnostics.runtimeRedirects, "object");
+  });
+
+  it("clamps and exact-normalizes oversized persisted diagnostics before every mutation", async () => {
+    const { listeners, storage } = await loadBackground({ availableQualities: new Set(["1080p"]) });
+    const timestamp = "2026-07-15T00:00:00.000Z";
+    const sample = {
+      quality: "480p",
+      seenAt: timestamp,
+      tabId: 68,
+      type: "media",
+      url: "https://pstatic.net/[redacted-path]/480p.m3u8",
+    };
+    const decision = {
+      ok: true,
+      quality: "480p",
+      reason: "eligible-chzzk-hls-quality",
+      redirectedCurrentRequest: false,
+      seenAt: timestamp,
+      tabId: 68,
+      targetQuality: null,
+      type: "media",
+      url: sample.url,
+    };
+    storage.chzzkDiagnostics = {
+      decisions: Array.from({ length: 250 }, () => ({ ...decision, unknown: "drop-me" })),
+      maxSamples: Number.MAX_SAFE_INTEGER,
+      qualities: { "480p": "250" },
+      runtimeRedirects: { unknown: "drop-me" },
+      samples: Array.from({ length: 250 }, () => ({ ...sample, unknown: "drop-me" })),
+      totalHlsRequests: "250",
+      unknownTopLevel: "drop-me",
+    };
+
+    await listeners.onBeforeRequest(firstLowQualityRequest(68));
+    await waitForDiagnosticsQueue();
+
+    const normalized = plain(storage.chzzkDiagnostics);
+    assert.equal(normalized.maxSamples, 200);
+    assert.equal(normalized.samples.length <= 200, true);
+    assert.equal(normalized.decisions.length <= 200, true);
+    assert.equal(normalized.totalHlsRequests, 1);
+    assert.equal("unknownTopLevel" in normalized, false);
+    assert.equal(
+      normalized.samples.some((entry) => "unknown" in entry),
+      false,
+    );
+    assert.equal(
+      normalized.decisions.some((entry) => "unknown" in entry),
+      false,
+    );
   });
 });

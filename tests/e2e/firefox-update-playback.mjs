@@ -530,6 +530,7 @@ async function main() {
     console.log(
       JSON.stringify({
         firefox: basename(firefoxBinary),
+        functionalOnly: true,
         installedAfter: after.version,
         installedBefore: before.version,
         playbackQuality: "1080p",
