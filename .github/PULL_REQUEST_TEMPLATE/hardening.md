@@ -10,3 +10,5 @@
 - [ ] Release/security-sensitive changes have a successful configured automated-review check on this exact head.
 - [ ] Every actionable review thread is resolved, and reviews/checks were rerun after the last push.
 - [ ] High-risk release, permissions, deployment, or security-policy changes are marked for Pro/manual or Codex review in the PR body.
+- [ ] Compatibility-affecting changes passed the minimum/current signed-Firefox gate; Android was checked manually or the support exception is explicit.
+- [ ] Release/supply-chain changes received independent human review, or the exception and rationale are recorded explicitly.

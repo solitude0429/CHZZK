@@ -1,0 +1,50 @@
+name: Firefox compatibility freshness
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/firefox-compatibility-freshness.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "policy/compatibility-policy.json"
+      - "scripts/check-firefox-compatibility-freshness.js"
+      - "scripts/lib/compatibility-policy.js"
+      - "scripts/lib/live-update-health.js"
+      - "tests/unit/firefox-compatibility-freshness.test.js"
+  schedule:
+    - cron: "29 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firefox-compatibility-freshness-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-freshness:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - name: Require the exact freshness-check source tree
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - name: Compare pinned Firefox profiles with Mozilla release metadata
+        run: npm run check:firefox-compatibility-freshness
