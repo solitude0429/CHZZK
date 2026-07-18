@@ -54,6 +54,7 @@ describe("compatibility and production-health workflows", () => {
     );
     assert.equal(downloadStep.env.GH_TOKEN, "${{ github.token }}");
     assert.match(downloadStep.run, /\/usr\/bin\/gh release download/);
+    assert.match(downloadStep.run, /--repo "\$GITHUB_REPOSITORY"/);
     assert.doesNotMatch(downloadStep.run, /\bnpm\b|\bnode\b|\.\/scripts\//);
     const attestationStep = fetchJob.steps.find(
       (step) => step.name === "Verify release-asset attestations in the credential-isolated job",

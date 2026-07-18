@@ -148,6 +148,7 @@ jobs:
           test -x /usr/bin/gh
           mkdir -p "$RUNNER_TEMP/release-assets"
           /usr/bin/gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --dir "$RUNNER_TEMP/release-assets" \
             --pattern "chzzk-${VERSION}.zip" \
             --pattern "chzzk-${VERSION}-release-metadata.json" \
