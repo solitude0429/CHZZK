@@ -5,10 +5,25 @@ const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
-const CLEAN_REVIEW_HEADINGS = new Set([
-  "Codex Review: Didn't find any major issues. :rocket:",
-  "Codex Review: Didn't find any major issues. 🚀",
-]);
+const CLEAN_REVIEW_HEADING = "Codex Review: Didn't find any major issues. :rocket:";
+const CLEAN_REVIEW_INFO_FOOTER = [
+  "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+  "<br/>",
+  "",
+  "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+  "- Open a pull request for review",
+  "- Mark a draft as ready",
+  '- Comment "@codex review".',
+  "",
+  "If Codex has suggestions, it will comment; otherwise it will react with 👍.",
+  "",
+  "",
+  "",
+  "",
+  'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".',
+  "            ",
+  "</details>",
+].join("\n");
 const PACKAGED_RUNTIME_PATHS = new Set([
   "background.js",
   "diagnostics.html",
@@ -120,6 +135,25 @@ function assertCurrentPullRequest(pullRequest, expectedHeadSha) {
     throw new Error("Review gate event is stale for the current pull request head");
   }
   return headSha;
+}
+
+export function assertStablePullRequestSnapshot({ before, after, expectedHeadSha = "" }) {
+  const normalizedExpectedHeadSha = String(expectedHeadSha ?? "").toLowerCase();
+  if (normalizedExpectedHeadSha && !FULL_GIT_SHA_RE.test(normalizedExpectedHeadSha)) {
+    throw new Error("Expected stable pull request head SHA is malformed");
+  }
+  const beforeHeadSha = assertCurrentPullRequest(before, "");
+  const afterHeadSha = assertCurrentPullRequest(after, "");
+  const beforeActivityTimestamp = pullRequestActivityTimestamp(before);
+  const afterActivityTimestamp = pullRequestActivityTimestamp(after);
+  if (
+    beforeHeadSha !== afterHeadSha ||
+    (normalizedExpectedHeadSha && beforeHeadSha !== normalizedExpectedHeadSha) ||
+    beforeActivityTimestamp !== afterActivityTimestamp
+  ) {
+    pending("Pull request review state changed during evidence collection");
+  }
+  return afterHeadSha;
 }
 
 function assertNoUnresolvedThreads(reviewThreads) {
@@ -237,11 +271,16 @@ function hasBoundRequestReaction({ boundRequests, headTimestamp, reviewerLogin }
 
 function cleanReviewCommitPrefix(body) {
   if (typeof body !== "string") return null;
-  const [heading] = body.split(/\r?\n/, 1);
-  if (!CLEAN_REVIEW_HEADINGS.has(heading.trim())) return null;
-  const matches = [...body.matchAll(/^\*\*Reviewed commit:\*\*\s+`([a-f0-9]{10,40})`\s*$/gm)];
-  if (matches.length !== 1 || !REVIEWED_COMMIT_PREFIX_RE.test(matches[0][1])) return null;
-  return matches[0][1];
+  const normalizedBody = body.endsWith("\n") ? body.slice(0, -1) : body;
+  const prefixMatch = normalizedBody.match(
+    /^Codex Review: Didn't find any major issues\. :rocket:\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`/,
+  );
+  if (!prefixMatch || !REVIEWED_COMMIT_PREFIX_RE.test(prefixMatch[1])) return null;
+  const core = `${CLEAN_REVIEW_HEADING}\n\n**Reviewed commit:** \`${prefixMatch[1]}\``;
+  if (normalizedBody !== core && normalizedBody !== `${core}\n\n${CLEAN_REVIEW_INFO_FOOTER}`) {
+    return null;
+  }
+  return prefixMatch[1];
 }
 
 function hasBoundCleanReviewComment({

@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 import {
+  assertStablePullRequestSnapshot,
   changedFilePaths,
   evaluateReviewCompletion,
-  hasExactHeadReviewerApproval,
   isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "./lib/review-gate.js";
@@ -204,7 +204,7 @@ async function main() {
   let lastError;
   do {
     try {
-      const pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
+      let pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
       currentHeadSha = String(pullRequest?.head?.sha ?? "").toLowerCase();
       const files = changedFilePaths(
         paginatedArrays(
@@ -212,9 +212,7 @@ async function main() {
           "Pull request changed-file listing",
         ),
       );
-      const labels = Array.isArray(pullRequest.labels)
-        ? pullRequest.labels.map((label) => label?.name)
-        : null;
+      let labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
       const forceReview = process.env.CHZZK_FORCE_REVIEW === "true";
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
       let reviews = [];
@@ -222,27 +220,36 @@ async function main() {
       let reviewRequestComments;
       let reviewerCompletionComments;
       if (required) {
+        const commentEvidence = listReviewCommentEvidence(
+          repository,
+          pullNumber,
+          currentHeadSha,
+          process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
+          process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
+        );
+        reviewRequestComments = commentEvidence.reviewRequestComments;
+        reviewerCompletionComments = commentEvidence.reviewerCompletionComments;
+
+        const reviewStateBefore = getJson(
+          `repos/${repository}/pulls/${pullNumber}`,
+          "Pull request revalidation-start lookup",
+        );
         reviews = paginatedArrays(
           `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
-          "Pull request review listing",
+          "Pull request revalidated review listing",
         );
         reviewThreads = listReviewThreads(repository, pullNumber, currentHeadSha);
-        const exactApproval = hasExactHeadReviewerApproval({
-          automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
-          headSha: currentHeadSha,
-          reviews,
+        const reviewStateAfter = getJson(
+          `repos/${repository}/pulls/${pullNumber}`,
+          "Pull request revalidation-end lookup",
+        );
+        currentHeadSha = assertStablePullRequestSnapshot({
+          after: reviewStateAfter,
+          before: reviewStateBefore,
+          expectedHeadSha: currentHeadSha,
         });
-        if (!exactApproval) {
-          const commentEvidence = listReviewCommentEvidence(
-            repository,
-            pullNumber,
-            currentHeadSha,
-            process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
-            process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
-          );
-          reviewRequestComments = commentEvidence.reviewRequestComments;
-          reviewerCompletionComments = commentEvidence.reviewerCompletionComments;
-        }
+        pullRequest = reviewStateAfter;
+        labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
       }
       const result = evaluateReviewCompletion({
         automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,

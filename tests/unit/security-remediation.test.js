@@ -498,11 +498,37 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(checker, /issues\/\$\{pullNumber\}\/reactions/);
     assert.match(checker, /issues\/comments\/\$\{comment\.id\}\/reactions/);
     assert.match(checker, /reviewerCompletionComments/);
+    const commentEvidenceIndex = checker.lastIndexOf("const commentEvidence = listReviewCommentEvidence(");
+    const revalidationStartIndex = checker.indexOf(
+      "const reviewStateBefore = getJson(",
+      commentEvidenceIndex,
+    );
+    const revalidatedReviewsIndex = checker.indexOf("reviews = paginatedArrays(", revalidationStartIndex);
+    const revalidatedThreadsIndex = checker.indexOf(
+      "reviewThreads = listReviewThreads(",
+      revalidatedReviewsIndex,
+    );
+    const revalidationEndIndex = checker.indexOf(
+      "const reviewStateAfter = getJson(",
+      revalidatedThreadsIndex,
+    );
+    const stableSnapshotIndex = checker.indexOf("assertStablePullRequestSnapshot(", revalidationEndIndex);
+    assert.ok(commentEvidenceIndex >= 0, "review comments must be collected");
+    assert.ok(
+      commentEvidenceIndex < revalidationStartIndex &&
+        revalidationStartIndex < revalidatedReviewsIndex &&
+        revalidatedReviewsIndex < revalidatedThreadsIndex &&
+        revalidatedThreadsIndex < revalidationEndIndex &&
+        revalidationEndIndex < stableSnapshotIndex,
+      "head/activity/reviews/threads must be rebound after completion-comment collection",
+    );
     assert.doesNotMatch(checker, /commits\/\$\{currentHeadSha\}/);
     const reviewGateLibrary = read("scripts/lib/review-gate.js");
     assert.match(reviewGateLibrary, /pullRequest\?\.updated_at/);
     assert.match(reviewGateLibrary, /Didn't find any major issues/);
     assert.match(reviewGateLibrary, /\{10,40\}/);
+    assert.match(reviewGateLibrary, /normalizedBody !== core/);
+    assert.match(reviewGateLibrary, /assertStablePullRequestSnapshot/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
     assert.match(settings, /required_conversation_resolution/);
