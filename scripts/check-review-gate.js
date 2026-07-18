@@ -136,13 +136,7 @@ function listReviewCommentEvidence(
       if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
         throw new Error("Review-request comment identity is missing or malformed");
       }
-      return {
-        ...comment,
-        reactions: paginatedArrays(
-          `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
-          "Review-request comment reaction listing",
-        ),
-      };
+      return comment;
     }),
     reviewerCompletionComments: comments.filter(
       (comment) => String(comment?.user?.login ?? "").toLowerCase() === reviewerLogin,

@@ -294,13 +294,6 @@ function fullShaAppearsInComment(body, headSha) {
   return !/[a-f0-9]/.test(before) && !/[a-f0-9]/.test(after);
 }
 
-function validReviewerReaction(reaction, reviewerLogin, headTimestamp, label) {
-  const actorLogin = normalizeLogin(reaction?.user?.login, `${label} actor identity`);
-  if (actorLogin !== reviewerLogin || reaction.content !== "+1") return null;
-  const reactionTimestamp = timestampMilliseconds(reaction.created_at, `${label} timestamp`);
-  return reactionTimestamp > headTimestamp ? reactionTimestamp : null;
-}
-
 function boundReviewRequests({ headSha, releaseOperatorLogin, reviewRequestComments }) {
   const operatorLogin = normalizeLogin(releaseOperatorLogin, "Release operator login");
   if (!Array.isArray(reviewRequestComments)) {
@@ -322,27 +315,9 @@ function boundReviewRequests({ headSha, releaseOperatorLogin, reviewRequestComme
     if (commentUpdatedTimestamp < commentCreatedTimestamp) {
       throw new Error("Review-request comment timestamps are malformed");
     }
-    if (!Array.isArray(comment.reactions)) {
-      throw new Error("Review-request comment reaction response is missing");
-    }
     requests.push({ comment, updatedTimestamp: commentUpdatedTimestamp });
   }
   return requests;
-}
-
-function hasBoundRequestReaction({ boundRequests, headTimestamp, reviewerLogin }) {
-  for (const { comment, updatedTimestamp } of boundRequests) {
-    for (const reaction of comment.reactions) {
-      const reactionTimestamp = validReviewerReaction(
-        reaction,
-        reviewerLogin,
-        headTimestamp,
-        "Review-request comment reaction",
-      );
-      if (reactionTimestamp !== null && reactionTimestamp > updatedTimestamp) return true;
-    }
-  }
-  return false;
 }
 
 function cleanReviewCommitPrefix(body) {
@@ -455,29 +430,11 @@ export function evaluateReviewCompletion({
     };
   }
 
-  const evidenceTimestamp = Math.max(
-    pullRequestActivityTimestamp(pullRequest),
-    reviewEvidence?.submittedAt ?? 0,
-  );
   const boundRequests = boundReviewRequests({
     headSha,
     releaseOperatorLogin,
     reviewRequestComments,
   });
-  if (
-    hasBoundRequestReaction({
-      boundRequests,
-      headTimestamp: evidenceTimestamp,
-      reviewerLogin,
-    })
-  ) {
-    return {
-      description: "Reviewer +1 is bound to the exact-head operator request; no unresolved threads",
-      headSha,
-      required: true,
-      state: "success",
-    };
-  }
   if (
     hasBoundCleanReviewComment({
       boundRequests,
@@ -495,5 +452,5 @@ export function evaluateReviewCompletion({
       state: "success",
     };
   }
-  pending("Automated reviewer has no exact-head approval, request +1, or bound clean-result comment");
+  pending("Automated reviewer has no exact-head approval or bound clean-result comment");
 }

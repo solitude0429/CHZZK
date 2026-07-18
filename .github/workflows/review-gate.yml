@@ -89,6 +89,18 @@ jobs:
               --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | select(.status != \"completed\") | select(.display_title == \"Review gate PR #${PR_NUMBER} ordinary\" or .display_title == \"Review gate PR #${PR_NUMBER} forced-evaluation\" or (.event != \"workflow_dispatch\" and any(.pull_requests[]?; .number == ${PR_NUMBER}))) | .id"
           }
           publish_force_marker
+          LABEL="security-review-required"
+          LABEL_ENDPOINT="repos/${GITHUB_REPOSITORY}/labels/${LABEL}"
+          if ! gh api "$LABEL_ENDPOINT" >/dev/null 2>&1; then
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="$LABEL" \
+              -f color="b60205" \
+              -f description="Require exact-head automated security review"; then
+              gh api "$LABEL_ENDPOINT" >/dev/null
+            fi
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            -f "labels[]=$LABEL"
           ACTIVE_RUNS="$RUNNER_TEMP/chzzk-active-review-runs"
           for ATTEMPT in {1..30}; do
             list_active_runs > "$ACTIVE_RUNS"
@@ -104,18 +116,6 @@ jobs:
           list_active_runs > "$ACTIVE_RUNS"
           test ! -s "$ACTIVE_RUNS"
           publish_force_marker
-          LABEL="security-review-required"
-          LABEL_ENDPOINT="repos/${GITHUB_REPOSITORY}/labels/${LABEL}"
-          if ! gh api "$LABEL_ENDPOINT" >/dev/null 2>&1; then
-            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" \
-              -f name="$LABEL" \
-              -f color="b60205" \
-              -f description="Require exact-head automated security review"; then
-              gh api "$LABEL_ENDPOINT" >/dev/null
-            fi
-          fi
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
-            -f "labels[]=$LABEL"
           gh workflow run review-gate.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$DEFAULT_BRANCH" \
@@ -160,6 +160,8 @@ jobs:
           CHZZK_POLL_SECONDS: ${{ github.event_name == 'pull_request_target' && (github.event.action == 'opened' || github.event.action == 'synchronize') && '180' || '0' }}
           CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
           CHZZK_RELEASE_OPERATOR_LOGIN: ${{ vars.RELEASE_OPERATOR_LOGIN }}
+          EVALUATED_HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          FORCE_GENERATION: ${{ inputs.force_generation || '' }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-review-gate.js
 
@@ -234,6 +236,12 @@ jobs:
           test "$HEAD_SHA_SEEN" = true
           test "$REQUIRED_SEEN" = true
           test "$STATE_SEEN" = true
+          [[ "$EVALUATED_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          if [ -z "$HEAD_SHA" ]; then
+            test "$GATE_EXIT" -ne 0
+            test "$STATE" = "failure"
+            HEAD_SHA=$EVALUATED_HEAD_SHA
+          fi
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
           case "$STATE" in success|failure) ;; *) exit 1 ;; esac
           case "$REQUIRED" in true|false) ;; *) exit 1 ;; esac
@@ -250,10 +258,34 @@ jobs:
             gh api "$CHECKS_ENDPOINT" > "$CURRENT_CHECKS"
             CURRENT_STATE=$(jq -r "$CHECK_FILTER.conclusion // \"\"" "$CURRENT_CHECKS")
             CURRENT_SUMMARY=$(jq -r "$CHECK_FILTER.output.summary // \"\"" "$CURRENT_CHECKS")
+            CURRENT_EXTERNAL_ID=$(jq -r "$CHECK_FILTER.external_id // \"\"" "$CURRENT_CHECKS")
+          }
+          assert_force_marker_ownership() {
+            if [ -n "$FORCE_GENERATION" ]; then
+              [[ "$FORCE_GENERATION" =~ ^[1-9][0-9]*$ ]]
+            fi
+            case "$CURRENT_EXTERNAL_ID" in
+              force-review-*)
+                if [ -n "$FORCE_GENERATION" ]; then
+                  test "$CURRENT_EXTERNAL_ID" = "force-review-${FORCE_GENERATION}"
+                else
+                  test "$REQUIRED" = true
+                  LABEL_PRESENT=$(gh api \
+                    "repos/${GITHUB_REPOSITORY}/issues/${CHZZK_PR_NUMBER}" \
+                    --jq 'any(.labels[]?; .name == "security-review-required")')
+                  test "$LABEL_PRESENT" = true
+                fi
+                ;;
+              *)
+                test -z "$FORCE_GENERATION"
+                ;;
+            esac
           }
           read_current_check
+          assert_force_marker_ownership
           if [ "$CURRENT_STATE" != "$STATE" ] || [ "$CURRENT_SUMMARY" != "$DESCRIPTION" ]; then
             read_current_check
+            assert_force_marker_ownership
             if [ "$CURRENT_STATE" != "$STATE" ] || [ "$CURRENT_SUMMARY" != "$DESCRIPTION" ]; then
               gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" \
                 -f name="CHZZK review completion" \

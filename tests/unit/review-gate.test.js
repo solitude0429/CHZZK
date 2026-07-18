@@ -218,7 +218,7 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("rejects a pre-bound reaction when GitHub observed the exact head later", () => {
+  it("rejects a reaction bound to an exact-head request", () => {
     assert.throws(
       () =>
         evaluateReviewCompletion(
@@ -246,7 +246,7 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("requires a reaction to be strictly later than both PR activity and request-comment edits", () => {
+  it("does not revive request reactions after PR or request-comment activity", () => {
     for (const overrides of [
       {
         pullRequest: {
@@ -279,29 +279,25 @@ describe("exact-head release and security review completion", () => {
     }
   });
 
-  it("prefers a +1 bound to an operator comment containing the full exact head SHA", () => {
-    assert.deepEqual(
-      evaluateReviewCompletion(
-        sensitiveEvaluation({
-          issueReactions: [],
-          reviewRequestComments: [
-            {
-              body: `Codex review request for ${headSha}`,
-              created_at: "2026-07-15T10:00:30Z",
-              reactions: [plusOne()],
-              updated_at: "2026-07-15T10:00:30Z",
-              user: { login: operatorLogin },
-            },
-          ],
-          reviews: [],
-        }),
-      ),
-      {
-        description: "Reviewer +1 is bound to the exact-head operator request; no unresolved threads",
-        headSha,
-        required: true,
-        state: "success",
-      },
+  it("rejects request reactions regardless of exact or stale SHA binding", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            issueReactions: [],
+            reviewRequestComments: [
+              {
+                body: `Codex review request for ${headSha}`,
+                created_at: "2026-07-15T10:00:30Z",
+                reactions: [plusOne()],
+                updated_at: "2026-07-15T10:00:30Z",
+                user: { login: operatorLogin },
+              },
+            ],
+            reviews: [],
+          }),
+        ),
+      /no exact-head approval|bound clean-result/i,
     );
 
     assert.throws(
@@ -324,7 +320,7 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("requires a clean reaction to postdate an exact-head findings review", () => {
+  it("does not let a later request reaction override an exact-head findings review", () => {
     const request = {
       body: `Codex review request for ${headSha}`,
       created_at: "2026-07-15T10:00:30Z",
@@ -343,19 +339,20 @@ describe("exact-head release and security review completion", () => {
       /no exact-head approval|exact-head operator request/i,
     );
 
-    assert.equal(
-      evaluateReviewCompletion(
-        sensitiveEvaluation({
-          reviewRequestComments: [
-            {
-              ...request,
-              reactions: [plusOne({ created_at: "2026-07-15T10:03:00Z" })],
-            },
-          ],
-          reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:02:00Z" })],
-        }),
-      ).state,
-      "success",
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            reviewRequestComments: [
+              {
+                ...request,
+                reactions: [plusOne({ created_at: "2026-07-15T10:03:00Z" })],
+              },
+            ],
+            reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:02:00Z" })],
+          }),
+        ),
+      /no exact-head approval|bound clean-result/i,
     );
   });
 
@@ -523,7 +520,7 @@ describe("exact-head release and security review completion", () => {
     }
   });
 
-  it("rejects same-second review, thread, or reaction changes across repeated evidence collection", () => {
+  it("rejects same-second review, thread, or comment changes across repeated evidence collection", () => {
     const before = reviewEvidenceSnapshot();
     assert.equal(
       assertStableReviewEvidenceSnapshots({
@@ -545,7 +542,7 @@ describe("exact-head release and security review completion", () => {
         reviewThreads: [{ id: "thread-40", isResolved: false }],
       }),
       reviewEvidenceSnapshot({
-        reviewRequestComments: [reviewRequest({ id: 10, reactions: [] })],
+        issueComments: [{ body: "new same-second activity", id: 50 }],
       }),
     ];
     for (const after of changedSnapshots) {

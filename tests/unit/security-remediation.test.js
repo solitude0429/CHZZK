@@ -416,6 +416,21 @@ describe("release and repository security guardrails", () => {
     assert.match(persistForceText, /force_review=false/);
     assert.match(persistForceText, /force_generation/);
     assert.match(persistForceText, /reconcile=true/);
+    const persistLines = persistForceRun.split("\n").map((line) => line.trim());
+    const markerCalls = persistLines.flatMap((line, index) =>
+      line === "publish_force_marker" ? [index] : [],
+    );
+    const labelWriteIndex = persistLines.findIndex((line) => line.includes("issues/${PR_NUMBER}/labels"));
+    const activeScanIndex = persistLines.findIndex((line) => line.startsWith('ACTIVE_RUNS="$RUNNER_TEMP/'));
+    const dispatchIndex = persistLines.findIndex((line) => line === "gh workflow run review-gate.yml \\");
+    assert.deepEqual(markerCalls.length, 2);
+    assert.ok(
+      markerCalls[0] < labelWriteIndex &&
+        labelWriteIndex < activeScanIndex &&
+        activeScanIndex < markerCalls[1] &&
+        markerCalls[1] < dispatchIndex,
+      "force label must be durable before the final scan and marker republish",
+    );
     assert.doesNotMatch(persistForceText, /actions\/checkout|npm\s|node scripts\//);
     assert.deepEqual(gate.jobs.evaluate.needs, ["persist-force-review"]);
     assert.match(JSON.stringify(gate.jobs.evaluate), /CHZZK_FORCE_REVIEW[\s\S]*force_generation/);
@@ -455,40 +470,85 @@ describe("release and repository security guardrails", () => {
     );
     assert.match(statusRun, /GITHUB_OUTPUT="\$GATE_OUTPUT" node scripts\/check-review-gate\.js/);
     assert.match(statusRun, /select\(\.app\.slug == "github-actions"\)/);
+    assert.match(statusRun, /CURRENT_EXTERNAL_ID/);
+    assert.match(statusRun, /force-review-/);
+    assert.match(statusRun, /security-review-required/);
+    assert.match(statusRun, /HEAD_SHA=\$EVALUATED_HEAD_SHA/);
     assert.match(statusRun, /max_by\(\.id\)/);
     assert.equal(statusRun.match(/gh api "\$CHECKS_ENDPOINT"/g)?.length, 1);
     const harness = mkdtempSync(join(dirname(rootDir), "chzzk-review-status-race-"));
     const fakeGh = join(harness, "gh");
     const fakeNode = join(harness, "node");
     const evaluationMarker = join(harness, "evaluated");
-    const postMarker = join(harness, "posted");
     try {
       writeFileSync(
         fakeGh,
-        `#!/bin/sh\ncase " $* " in\n  *" --method POST "*)\n    test -f "$TEST_EVALUATION_MARKER"\n    : > "$TEST_POST_MARKER"\n    exit 0\n    ;;\nesac\n/usr/bin/printf '%s\\n' '{"check_runs":[]}'\n`,
+        `#!/bin/sh\ncase " $* " in\n  *" --method POST "*)\n    test -f "$TEST_EVALUATION_MARKER"\n    case " $* " in *" head_sha=${"a".repeat(40)} "*) : ;; *) exit 1 ;; esac\n    : > "$TEST_POST_MARKER"\n    exit 0\n    ;;\n  *"/issues/66 "*)\n    if [ "$TEST_GH_MODE" = "force-labeled" ]; then\n      /usr/bin/printf '%s\\n' true\n    else\n      /usr/bin/printf '%s\\n' false\n    fi\n    exit 0\n    ;;\nesac\ncase "$TEST_GH_MODE" in\n  force-*)\n    /usr/bin/printf '%s\\n' '{"check_runs":[{"id":200,"app":{"slug":"github-actions"},"conclusion":"failure","external_id":"force-review-123","output":{"summary":"Forced automated review is pending"}}]}'\n    ;;\n  *) /usr/bin/printf '%s\\n' '{"check_runs":[]}' ;;\nesac\n`,
       );
       writeFileSync(
         fakeNode,
-        `#!/bin/sh\n: > "$TEST_EVALUATION_MARKER"\n/usr/bin/printf '%s\\n' 'description=final exact-head evidence is stable' 'head_sha=${"a".repeat(40)}' 'required=true' 'state=success' > "$GITHUB_OUTPUT"\n`,
+        `#!/bin/sh\n: > "$TEST_EVALUATION_MARKER"\nif [ "$TEST_NODE_MODE" = "failure-empty-head" ]; then\n  /usr/bin/printf '%s\\n' 'description=final evidence API lookup failed' 'head_sha=' 'required=true' 'state=failure' > "$GITHUB_OUTPUT"\n  exit 1\nfi\n/usr/bin/printf '%s\\n' 'description=final exact-head evidence is stable' 'head_sha=${"a".repeat(40)}' 'required=true' 'state=success' > "$GITHUB_OUTPUT"\n`,
       );
       chmodSync(fakeGh, 0o755);
       chmodSync(fakeNode, 0o755);
-      const status = spawnSync("/bin/bash", ["-c", statusRun], {
-        encoding: "utf8",
-        env: {
-          GH_TOKEN: "synthetic",
-          GITHUB_REPOSITORY: "solitude0429/CHZZK",
-          GITHUB_RUN_ID: "456",
-          PATH: `${harness}:/usr/bin:/bin`,
-          RECONCILE: "false",
-          RUNNER_TEMP: harness,
-          TEST_EVALUATION_MARKER: evaluationMarker,
-          TEST_POST_MARKER: postMarker,
-        },
-      });
-      assert.equal(status.status, 0, status.stderr);
+      const runStatus = ({
+        forceGeneration = "",
+        ghMode = "ordinary",
+        nodeMode = "success",
+        reconcile = false,
+        marker,
+      }) =>
+        spawnSync("/bin/bash", ["-c", statusRun], {
+          encoding: "utf8",
+          env: {
+            CHZZK_PR_NUMBER: "66",
+            EVALUATED_HEAD_SHA: "a".repeat(40),
+            FORCE_GENERATION: forceGeneration,
+            GH_TOKEN: "synthetic",
+            GITHUB_REPOSITORY: "solitude0429/CHZZK",
+            GITHUB_RUN_ID: "456",
+            PATH: `${harness}:/usr/bin:/bin`,
+            RECONCILE: String(reconcile),
+            RUNNER_TEMP: harness,
+            TEST_EVALUATION_MARKER: evaluationMarker,
+            TEST_GH_MODE: ghMode,
+            TEST_NODE_MODE: nodeMode,
+            TEST_POST_MARKER: marker,
+          },
+        });
+      const ordinaryMarker = join(harness, "ordinary-posted");
+      const ordinary = runStatus({ marker: ordinaryMarker });
+      assert.equal(ordinary.status, 0, ordinary.stderr);
       assert.equal(existsSync(evaluationMarker), true, "final evidence evaluation must execute");
-      assert.equal(existsSync(postMarker), true, "publication must follow final evidence evaluation");
+      assert.equal(existsSync(ordinaryMarker), true, "publication must follow final evidence evaluation");
+
+      const fallbackMarker = join(harness, "fallback-posted");
+      const fallback = runStatus({
+        marker: fallbackMarker,
+        nodeMode: "failure-empty-head",
+        reconcile: true,
+      });
+      assert.equal(fallback.status, 0, fallback.stderr);
+      assert.equal(existsSync(fallbackMarker), true, "evaluate head must publish final-check failure");
+
+      const lockedMarker = join(harness, "locked-posted");
+      const locked = runStatus({ ghMode: "force-unlabeled", marker: lockedMarker });
+      assert.notEqual(locked.status, 0, "an unlabeled ordinary run must preserve a force marker");
+      assert.equal(existsSync(lockedMarker), false);
+
+      const labeledMarker = join(harness, "labeled-posted");
+      const labeled = runStatus({ ghMode: "force-labeled", marker: labeledMarker });
+      assert.equal(labeled.status, 0, labeled.stderr);
+      assert.equal(existsSync(labeledMarker), true, "durable force label may unlock live evidence");
+
+      const generationMarker = join(harness, "generation-posted");
+      const generation = runStatus({
+        forceGeneration: "123",
+        ghMode: "force-generation",
+        marker: generationMarker,
+      });
+      assert.equal(generation.status, 0, generation.stderr);
+      assert.equal(existsSync(generationMarker), true, "matching force generation may publish");
     } finally {
       rmSync(harness, { force: true, recursive: true });
     }
@@ -502,8 +562,7 @@ describe("release and repository security guardrails", () => {
     assert.match(text, /CHZZK_POLL_SECONDS/);
     assert.match(text, /CHZZK review completion/);
     assert.match(checker, /pulls\/\$\{pullNumber\}\/reviews/);
-    assert.doesNotMatch(checker, /issues\/\$\{pullNumber\}\/reactions/);
-    assert.match(checker, /issues\/comments\/\$\{comment\.id\}\/reactions/);
+    assert.doesNotMatch(checker, /\/reactions/);
     assert.match(checker, /reviewerCompletionComments/);
     const forwardCollectionIndex = checker.lastIndexOf('order: "forward"');
     const reverseCollectionIndex = checker.lastIndexOf('order: "reverse"');
@@ -527,7 +586,7 @@ describe("release and repository security guardrails", () => {
         reverseBranchIndex < reverseThreadsIndex &&
         reverseThreadsIndex < reverseReviewsIndex &&
         reverseReviewsIndex < reverseCommentsIndex,
-      "the repeated snapshot must re-read reactions last, after reviews and threads",
+      "the repeated snapshot must re-read issue comments last, after reviews and threads",
     );
     assert.doesNotMatch(checker, /commits\/\$\{currentHeadSha\}/);
     const reviewGateLibrary = read("scripts/lib/review-gate.js");
@@ -537,6 +596,7 @@ describe("release and repository security guardrails", () => {
     assert.match(reviewGateLibrary, /normalizedBody !== core/);
     assert.match(reviewGateLibrary, /assertStableReviewEvidenceSnapshots/);
     assert.match(reviewGateLibrary, /canonicalSnapshotJson/);
+    assert.doesNotMatch(reviewGateLibrary, /hasBoundRequestReaction|validReviewerReaction/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
     assert.match(settings, /required_conversation_resolution/);
