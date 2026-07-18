@@ -1,9 +1,29 @@
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
+const REVIEWED_COMMIT_PREFIX_RE = /^[a-f0-9]{10,40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/;
 const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
+const CLEAN_REVIEW_HEADING = "Codex Review: Didn't find any major issues. :rocket:";
+const CLEAN_REVIEW_INFO_FOOTER = [
+  "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+  "<br/>",
+  "",
+  "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+  "- Open a pull request for review",
+  "- Mark a draft as ready",
+  '- Comment "@codex review".',
+  "",
+  "If Codex has suggestions, it will comment; otherwise it will react with 👍.",
+  "",
+  "",
+  "",
+  "",
+  'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".',
+  "            ",
+  "</details>",
+].join("\n");
 const PACKAGED_RUNTIME_PATHS = new Set([
   "background.js",
   "diagnostics.html",
@@ -117,6 +137,101 @@ function assertCurrentPullRequest(pullRequest, expectedHeadSha) {
   return headSha;
 }
 
+export function assertStablePullRequestSnapshot({ before, after, expectedHeadSha = "" }) {
+  const normalizedExpectedHeadSha = String(expectedHeadSha ?? "").toLowerCase();
+  if (normalizedExpectedHeadSha && !FULL_GIT_SHA_RE.test(normalizedExpectedHeadSha)) {
+    throw new Error("Expected stable pull request head SHA is malformed");
+  }
+  const beforeHeadSha = assertCurrentPullRequest(before, "");
+  const afterHeadSha = assertCurrentPullRequest(after, "");
+  const beforeActivityTimestamp = pullRequestActivityTimestamp(before);
+  const afterActivityTimestamp = pullRequestActivityTimestamp(after);
+  if (
+    beforeHeadSha !== afterHeadSha ||
+    (normalizedExpectedHeadSha && beforeHeadSha !== normalizedExpectedHeadSha) ||
+    beforeActivityTimestamp !== afterActivityTimestamp
+  ) {
+    pending("Pull request review state changed during evidence collection");
+  }
+  return afterHeadSha;
+}
+
+function canonicalSnapshotJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalSnapshotJson(entry)).join(",")}]`;
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalSnapshotJson(value[key])}`)
+    .join(",")}}`;
+}
+
+function pullRequestSnapshotIdentity(pullRequest) {
+  const headSha = assertCurrentPullRequest(pullRequest, "");
+  const labels = pullRequest.labels;
+  if (!Array.isArray(labels) || labels.some((label) => typeof label?.name !== "string" || !label.name)) {
+    throw new Error("Pull request snapshot label state is missing or malformed");
+  }
+  return {
+    draft: pullRequest.draft,
+    headSha,
+    labels: labels.map((label) => label.name).sort(),
+    number: pullRequest.number,
+    state: pullRequest.state,
+    updatedAt: pullRequestActivityTimestamp(pullRequest),
+  };
+}
+
+function reviewEvidenceSnapshotIdentity(snapshot, label, expectedHeadSha) {
+  if (!snapshot || typeof snapshot !== "object") {
+    throw new Error(`${label} review evidence snapshot is missing or malformed`);
+  }
+  const headSha = assertStablePullRequestSnapshot({
+    after: snapshot.pullRequestAfter,
+    before: snapshot.pullRequestBefore,
+    expectedHeadSha,
+  });
+  for (const [field, fieldLabel] of [
+    ["issueComments", "issue-comment"],
+    ["reviewRequestComments", "review-request comment"],
+    ["reviewerCompletionComments", "reviewer completion-comment"],
+    ["reviews", "review"],
+    ["reviewThreads", "review-thread"],
+  ]) {
+    if (!Array.isArray(snapshot[field])) {
+      throw new Error(`${label} ${fieldLabel} snapshot is missing or malformed`);
+    }
+  }
+  return {
+    headSha,
+    identity: canonicalSnapshotJson({
+      issueComments: snapshot.issueComments,
+      pullRequest: pullRequestSnapshotIdentity(snapshot.pullRequestAfter),
+      reviewRequestComments: snapshot.reviewRequestComments,
+      reviewerCompletionComments: snapshot.reviewerCompletionComments,
+      reviews: snapshot.reviews,
+      reviewThreads: snapshot.reviewThreads,
+    }),
+  };
+}
+
+export function assertStableReviewEvidenceSnapshots({ before, after, expectedHeadSha = "" }) {
+  const normalizedExpectedHeadSha = String(expectedHeadSha ?? "").toLowerCase();
+  if (normalizedExpectedHeadSha && !FULL_GIT_SHA_RE.test(normalizedExpectedHeadSha)) {
+    throw new Error("Expected stable review-evidence head SHA is malformed");
+  }
+  const beforeIdentity = reviewEvidenceSnapshotIdentity(before, "Initial", normalizedExpectedHeadSha);
+  const afterIdentity = reviewEvidenceSnapshotIdentity(after, "Repeated", normalizedExpectedHeadSha);
+  if (
+    beforeIdentity.headSha !== afterIdentity.headSha ||
+    beforeIdentity.identity !== afterIdentity.identity
+  ) {
+    pending("Pull request review evidence changed during repeated collection");
+  }
+  return afterIdentity.headSha;
+}
+
 function assertNoUnresolvedThreads(reviewThreads) {
   if (!Array.isArray(reviewThreads)) throw new Error("Pull request review-thread response is missing");
   if (reviewThreads.some((thread) => typeof thread?.isResolved !== "boolean")) {
@@ -179,25 +294,13 @@ function fullShaAppearsInComment(body, headSha) {
   return !/[a-f0-9]/.test(before) && !/[a-f0-9]/.test(after);
 }
 
-function validReviewerReaction(reaction, reviewerLogin, headTimestamp, label) {
-  const actorLogin = normalizeLogin(reaction?.user?.login, `${label} actor identity`);
-  if (actorLogin !== reviewerLogin || reaction.content !== "+1") return null;
-  const reactionTimestamp = timestampMilliseconds(reaction.created_at, `${label} timestamp`);
-  return reactionTimestamp > headTimestamp ? reactionTimestamp : null;
-}
-
-function hasBoundRequestReaction({
-  headSha,
-  headTimestamp,
-  releaseOperatorLogin,
-  reviewRequestComments,
-  reviewerLogin,
-}) {
+function boundReviewRequests({ headSha, releaseOperatorLogin, reviewRequestComments }) {
   const operatorLogin = normalizeLogin(releaseOperatorLogin, "Release operator login");
   if (!Array.isArray(reviewRequestComments)) {
     throw new Error("Operator review-request comment response is missing");
   }
 
+  const requests = [];
   for (const comment of reviewRequestComments) {
     const authorLogin = normalizeLogin(comment?.user?.login, "Review-request comment author identity");
     if (authorLogin !== operatorLogin || !fullShaAppearsInComment(comment.body, headSha)) continue;
@@ -212,20 +315,81 @@ function hasBoundRequestReaction({
     if (commentUpdatedTimestamp < commentCreatedTimestamp) {
       throw new Error("Review-request comment timestamps are malformed");
     }
-    if (!Array.isArray(comment.reactions)) {
-      throw new Error("Review-request comment reaction response is missing");
+    requests.push({ comment, updatedTimestamp: commentUpdatedTimestamp });
+  }
+  return requests;
+}
+
+function cleanReviewCommitPrefix(body) {
+  if (typeof body !== "string") return null;
+  const normalizedBody = body.endsWith("\n") ? body.slice(0, -1) : body;
+  const prefixMatch = normalizedBody.match(
+    /^Codex Review: Didn't find any major issues\. :rocket:\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`/,
+  );
+  if (!prefixMatch || !REVIEWED_COMMIT_PREFIX_RE.test(prefixMatch[1])) return null;
+  const core = `${CLEAN_REVIEW_HEADING}\n\n**Reviewed commit:** \`${prefixMatch[1]}\``;
+  if (normalizedBody !== core && normalizedBody !== `${core}\n\n${CLEAN_REVIEW_INFO_FOOTER}`) {
+    return null;
+  }
+  return prefixMatch[1];
+}
+
+function hasBoundCleanReviewComment({
+  boundRequests,
+  headSha,
+  headTimestamp,
+  reviewEvidenceTimestamp,
+  reviewerCompletionComments,
+  reviewerLogin,
+}) {
+  if (!Array.isArray(reviewerCompletionComments)) {
+    throw new Error("Automated reviewer completion-comment response is missing");
+  }
+  if (boundRequests.length === 0) return false;
+
+  const latestRequestTimestamp = Math.max(...boundRequests.map(({ updatedTimestamp }) => updatedTimestamp));
+  let latestReviewerComment = null;
+  for (const comment of reviewerCompletionComments) {
+    const actorLogin = normalizeLogin(comment?.user?.login, "Reviewer completion-comment actor identity");
+    if (actorLogin !== reviewerLogin) continue;
+    if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
+      throw new Error("Reviewer completion-comment identity is missing or malformed");
     }
-    for (const reaction of comment.reactions) {
-      const reactionTimestamp = validReviewerReaction(
-        reaction,
-        reviewerLogin,
-        headTimestamp,
-        "Review-request comment reaction",
-      );
-      if (reactionTimestamp !== null && reactionTimestamp > commentUpdatedTimestamp) return true;
+    const createdTimestamp = timestampMilliseconds(
+      comment.created_at,
+      "Reviewer completion-comment creation timestamp",
+    );
+    const updatedTimestamp = timestampMilliseconds(
+      comment.updated_at,
+      "Reviewer completion-comment update timestamp",
+    );
+    if (updatedTimestamp < createdTimestamp) {
+      throw new Error("Reviewer completion-comment timestamps are malformed");
+    }
+    if (
+      latestReviewerComment === null ||
+      updatedTimestamp > latestReviewerComment.updatedTimestamp ||
+      (updatedTimestamp === latestReviewerComment.updatedTimestamp && comment.id > latestReviewerComment.id)
+    ) {
+      latestReviewerComment = {
+        body: comment.body,
+        createdTimestamp,
+        id: comment.id,
+        updatedTimestamp,
+      };
     }
   }
-  return false;
+  if (latestReviewerComment === null) return false;
+
+  const reviewedPrefix = cleanReviewCommitPrefix(latestReviewerComment.body);
+  return (
+    reviewedPrefix !== null &&
+    headSha.startsWith(reviewedPrefix) &&
+    latestReviewerComment.createdTimestamp === latestReviewerComment.updatedTimestamp &&
+    latestReviewerComment.createdTimestamp === headTimestamp &&
+    latestReviewerComment.createdTimestamp > latestRequestTimestamp &&
+    latestReviewerComment.createdTimestamp > reviewEvidenceTimestamp
+  );
 }
 
 export function evaluateReviewCompletion({
@@ -238,6 +402,7 @@ export function evaluateReviewCompletion({
   releaseOperatorLogin,
   reviews,
   reviewRequestComments,
+  reviewerCompletionComments,
   reviewThreads,
 }) {
   const headSha = assertCurrentPullRequest(pullRequest, expectedHeadSha);
@@ -265,25 +430,27 @@ export function evaluateReviewCompletion({
     };
   }
 
-  const evidenceTimestamp = Math.max(
-    pullRequestActivityTimestamp(pullRequest),
-    reviewEvidence?.submittedAt ?? 0,
-  );
+  const boundRequests = boundReviewRequests({
+    headSha,
+    releaseOperatorLogin,
+    reviewRequestComments,
+  });
   if (
-    hasBoundRequestReaction({
+    hasBoundCleanReviewComment({
+      boundRequests,
       headSha,
-      headTimestamp: evidenceTimestamp,
-      releaseOperatorLogin,
-      reviewRequestComments,
+      headTimestamp: pullRequestActivityTimestamp(pullRequest),
+      reviewEvidenceTimestamp: reviewEvidence?.submittedAt ?? 0,
+      reviewerCompletionComments,
       reviewerLogin,
     })
   ) {
     return {
-      description: "Reviewer +1 is bound to the exact-head operator request; no unresolved threads",
+      description: "Reviewer clean-result comment is bound to the exact-head request; no unresolved threads",
       headSha,
       required: true,
       state: "success",
     };
   }
-  pending("Automated reviewer has no exact-head approval or exact-head operator-request +1 reaction");
+  pending("Automated reviewer has no exact-head approval or bound clean-result comment");
 }

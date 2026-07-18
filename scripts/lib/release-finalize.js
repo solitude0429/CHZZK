@@ -194,6 +194,86 @@ function assertStagingWorkflowComplete({ cwd, repository, runCommand, sourceSha 
   }
 }
 
+function assertReleaseCompatibilityComplete({ cwd, defaultBranch, repository, runCommand, sourceSha, tag }) {
+  const endpoint =
+    `repos/${repository}/actions/workflows/release-compatibility.yml/runs?` +
+    `branch=${encodeURIComponent(defaultBranch)}&event=workflow_dispatch&` +
+    `head_sha=${sourceSha}&per_page=100`;
+  const response = parseJson(
+    runCommand("gh", paginatedApiArgs("GET", endpoint), { cwd }),
+    "Signed compatibility workflow lookup",
+  );
+  const pages = Array.isArray(response) ? response : [response];
+  const expectedTitle = `Signed Firefox compatibility ${tag}`;
+  const runs = pages
+    .flatMap((page) => {
+      if (!Array.isArray(page?.workflow_runs)) {
+        throw new Error("Signed compatibility workflow lookup returned malformed pagination");
+      }
+      return page.workflow_runs;
+    })
+    .filter((run) => run?.display_title === expectedTitle);
+  if (runs.length === 0) {
+    throw new Error(
+      "Release finalization could not prove a manually dispatched signed compatibility workflow for the exact draft tag",
+    );
+  }
+
+  const runIds = new Set();
+  const runCoordinates = new Set();
+  for (const run of runs) {
+    if (
+      run.name !== "Signed Firefox compatibility" ||
+      run.event !== "workflow_dispatch" ||
+      run.head_branch !== defaultBranch ||
+      String(run.head_sha ?? "").toLowerCase() !== sourceSha ||
+      run.path !== ".github/workflows/release-compatibility.yml"
+    ) {
+      throw new Error("Signed compatibility workflow lookup returned a mismatched source or workflow");
+    }
+    if (
+      !Number.isSafeInteger(run.id) ||
+      run.id <= 0 ||
+      !Number.isSafeInteger(run.run_number) ||
+      run.run_number <= 0 ||
+      !Number.isSafeInteger(run.run_attempt) ||
+      run.run_attempt <= 0 ||
+      runIds.has(run.id)
+    ) {
+      throw new Error("Signed compatibility workflow lookup returned malformed run identity");
+    }
+    const coordinate = `${run.run_number}:${run.run_attempt}`;
+    if (runCoordinates.has(coordinate)) {
+      throw new Error("Signed compatibility workflow lookup returned duplicate run ordering");
+    }
+    runIds.add(run.id);
+    runCoordinates.add(coordinate);
+    if (run.status !== "completed") {
+      throw new Error(
+        "Release finalization requires every exact-tag signed compatibility workflow to be complete",
+      );
+    }
+    if (typeof run.conclusion !== "string" || !run.conclusion) {
+      throw new Error("Signed compatibility workflow lookup returned malformed completion state");
+    }
+  }
+  const newestRun = runs.reduce((latest, run) => {
+    if (!latest) return run;
+    if (run.run_number !== latest.run_number) {
+      return run.run_number > latest.run_number ? run : latest;
+    }
+    if (run.run_attempt !== latest.run_attempt) {
+      return run.run_attempt > latest.run_attempt ? run : latest;
+    }
+    return run.id > latest.id ? run : latest;
+  }, null);
+  if (newestRun.conclusion !== "success") {
+    throw new Error(
+      "Release finalization requires the newest exact-tag signed compatibility workflow to succeed",
+    );
+  }
+}
+
 function immutableReleasesEnabled({ cwd, repository, runCommand }) {
   let setting;
   try {
@@ -303,6 +383,14 @@ export async function finalizeStagedReleaseFromAdminPreflight({
       runCommand,
       sourceSha: context.sourceSha,
     });
+    assertReleaseCompatibilityComplete({
+      cwd,
+      defaultBranch: context.defaultBranch,
+      repository,
+      runCommand,
+      sourceSha: context.sourceSha,
+      tag,
+    });
     const publishReadyState = await inspectReleaseState(inspectionInput);
     if (assertStagedState(publishReadyState) !== "draft") {
       throw new Error("Staged release changed during the immediate pre-publication inspection");
@@ -314,6 +402,14 @@ export async function finalizeStagedReleaseFromAdminPreflight({
     );
     const releaseId = verifiedReleaseId(publishReadyState, "Publish-ready");
     immutableReleasesEnabled({ cwd, repository, runCommand });
+    assertReleaseCompatibilityComplete({
+      cwd,
+      defaultBranch: context.defaultBranch,
+      repository,
+      runCommand,
+      sourceSha: context.sourceSha,
+      tag,
+    });
     // GitHub does not support a conditional release PATCH. Targeting the exact inspected release ID
     // prevents tag substitution; the documented exclusive same-authority writer boundary still
     // covers mutation of that same draft between this last inspection and the PATCH.

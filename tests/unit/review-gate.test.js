@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  assertStablePullRequestSnapshot,
+  assertStableReviewEvidenceSnapshots,
   changedFilePaths,
   evaluateReviewCompletion,
+  isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "../../scripts/lib/review-gate.js";
 
@@ -12,6 +15,24 @@ const staleSha = "e".repeat(40);
 const reviewerLogin = "chatgpt-codex-connector[bot]";
 const operatorLogin = "sole-owner";
 const headTimestamp = "2026-07-15T10:00:00Z";
+const cleanReviewInfoFooter = [
+  "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+  "<br/>",
+  "",
+  "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+  "- Open a pull request for review",
+  "- Mark a draft as ready",
+  '- Comment "@codex review".',
+  "",
+  "If Codex has suggestions, it will comment; otherwise it will react with 👍.",
+  "",
+  "",
+  "",
+  "",
+  'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".',
+  "            ",
+  "</details>",
+].join("\n");
 
 function exactReview(overrides = {}) {
   return {
@@ -43,6 +64,17 @@ function reviewRequest(overrides = {}) {
   };
 }
 
+function cleanReviewComment(overrides = {}) {
+  return {
+    body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+    created_at: "2026-07-15T10:02:00Z",
+    id: 100,
+    updated_at: "2026-07-15T10:02:00Z",
+    user: { login: reviewerLogin },
+    ...overrides,
+  };
+}
+
 function sensitiveEvaluation(overrides = {}) {
   return {
     automatedReviewLogin: reviewerLogin,
@@ -60,7 +92,34 @@ function sensitiveEvaluation(overrides = {}) {
     releaseOperatorLogin: operatorLogin,
     reviews: [exactReview()],
     reviewRequestComments: [],
+    reviewerCompletionComments: [],
     reviewThreads: [{ isResolved: true }],
+    ...overrides,
+  };
+}
+
+function reviewEvidenceSnapshot(overrides = {}) {
+  const pullRequest = {
+    draft: false,
+    head: { sha: headSha },
+    labels: [],
+    number: 42,
+    state: "open",
+    updated_at: headTimestamp,
+  };
+  return {
+    issueComments: [],
+    pullRequestAfter: { ...pullRequest },
+    pullRequestBefore: { ...pullRequest },
+    reviewerCompletionComments: [],
+    reviewRequestComments: [
+      reviewRequest({
+        id: 10,
+        reactions: [plusOne({ id: 20 })],
+      }),
+    ],
+    reviews: [exactReview({ id: 30 })],
+    reviewThreads: [{ id: "thread-40", isResolved: true }],
     ...overrides,
   };
 }
@@ -159,7 +218,7 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("rejects a pre-bound reaction when GitHub observed the exact head later", () => {
+  it("rejects a reaction bound to an exact-head request", () => {
     assert.throws(
       () =>
         evaluateReviewCompletion(
@@ -187,7 +246,7 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("requires a reaction to be strictly later than both PR activity and request-comment edits", () => {
+  it("does not revive request reactions after PR or request-comment activity", () => {
     for (const overrides of [
       {
         pullRequest: {
@@ -220,29 +279,25 @@ describe("exact-head release and security review completion", () => {
     }
   });
 
-  it("prefers a +1 bound to an operator comment containing the full exact head SHA", () => {
-    assert.deepEqual(
-      evaluateReviewCompletion(
-        sensitiveEvaluation({
-          issueReactions: [],
-          reviewRequestComments: [
-            {
-              body: `Codex review request for ${headSha}`,
-              created_at: "2026-07-15T10:00:30Z",
-              reactions: [plusOne()],
-              updated_at: "2026-07-15T10:00:30Z",
-              user: { login: operatorLogin },
-            },
-          ],
-          reviews: [],
-        }),
-      ),
-      {
-        description: "Reviewer +1 is bound to the exact-head operator request; no unresolved threads",
-        headSha,
-        required: true,
-        state: "success",
-      },
+  it("rejects request reactions regardless of exact or stale SHA binding", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            issueReactions: [],
+            reviewRequestComments: [
+              {
+                body: `Codex review request for ${headSha}`,
+                created_at: "2026-07-15T10:00:30Z",
+                reactions: [plusOne()],
+                updated_at: "2026-07-15T10:00:30Z",
+                user: { login: operatorLogin },
+              },
+            ],
+            reviews: [],
+          }),
+        ),
+      /no exact-head approval|bound clean-result/i,
     );
 
     assert.throws(
@@ -265,7 +320,7 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("requires a clean reaction to postdate an exact-head findings review", () => {
+  it("does not let a later request reaction override an exact-head findings review", () => {
     const request = {
       body: `Codex review request for ${headSha}`,
       created_at: "2026-07-15T10:00:30Z",
@@ -284,20 +339,219 @@ describe("exact-head release and security review completion", () => {
       /no exact-head approval|exact-head operator request/i,
     );
 
-    assert.equal(
-      evaluateReviewCompletion(
-        sensitiveEvaluation({
-          reviewRequestComments: [
-            {
-              ...request,
-              reactions: [plusOne({ created_at: "2026-07-15T10:03:00Z" })],
-            },
-          ],
-          reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:02:00Z" })],
-        }),
-      ).state,
-      "success",
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            reviewRequestComments: [
+              {
+                ...request,
+                reactions: [plusOne({ created_at: "2026-07-15T10:03:00Z" })],
+              },
+            ],
+            reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:02:00Z" })],
+          }),
+        ),
+      /no exact-head approval|bound clean-result/i,
     );
+  });
+
+  it("accepts the reviewer's canonical clean-result comment only when bound to the exact head", () => {
+    const base = {
+      pullRequest: {
+        draft: false,
+        head: { sha: headSha },
+        number: 42,
+        state: "open",
+        updated_at: "2026-07-15T10:02:00Z",
+      },
+      reviewRequestComments: [reviewRequest({ reactions: [] })],
+      reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:01:00Z" })],
+    };
+    for (const body of [
+      cleanReviewComment().body,
+      `${cleanReviewComment().body}\n\n${cleanReviewInfoFooter}`,
+      `${cleanReviewComment().body}\n`,
+    ]) {
+      assert.deepEqual(
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            ...base,
+            reviewerCompletionComments: [cleanReviewComment({ body })],
+          }),
+        ),
+        {
+          description:
+            "Reviewer clean-result comment is bound to the exact-head request; no unresolved threads",
+          headSha,
+          required: true,
+          state: "success",
+        },
+      );
+    }
+  });
+
+  it("rejects clean-result comments that are stale, ambiguous, edited, late-invalidated, or unbound", () => {
+    const base = {
+      pullRequest: {
+        draft: false,
+        head: { sha: headSha },
+        number: 42,
+        state: "open",
+        updated_at: "2026-07-15T10:02:00Z",
+      },
+      reviewerCompletionComments: [cleanReviewComment()],
+      reviewRequestComments: [reviewRequest({ reactions: [] })],
+      reviews: [],
+    };
+    const cases = [
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${staleSha.slice(0, 10)}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${headSha.slice(0, 9)}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Found a major issue.\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\`\n**Reviewed commit:** \`${headSha}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `${cleanReviewComment().body}\n\n[P1] Critical issue found`,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `${cleanReviewComment().body}\n\n${cleanReviewInfoFooter}\nUnexpected caveat`,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [cleanReviewComment({ user: { login: "different-reviewer[bot]" } })],
+      },
+      {
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:03:00Z" },
+        reviewerCompletionComments: [cleanReviewComment({ updated_at: "2026-07-15T10:03:00Z" })],
+      },
+      {
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:03:00Z" },
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            created_at: "2026-07-15T10:00:30Z",
+            updated_at: "2026-07-15T10:00:30Z",
+          }),
+        ],
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:00:30Z" },
+      },
+      {
+        reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:03:00Z" })],
+      },
+      {
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:03:00Z" },
+        reviewerCompletionComments: [
+          cleanReviewComment(),
+          cleanReviewComment({
+            body: "Automated review could not complete",
+            created_at: "2026-07-15T10:03:00Z",
+            id: 101,
+            updated_at: "2026-07-15T10:03:00Z",
+          }),
+        ],
+      },
+      {
+        reviewRequestComments: [
+          reviewRequest({ body: `Codex review request for ${staleSha}`, reactions: [] }),
+        ],
+      },
+    ];
+    for (const overrides of cases) {
+      assert.throws(
+        () => evaluateReviewCompletion(sensitiveEvaluation({ ...base, ...overrides })),
+        /no exact-head approval|bound clean-result|missing|malformed/i,
+      );
+    }
+  });
+
+  it("rejects a PR snapshot whose head or activity changes during evidence collection", () => {
+    const before = {
+      draft: false,
+      head: { sha: headSha },
+      number: 42,
+      state: "open",
+      updated_at: headTimestamp,
+    };
+    assert.equal(
+      assertStablePullRequestSnapshot({ after: { ...before }, before, expectedHeadSha: headSha }),
+      headSha,
+    );
+
+    for (const after of [
+      { ...before, head: { sha: staleSha } },
+      { ...before, updated_at: "2026-07-15T10:00:01Z" },
+    ]) {
+      assert.throws(
+        () => assertStablePullRequestSnapshot({ after, before, expectedHeadSha: headSha }),
+        (error) =>
+          isPendingReviewGateError(error) && /changed during evidence collection/i.test(error.message),
+      );
+    }
+  });
+
+  it("rejects same-second review, thread, or comment changes across repeated evidence collection", () => {
+    const before = reviewEvidenceSnapshot();
+    assert.equal(
+      assertStableReviewEvidenceSnapshots({
+        after: reviewEvidenceSnapshot(),
+        before,
+        expectedHeadSha: headSha,
+      }),
+      headSha,
+    );
+
+    const changedSnapshots = [
+      reviewEvidenceSnapshot({
+        reviews: [
+          exactReview({ id: 30 }),
+          exactReview({ id: 31, state: "COMMENTED", submitted_at: headTimestamp }),
+        ],
+      }),
+      reviewEvidenceSnapshot({
+        reviewThreads: [{ id: "thread-40", isResolved: false }],
+      }),
+      reviewEvidenceSnapshot({
+        issueComments: [{ body: "new same-second activity", id: 50 }],
+      }),
+    ];
+    for (const after of changedSnapshots) {
+      assert.throws(
+        () => assertStableReviewEvidenceSnapshots({ after, before, expectedHeadSha: headSha }),
+        (error) =>
+          isPendingReviewGateError(error) && /changed during repeated collection/i.test(error.message),
+      );
+    }
   });
 
   it("rejects otherwise valid evidence from the wrong actor", () => {
@@ -338,6 +592,16 @@ describe("exact-head release and security review completion", () => {
         ],
         reviews: [],
       },
+      {
+        reviewerCompletionComments: [cleanReviewComment({ id: 0 })],
+        reviewRequestComments: [reviewRequest({ reactions: [] })],
+        reviews: [],
+      },
+      {
+        reviewerCompletionComments: [cleanReviewComment({ created_at: "not-a-date" })],
+        reviewRequestComments: [reviewRequest({ reactions: [] })],
+        reviews: [],
+      },
       { automatedReviewLogin: "" },
       { releaseOperatorLogin: "" },
     ];
@@ -373,6 +637,7 @@ describe("exact-head release and security review completion", () => {
           releaseOperatorLogin: "",
           reviews: null,
           reviewRequestComments: null,
+          reviewerCompletionComments: null,
           reviewThreads: null,
         }),
       ),

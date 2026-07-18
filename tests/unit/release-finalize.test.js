@@ -32,7 +32,27 @@ function makeSourceTree() {
   return cwd;
 }
 
+function compatibilityRun(overrides = {}) {
+  return {
+    conclusion: "success",
+    display_title: `Signed Firefox compatibility v${version}`,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    head_sha: sourceSha,
+    id: 9101,
+    name: "Signed Firefox compatibility",
+    path: ".github/workflows/release-compatibility.yml",
+    run_attempt: 1,
+    run_number: 43,
+    status: "completed",
+    ...overrides,
+  };
+}
+
 function commandHarness({
+  compatibilityRunPages = null,
+  compatibilityRunResponses = null,
+  compatibilityRuns = [compatibilityRun()],
   immutableEnabled,
   publishError = null,
   workflowRunPages = null,
@@ -48,6 +68,7 @@ function commandHarness({
   ],
 }) {
   const calls = [];
+  let compatibilityLookupCount = 0;
   const run = (command, args) => {
     calls.push({ args: [...args], command });
     if (command === "git" && args.join(" ") === "rev-parse HEAD") return `${sourceSha}\n`;
@@ -75,6 +96,18 @@ function commandHarness({
         `repos/${repository}/actions/workflows/sign-unlisted.yml/runs?head_sha=${sourceSha}&per_page=100`
     ) {
       return `${JSON.stringify(workflowRunPages ?? { workflow_runs: workflowRuns })}\n`;
+    }
+    if (
+      args[0] === "api" &&
+      endpoint ===
+        `repos/${repository}/actions/workflows/release-compatibility.yml/runs?branch=main&event=workflow_dispatch&head_sha=${sourceSha}&per_page=100`
+    ) {
+      const response = compatibilityRunResponses
+        ? compatibilityRunResponses[compatibilityLookupCount]
+        : (compatibilityRunPages ?? { workflow_runs: compatibilityRuns });
+      compatibilityLookupCount += 1;
+      if (response === undefined) throw new Error("unexpected extra compatibility workflow lookup");
+      return `${JSON.stringify(response)}\n`;
     }
     if (args[0] === "api" && endpoint === `repos/${repository}/immutable-releases`) {
       return `${JSON.stringify({ enabled: immutableEnabled })}\n`;
@@ -1462,6 +1495,120 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
     }
   });
 
+  it("refuses to publish without a manual compatibility run for the exact draft tag", async () => {
+    const cwd = makeSourceTree();
+    const harness = commandHarness({
+      compatibilityRuns: [compatibilityRun({ display_title: "Signed Firefox compatibility v0.1.6" })],
+      immutableEnabled: true,
+    });
+    try {
+      await assert.rejects(
+        finalizeStagedReleaseFromAdminPreflight({
+          cwd,
+          inspectReleaseState: stagedInspection,
+          prepareArtifacts,
+          repository,
+          runCommand: harness.run,
+        }),
+        /manually dispatched.*exact draft tag/i,
+      );
+      const lookup = harness.calls.find(({ args }) =>
+        args.some((argument) => argument.includes("actions/workflows/release-compatibility.yml/runs?")),
+      );
+      assert.equal(lookup.args.includes("--paginate"), true);
+      assert.equal(lookup.args.includes("--slurp"), true);
+      assert.equal(harness.calls.some(isReleasePublicationCall), false);
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+    }
+  });
+
+  it("refuses to publish until every exact-tag compatibility run is complete", async () => {
+    const cwd = makeSourceTree();
+    const harness = commandHarness({
+      compatibilityRuns: [compatibilityRun({ conclusion: null, status: "in_progress" })],
+      immutableEnabled: true,
+    });
+    try {
+      await assert.rejects(
+        finalizeStagedReleaseFromAdminPreflight({
+          cwd,
+          inspectReleaseState: stagedInspection,
+          prepareArtifacts,
+          repository,
+          runCommand: harness.run,
+        }),
+        /exact-tag signed compatibility workflow.*complete/i,
+      );
+      assert.equal(harness.calls.some(isReleasePublicationCall), false);
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+    }
+  });
+
+  it("refuses to publish when the newest exact-tag compatibility run failed", async () => {
+    const cwd = makeSourceTree();
+    const harness = commandHarness({
+      compatibilityRuns: [
+        compatibilityRun(),
+        compatibilityRun({ conclusion: "failure", id: 9102, run_number: 44 }),
+      ],
+      immutableEnabled: true,
+    });
+    try {
+      await assert.rejects(
+        finalizeStagedReleaseFromAdminPreflight({
+          cwd,
+          inspectReleaseState: stagedInspection,
+          prepareArtifacts,
+          repository,
+          runCommand: harness.run,
+        }),
+        /newest exact-tag signed compatibility workflow.*succeed/i,
+      );
+      assert.equal(harness.calls.some(isReleasePublicationCall), false);
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+    }
+  });
+
+  it("rechecks compatibility immediately before publication and blocks a newly dispatched run", async () => {
+    const cwd = makeSourceTree();
+    const harness = commandHarness({
+      compatibilityRunResponses: [
+        { workflow_runs: [compatibilityRun()] },
+        {
+          workflow_runs: [
+            compatibilityRun(),
+            compatibilityRun({ conclusion: null, id: 9102, run_number: 44, status: "queued" }),
+          ],
+        },
+      ],
+      immutableEnabled: true,
+    });
+    try {
+      await assert.rejects(
+        finalizeStagedReleaseFromAdminPreflight({
+          cwd,
+          inspectReleaseState: stagedInspection,
+          prepareArtifacts,
+          repository,
+          runCommand: harness.run,
+        }),
+        /exact-tag signed compatibility workflow.*complete/i,
+      );
+      assert.equal(
+        harness.calls.filter(({ args }) =>
+          args.some((argument) => argument.includes("actions/workflows/release-compatibility.yml/runs?")),
+        ).length,
+        2,
+      );
+      assert.equal(harness.calls.some(isReleasePublicationCall), false);
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+    }
+  });
+
   it("refuses to publish when the just-in-time administrator check says immutable releases are disabled", async () => {
     const cwd = makeSourceTree();
     const harness = commandHarness({ immutableEnabled: false });
@@ -1610,6 +1757,17 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         args.includes(`repos/${repository}/releases/6001`),
       );
       const attestationIndex = harness.calls.findLastIndex(({ args }) => args[0] === "attestation");
+      const compatibilityIndices = harness.calls
+        .map(({ args }, index) =>
+          args.some((argument) => argument.includes("actions/workflows/release-compatibility.yml/runs?"))
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      assert.equal(compatibilityIndices.length, 2);
+      assert.equal(compatibilityIndices[0] < immutableIndex, true);
+      assert.equal(immutableIndex < compatibilityIndices[1], true);
+      assert.equal(compatibilityIndices[1] < publishIndex, true);
       assert.equal(attestationIndex < immutableIndex, true);
       assert.equal(immutableIndex < publishIndex, true);
     } finally {

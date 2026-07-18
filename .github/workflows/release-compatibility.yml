@@ -1,0 +1,274 @@
+name: Signed Firefox compatibility
+run-name: Signed Firefox compatibility ${{ inputs.tag || github.event.release.tag_name || github.event.pull_request.head.sha || github.sha }}
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-compatibility.yml"
+      - "manifest.json"
+      - "package.json"
+      - "package-lock.json"
+      - "policy/compatibility-policy.json"
+      - "scripts/firefox-signed-smoke.js"
+      - "scripts/setup-firefox-signed-smoke.js"
+      - "scripts/lib/amo-client.js"
+      - "scripts/lib/compatibility-policy.js"
+      - "scripts/lib/firefox-signed-smoke.js"
+      - "scripts/lib/release-artifacts.js"
+      - "scripts/lib/release-version.js"
+      - "scripts/verify-signed-release-structure.js"
+      - "tests/unit/compatibility-policy.test.js"
+      - "tests/unit/compatibility-workflow.test.js"
+      - "tests/unit/firefox-signed-smoke.test.js"
+  release:
+    types: [published]
+  schedule:
+    - cron: "41 4 * * 3"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Draft or published canonical release tag; blank selects the latest published release
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-firefox-compatibility-${{ inputs.tag || github.event.release.tag_name || github.event.pull_request.number || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      draft: ${{ steps.release.outputs.draft }}
+      immutable: ${{ steps.release.outputs.immutable }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - id: release
+        name: Resolve an exact draft or published release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_TAG: ${{ github.event.release.tag_name || '' }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          REQUESTED_TAG: ${{ inputs.tag || '' }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            test "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}"
+            test "$REF_PROTECTED" = "true"
+          fi
+
+          TAG="$REQUESTED_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$EVENT_TAG"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --json tagName --jq .tagName)
+          fi
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]]
+          test "$(gh release view "$TAG" --json tagName --jq .tagName)" = "$TAG"
+          test "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = "false"
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+          IS_IMMUTABLE=$(gh release view "$TAG" --json isImmutable --jq .isImmutable)
+          case "$GITHUB_EVENT_NAME" in
+            workflow_dispatch)
+              case "$IS_DRAFT:$IS_IMMUTABLE" in
+                true:false|false:true) ;;
+                *) echo "Manual compatibility checks require an exact draft or immutable release" >&2; exit 1 ;;
+              esac
+              ;;
+            release|schedule)
+              test "$IS_DRAFT" = "false"
+              test "$IS_IMMUTABLE" = "true"
+              ;;
+            pull_request)
+              test "$IS_DRAFT" = "false"
+              ;;
+            *) exit 1 ;;
+          esac
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            SOURCE_SHA=$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)
+          else
+            TAG_OBJECT_TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
+            SOURCE_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
+            if [ "$TAG_OBJECT_TYPE" = "tag" ]; then
+              test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SOURCE_SHA}" --jq .object.type)" = "commit"
+              SOURCE_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${SOURCE_SHA}" --jq .object.sha)
+            else
+              test "$TAG_OBJECT_TYPE" = "commit"
+            fi
+          fi
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$IS_DRAFT" = "true" ]; then
+            test "$SOURCE_SHA" = "$GITHUB_SHA"
+          fi
+
+          VERSION="${TAG#v}"
+          EXPECTED_ASSETS=$(printf '%s\n' \
+            "chzzk-${VERSION}.zip" \
+            "chzzk-${VERSION}-release-metadata.json" \
+            "chzzk-${VERSION}-signed.xpi" | sort)
+          ACTUAL_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
+          test "$ACTUAL_ASSETS" = "$EXPECTED_ASSETS"
+
+          {
+            echo "draft=${IS_DRAFT}"
+            echo "immutable=${IS_IMMUTABLE}"
+            echo "source_sha=${SOURCE_SHA}"
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+  fetch-release:
+    needs: resolve-release
+    permissions:
+      attestations: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the exact signed release inputs in the credential-isolated job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/gh
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          /usr/bin/gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --pattern "chzzk-${VERSION}.zip" \
+            --pattern "chzzk-${VERSION}-release-metadata.json" \
+            --pattern "chzzk-${VERSION}-signed.xpi"
+          test "$(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | wc -l)" = "3"
+      - if: needs.resolve-release.outputs.draft == 'true' || needs.resolve-release.outputs.immutable == 'true'
+        name: Verify release-asset attestations in the credential-isolated job
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/gh
+          for ASSET in \
+            "$RUNNER_TEMP/release-assets/chzzk-${VERSION}.zip" \
+            "$RUNNER_TEMP/release-assets/chzzk-${VERSION}-release-metadata.json" \
+            "$RUNNER_TEMP/release-assets/chzzk-${VERSION}-signed.xpi"
+          do
+            /usr/bin/gh attestation verify "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$EXPECTED_SOURCE_SHA" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          if-no-files-found: error
+          name: signed-release-inputs-${{ needs.resolve-release.outputs.source_sha }}
+          path: ${{ runner.temp }}/release-assets
+          retention-days: 1
+
+  signed-smoke:
+    needs: [resolve-release, fetch-release]
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            profile: minimum
+            runner: ubuntu-24.04
+          - architecture: x64
+            profile: current
+            runner: ubuntu-24.04
+          - architecture: arm64
+            profile: minimum
+            runner: ubuntu-24.04-arm
+          - architecture: arm64
+            profile: current
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-inputs-${{ needs.resolve-release.outputs.source_sha }}
+          path: ${{ runner.temp }}/release-assets
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'release' && needs.resolve-release.outputs.source_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - name: Require the exact compatibility-harness source tree and architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          EXPECTED_HARNESS_SHA: ${{ github.event_name == 'release' && needs.resolve-release.outputs.source_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HARNESS_SHA"
+          test "$(node -p 'process.arch')" = "$EXPECTED_ARCHITECTURE"
+          git diff --exit-code
+          git diff --cached --exit-code
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - name: Verify the exact signed release inputs without GitHub credentials
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { assertReleaseMetadata } from "./scripts/lib/release-artifacts.js";
+
+          const metadata = JSON.parse(
+            readFileSync(
+              `${process.env.RELEASE_ASSETS_DIR}/chzzk-${process.env.VERSION}-release-metadata.json`,
+              "utf8",
+            ),
+          );
+          assertReleaseMetadata(metadata);
+          if (metadata.version !== process.env.VERSION) {
+            throw new Error("release metadata version mismatch");
+          }
+          if (metadata.sourceRepository !== process.env.GITHUB_REPOSITORY) {
+            throw new Error("release metadata repository mismatch");
+          }
+          if (metadata.sourceDigest !== process.env.EXPECTED_SOURCE_SHA) {
+            throw new Error("release metadata is not bound to the resolved release source commit");
+          }
+          NODE
+          CHZZK_RELEASE_METADATA="${RELEASE_ASSETS_DIR}/chzzk-${VERSION}-release-metadata.json" \
+            CHZZK_SIGNED_XPI="${RELEASE_ASSETS_DIR}/chzzk-${VERSION}-signed.xpi" \
+            CHZZK_UNSIGNED_XPI="${RELEASE_ASSETS_DIR}/chzzk-${VERSION}.zip" \
+            npm run verify:signed-release
+      - name: Prepare checksum-pinned stock Firefox
+        env:
+          CHZZK_SIGNED_SMOKE_PROFILE: ${{ matrix.profile }}
+          CHZZK_SIGNED_SMOKE_TOOLS_DIR: dist/signed-smoke-tools-${{ matrix.profile }}-${{ matrix.architecture }}
+        run: npm run setup:firefox-signed-smoke
+      - name: Permanently install the AMO-signed XPI with default signature enforcement
+        env:
+          CHZZK_RELEASE_METADATA: ${{ runner.temp }}/release-assets/chzzk-${{ needs.resolve-release.outputs.version }}-release-metadata.json
+          CHZZK_SIGNED_SMOKE_MODE: install
+          CHZZK_SIGNED_XPI: ${{ runner.temp }}/release-assets/chzzk-${{ needs.resolve-release.outputs.version }}-signed.xpi
+          FIREFOX_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools-${{ matrix.profile }}-${{ matrix.architecture }}/firefox/firefox
+          GECKODRIVER_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools-${{ matrix.profile }}-${{ matrix.architecture }}/geckodriver
+        run: npm run test:firefox-signed-smoke

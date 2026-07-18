@@ -1,0 +1,51 @@
+{
+  "android": {
+    "minimumVersion": "142.0",
+    "releaseGate": "manual-smoke"
+  },
+  "desktop": {
+    "minimumVersion": "140.0",
+    "signedSmokeProfiles": {
+      "current": {
+        "architectures": {
+          "arm64": {
+            "archiveArchitecture": "linux-aarch64",
+            "sha512": "774a05b4512bb25c32a242f023803fdd8c36411dc618a7a352aca683cb9c7222dd71206fe253ed95511c758c90e6191a17b3dfe1a15a40d6d7efd3a543a377e9"
+          },
+          "x64": {
+            "archiveArchitecture": "linux-x86_64",
+            "sha512": "414b060f5e28e1b9c8818dee51896a81bd273c6cf6a4cffa53c4d7214f2c1d26d0416b9088518294435a7ead014a320a8deb910e93f3345ab6fbbbe596b4a336"
+          }
+        },
+        "firefoxVersion": "152.0.6"
+      },
+      "minimum": {
+        "architectures": {
+          "arm64": {
+            "archiveArchitecture": "linux-aarch64",
+            "sha512": "8c281809e4cf702f83187da6ff7be95311a4a348d33ee332e3b99b1865fd44a936345896ce24360b9d115dccf883e6045430a1f848c419fc511f8d93ec95d228"
+          },
+          "x64": {
+            "archiveArchitecture": "linux-x86_64",
+            "sha512": "481bb473c1c8279626e25d7253ee1735ca42e6898a5a664b21f1189d2779c2ecb555536eb46bcb2ac88066c286e831e17b23b877d7cd2d3b650083198c6dedc6"
+          }
+        },
+        "firefoxVersion": "140.0"
+      }
+    }
+  },
+  "geckodriver": {
+    "architectures": {
+      "arm64": {
+        "asset": "geckodriver-v0.37.0-linux-aarch64.tar.gz",
+        "sha256": "a16bc29598e1776da78b45dc78a6aa876abe125f5d82a5c8b9d7366204ad4158"
+      },
+      "x64": {
+        "asset": "geckodriver-v0.37.0-linux64.tar.gz",
+        "sha256": "90d4e33bd9816684400c160d1309aaffec23a3f65103511d5a62d8501062e548"
+      }
+    },
+    "version": "0.37.0"
+  },
+  "schemaVersion": 1
+}

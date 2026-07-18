@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 import {
+  assertStableReviewEvidenceSnapshots,
   changedFilePaths,
   evaluateReviewCompletion,
-  hasExactHeadReviewerApproval,
   isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "./lib/review-gate.js";
@@ -54,7 +54,7 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
         pullRequest(number: $number) {
           headRefOid
           reviewThreads(first: 100, after: $after) {
-            nodes { isResolved }
+            nodes { id isResolved }
             pageInfo { endCursor hasNextPage }
           }
         }
@@ -83,7 +83,13 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
     if (String(pullRequest?.headRefOid ?? "").toLowerCase() !== expectedHeadSha) {
       throw new Error("Review-thread query is stale for the current pull request head");
     }
-    if (!Array.isArray(connection?.nodes) || typeof connection?.pageInfo?.hasNextPage !== "boolean") {
+    if (
+      !Array.isArray(connection?.nodes) ||
+      connection.nodes.some(
+        (thread) => typeof thread?.id !== "string" || !thread.id || typeof thread.isResolved !== "boolean",
+      ) ||
+      typeof connection?.pageInfo?.hasNextPage !== "boolean"
+    ) {
       throw new Error("Review-thread query exposes no usable completion state");
     }
     threads.push(...connection.nodes);
@@ -106,29 +112,96 @@ function containsFullSha(body, headSha) {
   );
 }
 
-function listReviewRequestComments(repository, pullNumber, headSha, releaseOperatorLogin) {
+function listReviewCommentEvidence(
+  repository,
+  pullNumber,
+  headSha,
+  releaseOperatorLogin,
+  automatedReviewLogin,
+) {
   const comments = paginatedArrays(
     `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
     "Pull request comment listing",
   );
   const operatorLogin = String(releaseOperatorLogin ?? "").toLowerCase();
+  const reviewerLogin = String(automatedReviewLogin ?? "").toLowerCase();
   const requests = comments.filter(
     (comment) =>
       String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
       containsFullSha(comment?.body, headSha),
   );
-  return requests.map((comment) => {
-    if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
-      throw new Error("Review-request comment identity is missing or malformed");
-    }
-    return {
-      ...comment,
-      reactions: paginatedArrays(
-        `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
-        "Review-request comment reaction listing",
-      ),
-    };
-  });
+  return {
+    issueComments: comments,
+    reviewRequestComments: requests.map((comment) => {
+      if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
+        throw new Error("Review-request comment identity is missing or malformed");
+      }
+      return comment;
+    }),
+    reviewerCompletionComments: comments.filter(
+      (comment) => String(comment?.user?.login ?? "").toLowerCase() === reviewerLogin,
+    ),
+  };
+}
+
+function collectReviewEvidenceSnapshot({
+  automatedReviewLogin,
+  headSha,
+  order,
+  pullNumber,
+  releaseOperatorLogin,
+  repository,
+}) {
+  if (order !== "forward" && order !== "reverse") {
+    throw new Error("Review evidence collection order is invalid");
+  }
+  const pullRequestBefore = getJson(
+    `repos/${repository}/pulls/${pullNumber}`,
+    `Pull request ${order} evidence-start lookup`,
+  );
+  let commentEvidence;
+  let reviews;
+  let reviewThreads;
+  const collectComments = () => {
+    commentEvidence = listReviewCommentEvidence(
+      repository,
+      pullNumber,
+      headSha,
+      releaseOperatorLogin,
+      automatedReviewLogin,
+    );
+  };
+  const collectReviews = () => {
+    reviews = paginatedArrays(
+      `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
+      `Pull request ${order} review listing`,
+    );
+  };
+  const collectThreads = () => {
+    reviewThreads = listReviewThreads(repository, pullNumber, headSha);
+  };
+  if (order === "forward") {
+    collectComments();
+    collectReviews();
+    collectThreads();
+  } else {
+    collectThreads();
+    collectReviews();
+    collectComments();
+  }
+  const pullRequestAfter = getJson(
+    `repos/${repository}/pulls/${pullNumber}`,
+    `Pull request ${order} evidence-end lookup`,
+  );
+  return {
+    issueComments: commentEvidence.issueComments,
+    pullRequestAfter,
+    pullRequestBefore,
+    reviewerCompletionComments: commentEvidence.reviewerCompletionComments,
+    reviewRequestComments: commentEvidence.reviewRequestComments,
+    reviews,
+    reviewThreads,
+  };
 }
 
 function integerEnvironment(name, { defaultValue, maximum, minimum }) {
@@ -192,7 +265,7 @@ async function main() {
   let lastError;
   do {
     try {
-      const pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
+      let pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
       currentHeadSha = String(pullRequest?.head?.sha ?? "").toLowerCase();
       const files = changedFilePaths(
         paginatedArrays(
@@ -200,33 +273,40 @@ async function main() {
           "Pull request changed-file listing",
         ),
       );
-      const labels = Array.isArray(pullRequest.labels)
-        ? pullRequest.labels.map((label) => label?.name)
-        : null;
+      let labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
       const forceReview = process.env.CHZZK_FORCE_REVIEW === "true";
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
       let reviews = [];
       let reviewThreads = [];
       let reviewRequestComments;
+      let reviewerCompletionComments;
       if (required) {
-        reviews = paginatedArrays(
-          `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
-          "Pull request review listing",
-        );
-        reviewThreads = listReviewThreads(repository, pullNumber, currentHeadSha);
-        const exactApproval = hasExactHeadReviewerApproval({
+        const snapshotInput = {
           automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
           headSha: currentHeadSha,
-          reviews,
+          pullNumber,
+          releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
+          repository,
+        };
+        const initialReviewEvidence = collectReviewEvidenceSnapshot({
+          ...snapshotInput,
+          order: "forward",
         });
-        if (!exactApproval) {
-          reviewRequestComments = listReviewRequestComments(
-            repository,
-            pullNumber,
-            currentHeadSha,
-            process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
-          );
-        }
+        const repeatedReviewEvidence = collectReviewEvidenceSnapshot({
+          ...snapshotInput,
+          order: "reverse",
+        });
+        currentHeadSha = assertStableReviewEvidenceSnapshots({
+          after: repeatedReviewEvidence,
+          before: initialReviewEvidence,
+          expectedHeadSha: currentHeadSha,
+        });
+        pullRequest = repeatedReviewEvidence.pullRequestAfter;
+        labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
+        reviewRequestComments = repeatedReviewEvidence.reviewRequestComments;
+        reviewerCompletionComments = repeatedReviewEvidence.reviewerCompletionComments;
+        reviews = repeatedReviewEvidence.reviews;
+        reviewThreads = repeatedReviewEvidence.reviewThreads;
       }
       const result = evaluateReviewCompletion({
         automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
@@ -238,6 +318,7 @@ async function main() {
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
         reviews,
         reviewRequestComments,
+        reviewerCompletionComments,
         reviewThreads,
       });
       writeOutputs(result);

@@ -37,6 +37,14 @@ Runtime redirects are constrained by tab, CHZZK live context or current-URL-vali
 
 Numeric media-playlist evidence necessarily relies on the requested URL marker because ordinary media bodies do not declare rendition resolution. That evidence is scoped to its secret-free playlist family and expires after `markerEvidenceTtlMs`; an exposed redirected-request error or 4xx/5xx completion invalidates the target and temporarily suppresses it so the next request can re-resolve or downgrade without looping.
 
+## Compatibility
+
+Desktop Firefox `140.0` and Android Firefox `142.0` are the declared minimums. The final AMO-signed XPI is checked on checksum-pinned minimum and current stock-Firefox desktop profiles on Linux x64 and arm64; Android remains an explicit manual release smoke. A daily Mozilla freshness check requires the pinned current profile to equal the latest stable release and the desktop minimum to remain in the active ESR major. After deployment, an Actions-external canary on a trusted WireGuard-connected host checks the production update manifest, release metadata, deterministic source ZIP, and signed XPI for exact schema, MIME, canonical paths, bounded sizes, hashes, and structural consistency.
+
+Pull-request CI runs the full repository verification on both the exact PR head and GitHub's effective pull-request event tree. Relevant compatibility changes also exercise Mozilla's live version metadata and the real latest published release. The production update endpoint is intentionally WireGuard-only, so public GitHub-hosted runners must not contact it; public DNS `NXDOMAIN` is expected.
+
+See `docs/COMPATIBILITY.md` for the support matrix, profile-freshness policy, draft/published signed-smoke workflow, Android checklist, repository-settings audit, and independent-review boundary.
+
 ## Build and verify
 
 ```bash
@@ -47,16 +55,14 @@ npm run verify
 Useful individual checks:
 
 ```bash
+npm run check:firefox-compatibility-freshness
 npm run check:generated
+npm run validate:compatibility
 npm run validate:manifest
 npm run lint
 npm run lint:webext
 npm test
 npm run build
-npm run setup:firefox-e2e
-FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
-GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
-npm run test:firefox-functional-e2e
 ```
 
 That unsigned Developer Edition test is functional-only. Release authenticity uses the separate

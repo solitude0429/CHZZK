@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",
@@ -11,10 +11,13 @@
   "scripts": {
     "audit:deps": "npm audit --audit-level=moderate",
     "audit:package": "node scripts/verify-package.js",
+    "audit:review-gate-settings": "node scripts/check-review-gate-settings.js",
     "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs node_modules package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
     "build:update-manifest": "node scripts/build-update-manifest.js",
+    "check:firefox-compatibility-freshness": "node scripts/check-firefox-compatibility-freshness.js",
     "check:generated": "node scripts/check-generated.js",
+    "check:live-update": "node scripts/check-live-update.js",
     "configure:review-gate": "node scripts/configure-review-gate.js",
     "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
@@ -30,11 +33,12 @@
     "test:firefox-e2e": "npm run test:firefox-functional-e2e",
     "test:firefox-functional-e2e": "node tests/e2e/firefox-update-playback.mjs",
     "test:firefox-signed-smoke": "node scripts/firefox-signed-smoke.js",
+    "validate:compatibility": "node scripts/validate-compatibility-policy.js",
     "validate:manifest": "node scripts/validate-manifest.js",
     "validate:project": "node scripts/validate-project-cleanliness.js",
     "validate:update-manifest": "node scripts/validate-update-manifest.js",
     "validate:workflows": "node scripts/validate-workflows.js",
-    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:audit-fuzz && npm run audit:deps && npm run build && npm run audit:package",
+    "verify": "npm run format:check && npm run check:generated && npm run validate:compatibility && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:audit-fuzz && npm run audit:deps && npm run build && npm run audit:package",
     "verify:signed-release": "npm run verify:signed-release-structure",
     "verify:signed-release-structure": "node scripts/verify-signed-release-structure.js"
   },
@@ -45,5 +49,8 @@
     "prettier": "3.9.4",
     "web-ext": "10.4.0",
     "yaml": "2.9.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0"
   }
 }

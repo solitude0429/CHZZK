@@ -15,28 +15,24 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-const FIREFOX_VERSION = "152.0.6";
-const GECKODRIVER_VERSION = "0.37.0";
+import { loadCompatibilityPolicy, resolveSignedSmokeToolchain } from "./lib/compatibility-policy.js";
+
 const MAX_FIREFOX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_GECKODRIVER_ARCHIVE_BYTES = 32 * 1024 * 1024;
-const platform = {
-  arm64: {
-    firefoxArch: "linux-aarch64",
-    firefoxSha512:
-      "774a05b4512bb25c32a242f023803fdd8c36411dc618a7a352aca683cb9c7222dd71206fe253ed95511c758c90e6191a17b3dfe1a15a40d6d7efd3a543a377e9",
-    geckodriverAsset: `geckodriver-v${GECKODRIVER_VERSION}-linux-aarch64.tar.gz`,
-    geckodriverSha256: "a16bc29598e1776da78b45dc78a6aa876abe125f5d82a5c8b9d7366204ad4158",
-  },
-  x64: {
-    firefoxArch: "linux-x86_64",
-    firefoxSha512:
-      "414b060f5e28e1b9c8818dee51896a81bd273c6cf6a4cffa53c4d7214f2c1d26d0416b9088518294435a7ead014a320a8deb910e93f3345ab6fbbbe596b4a336",
-    geckodriverAsset: `geckodriver-v${GECKODRIVER_VERSION}-linux64.tar.gz`,
-    geckodriverSha256: "90d4e33bd9816684400c160d1309aaffec23a3f65103511d5a62d8501062e548",
-  },
-}[process.arch];
+const profileName = process.env.CHZZK_SIGNED_SMOKE_PROFILE ?? "current";
+const policy = loadCompatibilityPolicy();
+const toolchain = resolveSignedSmokeToolchain(policy, {
+  architecture: process.arch,
+  profileName,
+});
+if (
+  !toolchain.firefoxUrl.startsWith("https://archive.mozilla.org/pub/firefox/releases/") ||
+  !toolchain.geckodriverUrl.startsWith("https://github.com/mozilla/geckodriver/releases/download/")
+) {
+  throw new Error("Signed-smoke tool URLs escaped the canonical download roots");
+}
 
-if (!platform || process.platform !== "linux") {
+if (process.platform !== "linux") {
   throw new Error(
     `Stock Firefox signed-smoke setup supports Linux x64/arm64 only, got ${process.platform}/${process.arch}`,
   );
@@ -45,11 +41,12 @@ if (!platform || process.platform !== "linux") {
 const toolsDir = resolve(process.env.CHZZK_SIGNED_SMOKE_TOOLS_DIR ?? "dist/signed-smoke-tools");
 const downloadsDir = join(toolsDir, "downloads");
 const firefoxDir = join(toolsDir, "firefox");
-const firefoxArchive = join(downloadsDir, `firefox-${FIREFOX_VERSION}-${platform.firefoxArch}.tar.xz`);
-const geckodriverArchive = join(downloadsDir, platform.geckodriverAsset);
+const firefoxArchive = join(
+  downloadsDir,
+  `firefox-${toolchain.firefoxVersion}-${toolchain.firefoxArch}.tar.xz`,
+);
+const geckodriverArchive = join(downloadsDir, toolchain.geckodriverAsset);
 const geckodriverPath = join(toolsDir, "geckodriver");
-const firefoxUrl = `https://archive.mozilla.org/pub/firefox/releases/${FIREFOX_VERSION}/${platform.firefoxArch}/en-US/firefox-${FIREFOX_VERSION}.tar.xz`;
-const geckodriverUrl = `https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/${platform.geckodriverAsset}`;
 
 function digest(path, algorithm) {
   return createHash(algorithm).update(readFileSync(path)).digest("hex");
@@ -126,7 +123,7 @@ async function downloadVerified({ algorithm, expectedDigest, maxBytes, path, url
   const parsed = new URL(url);
   if (parsed.protocol !== "https:") throw new Error(`Refusing non-HTTPS tool URL: ${url}`);
   const response = await fetch(url, {
-    headers: { "user-agent": "CHZZK-stock-Firefox-signed-smoke-setup/1" },
+    headers: { "user-agent": "CHZZK-stock-Firefox-signed-smoke-setup/2" },
     redirect: "follow",
   });
   if (!response.ok) throw new Error(`Download failed (${response.status}) for ${url}`);
@@ -163,17 +160,17 @@ function run(command, args) {
 mkdirSync(downloadsDir, { mode: 0o755, recursive: true });
 await downloadVerified({
   algorithm: "sha512",
-  expectedDigest: platform.firefoxSha512,
+  expectedDigest: toolchain.firefoxSha512,
   maxBytes: MAX_FIREFOX_ARCHIVE_BYTES,
   path: firefoxArchive,
-  url: firefoxUrl,
+  url: toolchain.firefoxUrl,
 });
 await downloadVerified({
   algorithm: "sha256",
-  expectedDigest: platform.geckodriverSha256,
+  expectedDigest: toolchain.geckodriverSha256,
   maxBytes: MAX_GECKODRIVER_ARCHIVE_BYTES,
   path: geckodriverArchive,
-  url: geckodriverUrl,
+  url: toolchain.geckodriverUrl,
 });
 
 rmSync(firefoxDir, { force: true, recursive: true });
@@ -194,8 +191,9 @@ for (const path of [firefoxPath, geckodriverPath]) {
 console.log(
   JSON.stringify({
     firefox: firefoxPath,
-    firefoxVersion: FIREFOX_VERSION,
+    firefoxVersion: toolchain.firefoxVersion,
     geckodriver: geckodriverPath,
-    geckodriverVersion: GECKODRIVER_VERSION,
+    geckodriverVersion: toolchain.geckodriverVersion,
+    profile: profileName,
   }),
 );
