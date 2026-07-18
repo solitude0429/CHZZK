@@ -497,8 +497,12 @@ describe("release and repository security guardrails", () => {
     assert.match(checker, /pulls\/\$\{pullNumber\}\/reviews/);
     assert.doesNotMatch(checker, /issues\/\$\{pullNumber\}\/reactions/);
     assert.match(checker, /issues\/comments\/\$\{comment\.id\}\/reactions/);
+    assert.match(checker, /reviewerCompletionComments/);
     assert.doesNotMatch(checker, /commits\/\$\{currentHeadSha\}/);
-    assert.match(read("scripts/lib/review-gate.js"), /pullRequest\?\.updated_at/);
+    const reviewGateLibrary = read("scripts/lib/review-gate.js");
+    assert.match(reviewGateLibrary, /pullRequest\?\.updated_at/);
+    assert.match(reviewGateLibrary, /Didn't find any major issues/);
+    assert.match(reviewGateLibrary, /\{10,40\}/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
     assert.match(settings, /required_conversation_resolution/);

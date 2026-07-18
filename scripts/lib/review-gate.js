@@ -1,9 +1,14 @@
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
+const REVIEWED_COMMIT_PREFIX_RE = /^[a-f0-9]{10,40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/;
 const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
+const CLEAN_REVIEW_HEADINGS = new Set([
+  "Codex Review: Didn't find any major issues. :rocket:",
+  "Codex Review: Didn't find any major issues. 🚀",
+]);
 const PACKAGED_RUNTIME_PATHS = new Set([
   "background.js",
   "diagnostics.html",
@@ -186,18 +191,13 @@ function validReviewerReaction(reaction, reviewerLogin, headTimestamp, label) {
   return reactionTimestamp > headTimestamp ? reactionTimestamp : null;
 }
 
-function hasBoundRequestReaction({
-  headSha,
-  headTimestamp,
-  releaseOperatorLogin,
-  reviewRequestComments,
-  reviewerLogin,
-}) {
+function boundReviewRequests({ headSha, releaseOperatorLogin, reviewRequestComments }) {
   const operatorLogin = normalizeLogin(releaseOperatorLogin, "Release operator login");
   if (!Array.isArray(reviewRequestComments)) {
     throw new Error("Operator review-request comment response is missing");
   }
 
+  const requests = [];
   for (const comment of reviewRequestComments) {
     const authorLogin = normalizeLogin(comment?.user?.login, "Review-request comment author identity");
     if (authorLogin !== operatorLogin || !fullShaAppearsInComment(comment.body, headSha)) continue;
@@ -215,6 +215,13 @@ function hasBoundRequestReaction({
     if (!Array.isArray(comment.reactions)) {
       throw new Error("Review-request comment reaction response is missing");
     }
+    requests.push({ comment, updatedTimestamp: commentUpdatedTimestamp });
+  }
+  return requests;
+}
+
+function hasBoundRequestReaction({ boundRequests, headTimestamp, reviewerLogin }) {
+  for (const { comment, updatedTimestamp } of boundRequests) {
     for (const reaction of comment.reactions) {
       const reactionTimestamp = validReviewerReaction(
         reaction,
@@ -222,10 +229,77 @@ function hasBoundRequestReaction({
         headTimestamp,
         "Review-request comment reaction",
       );
-      if (reactionTimestamp !== null && reactionTimestamp > commentUpdatedTimestamp) return true;
+      if (reactionTimestamp !== null && reactionTimestamp > updatedTimestamp) return true;
     }
   }
   return false;
+}
+
+function cleanReviewCommitPrefix(body) {
+  if (typeof body !== "string") return null;
+  const [heading] = body.split(/\r?\n/, 1);
+  if (!CLEAN_REVIEW_HEADINGS.has(heading.trim())) return null;
+  const matches = [...body.matchAll(/^\*\*Reviewed commit:\*\*\s+`([a-f0-9]{10,40})`\s*$/gm)];
+  if (matches.length !== 1 || !REVIEWED_COMMIT_PREFIX_RE.test(matches[0][1])) return null;
+  return matches[0][1];
+}
+
+function hasBoundCleanReviewComment({
+  boundRequests,
+  headSha,
+  headTimestamp,
+  reviewEvidenceTimestamp,
+  reviewerCompletionComments,
+  reviewerLogin,
+}) {
+  if (!Array.isArray(reviewerCompletionComments)) {
+    throw new Error("Automated reviewer completion-comment response is missing");
+  }
+  if (boundRequests.length === 0) return false;
+
+  const latestRequestTimestamp = Math.max(...boundRequests.map(({ updatedTimestamp }) => updatedTimestamp));
+  let latestReviewerComment = null;
+  for (const comment of reviewerCompletionComments) {
+    const actorLogin = normalizeLogin(comment?.user?.login, "Reviewer completion-comment actor identity");
+    if (actorLogin !== reviewerLogin) continue;
+    if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
+      throw new Error("Reviewer completion-comment identity is missing or malformed");
+    }
+    const createdTimestamp = timestampMilliseconds(
+      comment.created_at,
+      "Reviewer completion-comment creation timestamp",
+    );
+    const updatedTimestamp = timestampMilliseconds(
+      comment.updated_at,
+      "Reviewer completion-comment update timestamp",
+    );
+    if (updatedTimestamp < createdTimestamp) {
+      throw new Error("Reviewer completion-comment timestamps are malformed");
+    }
+    if (
+      latestReviewerComment === null ||
+      updatedTimestamp > latestReviewerComment.updatedTimestamp ||
+      (updatedTimestamp === latestReviewerComment.updatedTimestamp && comment.id > latestReviewerComment.id)
+    ) {
+      latestReviewerComment = {
+        body: comment.body,
+        createdTimestamp,
+        id: comment.id,
+        updatedTimestamp,
+      };
+    }
+  }
+  if (latestReviewerComment === null) return false;
+
+  const reviewedPrefix = cleanReviewCommitPrefix(latestReviewerComment.body);
+  return (
+    reviewedPrefix !== null &&
+    headSha.startsWith(reviewedPrefix) &&
+    latestReviewerComment.createdTimestamp === latestReviewerComment.updatedTimestamp &&
+    latestReviewerComment.createdTimestamp === headTimestamp &&
+    latestReviewerComment.createdTimestamp > latestRequestTimestamp &&
+    latestReviewerComment.createdTimestamp > reviewEvidenceTimestamp
+  );
 }
 
 export function evaluateReviewCompletion({
@@ -238,6 +312,7 @@ export function evaluateReviewCompletion({
   releaseOperatorLogin,
   reviews,
   reviewRequestComments,
+  reviewerCompletionComments,
   reviewThreads,
 }) {
   const headSha = assertCurrentPullRequest(pullRequest, expectedHeadSha);
@@ -269,12 +344,15 @@ export function evaluateReviewCompletion({
     pullRequestActivityTimestamp(pullRequest),
     reviewEvidence?.submittedAt ?? 0,
   );
+  const boundRequests = boundReviewRequests({
+    headSha,
+    releaseOperatorLogin,
+    reviewRequestComments,
+  });
   if (
     hasBoundRequestReaction({
-      headSha,
+      boundRequests,
       headTimestamp: evidenceTimestamp,
-      releaseOperatorLogin,
-      reviewRequestComments,
       reviewerLogin,
     })
   ) {
@@ -285,5 +363,22 @@ export function evaluateReviewCompletion({
       state: "success",
     };
   }
-  pending("Automated reviewer has no exact-head approval or exact-head operator-request +1 reaction");
+  if (
+    hasBoundCleanReviewComment({
+      boundRequests,
+      headSha,
+      headTimestamp: pullRequestActivityTimestamp(pullRequest),
+      reviewEvidenceTimestamp: reviewEvidence?.submittedAt ?? 0,
+      reviewerCompletionComments,
+      reviewerLogin,
+    })
+  ) {
+    return {
+      description: "Reviewer clean-result comment is bound to the exact-head request; no unresolved threads",
+      headSha,
+      required: true,
+      state: "success",
+    };
+  }
+  pending("Automated reviewer has no exact-head approval, request +1, or bound clean-result comment");
 }

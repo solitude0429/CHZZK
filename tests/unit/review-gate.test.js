@@ -43,6 +43,17 @@ function reviewRequest(overrides = {}) {
   };
 }
 
+function cleanReviewComment(overrides = {}) {
+  return {
+    body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+    created_at: "2026-07-15T10:02:00Z",
+    id: 100,
+    updated_at: "2026-07-15T10:02:00Z",
+    user: { login: reviewerLogin },
+    ...overrides,
+  };
+}
+
 function sensitiveEvaluation(overrides = {}) {
   return {
     automatedReviewLogin: reviewerLogin,
@@ -60,6 +71,7 @@ function sensitiveEvaluation(overrides = {}) {
     releaseOperatorLogin: operatorLogin,
     reviews: [exactReview()],
     reviewRequestComments: [],
+    reviewerCompletionComments: [],
     reviewThreads: [{ isResolved: true }],
     ...overrides,
   };
@@ -300,6 +312,122 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
+  it("accepts the reviewer's canonical clean-result comment only when bound to the exact head", () => {
+    assert.deepEqual(
+      evaluateReviewCompletion(
+        sensitiveEvaluation({
+          pullRequest: {
+            draft: false,
+            head: { sha: headSha },
+            number: 42,
+            state: "open",
+            updated_at: "2026-07-15T10:02:00Z",
+          },
+          reviewerCompletionComments: [cleanReviewComment()],
+          reviewRequestComments: [reviewRequest({ reactions: [] })],
+          reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:01:00Z" })],
+        }),
+      ),
+      {
+        description:
+          "Reviewer clean-result comment is bound to the exact-head request; no unresolved threads",
+        headSha,
+        required: true,
+        state: "success",
+      },
+    );
+  });
+
+  it("rejects clean-result comments that are stale, ambiguous, edited, late-invalidated, or unbound", () => {
+    const base = {
+      pullRequest: {
+        draft: false,
+        head: { sha: headSha },
+        number: 42,
+        state: "open",
+        updated_at: "2026-07-15T10:02:00Z",
+      },
+      reviewerCompletionComments: [cleanReviewComment()],
+      reviewRequestComments: [reviewRequest({ reactions: [] })],
+      reviews: [],
+    };
+    const cases = [
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${staleSha.slice(0, 10)}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${headSha.slice(0, 9)}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Found a major issue.\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            body: `Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\`\n**Reviewed commit:** \`${headSha}\``,
+          }),
+        ],
+      },
+      {
+        reviewerCompletionComments: [cleanReviewComment({ user: { login: "different-reviewer[bot]" } })],
+      },
+      {
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:03:00Z" },
+        reviewerCompletionComments: [cleanReviewComment({ updated_at: "2026-07-15T10:03:00Z" })],
+      },
+      {
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:03:00Z" },
+      },
+      {
+        reviewerCompletionComments: [
+          cleanReviewComment({
+            created_at: "2026-07-15T10:00:30Z",
+            updated_at: "2026-07-15T10:00:30Z",
+          }),
+        ],
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:00:30Z" },
+      },
+      {
+        reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:03:00Z" })],
+      },
+      {
+        pullRequest: { ...base.pullRequest, updated_at: "2026-07-15T10:03:00Z" },
+        reviewerCompletionComments: [
+          cleanReviewComment(),
+          cleanReviewComment({
+            body: "Automated review could not complete",
+            created_at: "2026-07-15T10:03:00Z",
+            id: 101,
+            updated_at: "2026-07-15T10:03:00Z",
+          }),
+        ],
+      },
+      {
+        reviewRequestComments: [
+          reviewRequest({ body: `Codex review request for ${staleSha}`, reactions: [] }),
+        ],
+      },
+    ];
+    for (const overrides of cases) {
+      assert.throws(
+        () => evaluateReviewCompletion(sensitiveEvaluation({ ...base, ...overrides })),
+        /no exact-head approval|bound clean-result|missing|malformed/i,
+      );
+    }
+  });
+
   it("rejects otherwise valid evidence from the wrong actor", () => {
     assert.throws(
       () =>
@@ -338,6 +466,16 @@ describe("exact-head release and security review completion", () => {
         ],
         reviews: [],
       },
+      {
+        reviewerCompletionComments: [cleanReviewComment({ id: 0 })],
+        reviewRequestComments: [reviewRequest({ reactions: [] })],
+        reviews: [],
+      },
+      {
+        reviewerCompletionComments: [cleanReviewComment({ created_at: "not-a-date" })],
+        reviewRequestComments: [reviewRequest({ reactions: [] })],
+        reviews: [],
+      },
       { automatedReviewLogin: "" },
       { releaseOperatorLogin: "" },
     ];
@@ -373,6 +511,7 @@ describe("exact-head release and security review completion", () => {
           releaseOperatorLogin: "",
           reviews: null,
           reviewRequestComments: null,
+          reviewerCompletionComments: null,
           reviewThreads: null,
         }),
       ),

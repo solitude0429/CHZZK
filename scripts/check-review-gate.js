@@ -106,29 +106,41 @@ function containsFullSha(body, headSha) {
   );
 }
 
-function listReviewRequestComments(repository, pullNumber, headSha, releaseOperatorLogin) {
+function listReviewCommentEvidence(
+  repository,
+  pullNumber,
+  headSha,
+  releaseOperatorLogin,
+  automatedReviewLogin,
+) {
   const comments = paginatedArrays(
     `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
     "Pull request comment listing",
   );
   const operatorLogin = String(releaseOperatorLogin ?? "").toLowerCase();
+  const reviewerLogin = String(automatedReviewLogin ?? "").toLowerCase();
   const requests = comments.filter(
     (comment) =>
       String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
       containsFullSha(comment?.body, headSha),
   );
-  return requests.map((comment) => {
-    if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
-      throw new Error("Review-request comment identity is missing or malformed");
-    }
-    return {
-      ...comment,
-      reactions: paginatedArrays(
-        `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
-        "Review-request comment reaction listing",
-      ),
-    };
-  });
+  return {
+    reviewRequestComments: requests.map((comment) => {
+      if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
+        throw new Error("Review-request comment identity is missing or malformed");
+      }
+      return {
+        ...comment,
+        reactions: paginatedArrays(
+          `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
+          "Review-request comment reaction listing",
+        ),
+      };
+    }),
+    reviewerCompletionComments: comments.filter(
+      (comment) => String(comment?.user?.login ?? "").toLowerCase() === reviewerLogin,
+    ),
+  };
 }
 
 function integerEnvironment(name, { defaultValue, maximum, minimum }) {
@@ -208,6 +220,7 @@ async function main() {
       let reviews = [];
       let reviewThreads = [];
       let reviewRequestComments;
+      let reviewerCompletionComments;
       if (required) {
         reviews = paginatedArrays(
           `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
@@ -220,12 +233,15 @@ async function main() {
           reviews,
         });
         if (!exactApproval) {
-          reviewRequestComments = listReviewRequestComments(
+          const commentEvidence = listReviewCommentEvidence(
             repository,
             pullNumber,
             currentHeadSha,
             process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
+            process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
           );
+          reviewRequestComments = commentEvidence.reviewRequestComments;
+          reviewerCompletionComments = commentEvidence.reviewerCompletionComments;
         }
       }
       const result = evaluateReviewCompletion({
@@ -238,6 +254,7 @@ async function main() {
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
         reviews,
         reviewRequestComments,
+        reviewerCompletionComments,
         reviewThreads,
       });
       writeOutputs(result);
