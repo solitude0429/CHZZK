@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 import {
-  assertStablePullRequestSnapshot,
+  assertStableReviewEvidenceSnapshots,
   changedFilePaths,
   evaluateReviewCompletion,
   isPendingReviewGateError,
@@ -54,7 +54,7 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
         pullRequest(number: $number) {
           headRefOid
           reviewThreads(first: 100, after: $after) {
-            nodes { isResolved }
+            nodes { id isResolved }
             pageInfo { endCursor hasNextPage }
           }
         }
@@ -83,7 +83,13 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
     if (String(pullRequest?.headRefOid ?? "").toLowerCase() !== expectedHeadSha) {
       throw new Error("Review-thread query is stale for the current pull request head");
     }
-    if (!Array.isArray(connection?.nodes) || typeof connection?.pageInfo?.hasNextPage !== "boolean") {
+    if (
+      !Array.isArray(connection?.nodes) ||
+      connection.nodes.some(
+        (thread) => typeof thread?.id !== "string" || !thread.id || typeof thread.isResolved !== "boolean",
+      ) ||
+      typeof connection?.pageInfo?.hasNextPage !== "boolean"
+    ) {
       throw new Error("Review-thread query exposes no usable completion state");
     }
     threads.push(...connection.nodes);
@@ -125,6 +131,7 @@ function listReviewCommentEvidence(
       containsFullSha(comment?.body, headSha),
   );
   return {
+    issueComments: comments,
     reviewRequestComments: requests.map((comment) => {
       if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
         throw new Error("Review-request comment identity is missing or malformed");
@@ -140,6 +147,66 @@ function listReviewCommentEvidence(
     reviewerCompletionComments: comments.filter(
       (comment) => String(comment?.user?.login ?? "").toLowerCase() === reviewerLogin,
     ),
+  };
+}
+
+function collectReviewEvidenceSnapshot({
+  automatedReviewLogin,
+  headSha,
+  order,
+  pullNumber,
+  releaseOperatorLogin,
+  repository,
+}) {
+  if (order !== "forward" && order !== "reverse") {
+    throw new Error("Review evidence collection order is invalid");
+  }
+  const pullRequestBefore = getJson(
+    `repos/${repository}/pulls/${pullNumber}`,
+    `Pull request ${order} evidence-start lookup`,
+  );
+  let commentEvidence;
+  let reviews;
+  let reviewThreads;
+  const collectComments = () => {
+    commentEvidence = listReviewCommentEvidence(
+      repository,
+      pullNumber,
+      headSha,
+      releaseOperatorLogin,
+      automatedReviewLogin,
+    );
+  };
+  const collectReviews = () => {
+    reviews = paginatedArrays(
+      `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
+      `Pull request ${order} review listing`,
+    );
+  };
+  const collectThreads = () => {
+    reviewThreads = listReviewThreads(repository, pullNumber, headSha);
+  };
+  if (order === "forward") {
+    collectComments();
+    collectReviews();
+    collectThreads();
+  } else {
+    collectThreads();
+    collectReviews();
+    collectComments();
+  }
+  const pullRequestAfter = getJson(
+    `repos/${repository}/pulls/${pullNumber}`,
+    `Pull request ${order} evidence-end lookup`,
+  );
+  return {
+    issueComments: commentEvidence.issueComments,
+    pullRequestAfter,
+    pullRequestBefore,
+    reviewerCompletionComments: commentEvidence.reviewerCompletionComments,
+    reviewRequestComments: commentEvidence.reviewRequestComments,
+    reviews,
+    reviewThreads,
   };
 }
 
@@ -220,36 +287,32 @@ async function main() {
       let reviewRequestComments;
       let reviewerCompletionComments;
       if (required) {
-        const commentEvidence = listReviewCommentEvidence(
-          repository,
+        const snapshotInput = {
+          automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
+          headSha: currentHeadSha,
           pullNumber,
-          currentHeadSha,
-          process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
-          process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
-        );
-        reviewRequestComments = commentEvidence.reviewRequestComments;
-        reviewerCompletionComments = commentEvidence.reviewerCompletionComments;
-
-        const reviewStateBefore = getJson(
-          `repos/${repository}/pulls/${pullNumber}`,
-          "Pull request revalidation-start lookup",
-        );
-        reviews = paginatedArrays(
-          `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
-          "Pull request revalidated review listing",
-        );
-        reviewThreads = listReviewThreads(repository, pullNumber, currentHeadSha);
-        const reviewStateAfter = getJson(
-          `repos/${repository}/pulls/${pullNumber}`,
-          "Pull request revalidation-end lookup",
-        );
-        currentHeadSha = assertStablePullRequestSnapshot({
-          after: reviewStateAfter,
-          before: reviewStateBefore,
+          releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
+          repository,
+        };
+        const initialReviewEvidence = collectReviewEvidenceSnapshot({
+          ...snapshotInput,
+          order: "forward",
+        });
+        const repeatedReviewEvidence = collectReviewEvidenceSnapshot({
+          ...snapshotInput,
+          order: "reverse",
+        });
+        currentHeadSha = assertStableReviewEvidenceSnapshots({
+          after: repeatedReviewEvidence,
+          before: initialReviewEvidence,
           expectedHeadSha: currentHeadSha,
         });
-        pullRequest = reviewStateAfter;
+        pullRequest = repeatedReviewEvidence.pullRequestAfter;
         labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
+        reviewRequestComments = repeatedReviewEvidence.reviewRequestComments;
+        reviewerCompletionComments = repeatedReviewEvidence.reviewerCompletionComments;
+        reviews = repeatedReviewEvidence.reviews;
+        reviewThreads = repeatedReviewEvidence.reviewThreads;
       }
       const result = evaluateReviewCompletion({
         automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,

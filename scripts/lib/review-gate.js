@@ -156,6 +156,82 @@ export function assertStablePullRequestSnapshot({ before, after, expectedHeadSha
   return afterHeadSha;
 }
 
+function canonicalSnapshotJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalSnapshotJson(entry)).join(",")}]`;
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalSnapshotJson(value[key])}`)
+    .join(",")}}`;
+}
+
+function pullRequestSnapshotIdentity(pullRequest) {
+  const headSha = assertCurrentPullRequest(pullRequest, "");
+  const labels = pullRequest.labels;
+  if (!Array.isArray(labels) || labels.some((label) => typeof label?.name !== "string" || !label.name)) {
+    throw new Error("Pull request snapshot label state is missing or malformed");
+  }
+  return {
+    draft: pullRequest.draft,
+    headSha,
+    labels: labels.map((label) => label.name).sort(),
+    number: pullRequest.number,
+    state: pullRequest.state,
+    updatedAt: pullRequestActivityTimestamp(pullRequest),
+  };
+}
+
+function reviewEvidenceSnapshotIdentity(snapshot, label, expectedHeadSha) {
+  if (!snapshot || typeof snapshot !== "object") {
+    throw new Error(`${label} review evidence snapshot is missing or malformed`);
+  }
+  const headSha = assertStablePullRequestSnapshot({
+    after: snapshot.pullRequestAfter,
+    before: snapshot.pullRequestBefore,
+    expectedHeadSha,
+  });
+  for (const [field, fieldLabel] of [
+    ["issueComments", "issue-comment"],
+    ["reviewRequestComments", "review-request comment"],
+    ["reviewerCompletionComments", "reviewer completion-comment"],
+    ["reviews", "review"],
+    ["reviewThreads", "review-thread"],
+  ]) {
+    if (!Array.isArray(snapshot[field])) {
+      throw new Error(`${label} ${fieldLabel} snapshot is missing or malformed`);
+    }
+  }
+  return {
+    headSha,
+    identity: canonicalSnapshotJson({
+      issueComments: snapshot.issueComments,
+      pullRequest: pullRequestSnapshotIdentity(snapshot.pullRequestAfter),
+      reviewRequestComments: snapshot.reviewRequestComments,
+      reviewerCompletionComments: snapshot.reviewerCompletionComments,
+      reviews: snapshot.reviews,
+      reviewThreads: snapshot.reviewThreads,
+    }),
+  };
+}
+
+export function assertStableReviewEvidenceSnapshots({ before, after, expectedHeadSha = "" }) {
+  const normalizedExpectedHeadSha = String(expectedHeadSha ?? "").toLowerCase();
+  if (normalizedExpectedHeadSha && !FULL_GIT_SHA_RE.test(normalizedExpectedHeadSha)) {
+    throw new Error("Expected stable review-evidence head SHA is malformed");
+  }
+  const beforeIdentity = reviewEvidenceSnapshotIdentity(before, "Initial", normalizedExpectedHeadSha);
+  const afterIdentity = reviewEvidenceSnapshotIdentity(after, "Repeated", normalizedExpectedHeadSha);
+  if (
+    beforeIdentity.headSha !== afterIdentity.headSha ||
+    beforeIdentity.identity !== afterIdentity.identity
+  ) {
+    pending("Pull request review evidence changed during repeated collection");
+  }
+  return afterIdentity.headSha;
+}
+
 function assertNoUnresolvedThreads(reviewThreads) {
   if (!Array.isArray(reviewThreads)) throw new Error("Pull request review-thread response is missing");
   if (reviewThreads.some((thread) => typeof thread?.isResolved !== "boolean")) {

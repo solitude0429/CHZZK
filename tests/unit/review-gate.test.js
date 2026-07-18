@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   assertStablePullRequestSnapshot,
+  assertStableReviewEvidenceSnapshots,
   changedFilePaths,
   evaluateReviewCompletion,
   isPendingReviewGateError,
@@ -93,6 +94,32 @@ function sensitiveEvaluation(overrides = {}) {
     reviewRequestComments: [],
     reviewerCompletionComments: [],
     reviewThreads: [{ isResolved: true }],
+    ...overrides,
+  };
+}
+
+function reviewEvidenceSnapshot(overrides = {}) {
+  const pullRequest = {
+    draft: false,
+    head: { sha: headSha },
+    labels: [],
+    number: 42,
+    state: "open",
+    updated_at: headTimestamp,
+  };
+  return {
+    issueComments: [],
+    pullRequestAfter: { ...pullRequest },
+    pullRequestBefore: { ...pullRequest },
+    reviewerCompletionComments: [],
+    reviewRequestComments: [
+      reviewRequest({
+        id: 10,
+        reactions: [plusOne({ id: 20 })],
+      }),
+    ],
+    reviews: [exactReview({ id: 30 })],
+    reviewThreads: [{ id: "thread-40", isResolved: true }],
     ...overrides,
   };
 }
@@ -492,6 +519,40 @@ describe("exact-head release and security review completion", () => {
         () => assertStablePullRequestSnapshot({ after, before, expectedHeadSha: headSha }),
         (error) =>
           isPendingReviewGateError(error) && /changed during evidence collection/i.test(error.message),
+      );
+    }
+  });
+
+  it("rejects same-second review, thread, or reaction changes across repeated evidence collection", () => {
+    const before = reviewEvidenceSnapshot();
+    assert.equal(
+      assertStableReviewEvidenceSnapshots({
+        after: reviewEvidenceSnapshot(),
+        before,
+        expectedHeadSha: headSha,
+      }),
+      headSha,
+    );
+
+    const changedSnapshots = [
+      reviewEvidenceSnapshot({
+        reviews: [
+          exactReview({ id: 30 }),
+          exactReview({ id: 31, state: "COMMENTED", submitted_at: headTimestamp }),
+        ],
+      }),
+      reviewEvidenceSnapshot({
+        reviewThreads: [{ id: "thread-40", isResolved: false }],
+      }),
+      reviewEvidenceSnapshot({
+        reviewRequestComments: [reviewRequest({ id: 10, reactions: [] })],
+      }),
+    ];
+    for (const after of changedSnapshots) {
+      assert.throws(
+        () => assertStableReviewEvidenceSnapshots({ after, before, expectedHeadSha: headSha }),
+        (error) =>
+          isPendingReviewGateError(error) && /changed during repeated collection/i.test(error.message),
       );
     }
   });
