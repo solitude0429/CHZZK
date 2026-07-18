@@ -39,9 +39,9 @@ Numeric media-playlist evidence necessarily relies on the requested URL marker b
 
 ## Compatibility
 
-Desktop Firefox `140.0` and Android Firefox `142.0` are the declared minimums. The final AMO-signed XPI is checked on checksum-pinned minimum and current stock-Firefox desktop profiles on Linux x64 and arm64; Android remains an explicit manual release smoke. A daily Mozilla freshness check requires the pinned current profile to equal the latest stable release and the desktop minimum to remain in the active ESR major. The production update canary checks the hosted update manifest, release metadata, deterministic source ZIP, and signed XPI for exact schema, MIME, canonical paths, bounded sizes, hashes, and structural consistency.
+Desktop Firefox `140.0` and Android Firefox `142.0` are the declared minimums. The final AMO-signed XPI is checked on checksum-pinned minimum and current stock-Firefox desktop profiles on Linux x64 and arm64; Android remains an explicit manual release smoke. A daily Mozilla freshness check requires the pinned current profile to equal the latest stable release and the desktop minimum to remain in the active ESR major. After deployment, an Actions-external canary on a trusted WireGuard-connected host checks the production update manifest, release metadata, deterministic source ZIP, and signed XPI for exact schema, MIME, canonical paths, bounded sizes, hashes, and structural consistency.
 
-Pull-request CI runs the full repository verification on both the exact PR head and GitHub's effective pull-request event tree. Relevant compatibility and update-canary changes also exercise Mozilla's live version metadata, the real latest published release, and the production update endpoint.
+Pull-request CI runs the full repository verification on both the exact PR head and GitHub's effective pull-request event tree. Relevant compatibility changes also exercise Mozilla's live version metadata and the real latest published release. The production update endpoint is intentionally WireGuard-only, so public GitHub-hosted runners must not contact it; public DNS `NXDOMAIN` is expected.
 
 See `docs/COMPATIBILITY.md` for the support matrix, profile-freshness policy, draft/published signed-smoke workflow, Android checklist, repository-settings audit, and independent-review boundary.
 

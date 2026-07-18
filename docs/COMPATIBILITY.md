@@ -2,11 +2,11 @@
 
 ## Support matrix
 
-| Environment            | Declared minimum            | Verification                                                                                   | Support level                                       |
-| ---------------------- | --------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Firefox desktop        | `140.0`                     | AMO-signed permanent-install smoke on minimum/current stock Firefox for Linux x64 and arm64    | Fully gated                                         |
-| Firefox Android        | `142.0`                     | Manual release smoke on a disposable test profile/device                                       | Best effort until automated Android coverage exists |
-| Production update host | HTTPS immutable release set | Daily schema, MIME, path, size, digest, metadata, source ZIP, and signed-XPI structural canary | Fully monitored                                     |
+| Environment            | Declared minimum            | Verification                                                                                | Support level                                       |
+| ---------------------- | --------------------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Firefox desktop        | `140.0`                     | AMO-signed permanent-install smoke on minimum/current stock Firefox for Linux x64 and arm64 | Fully gated                                         |
+| Firefox Android        | `142.0`                     | Manual release smoke on a disposable test profile/device                                    | Best effort until automated Android coverage exists |
+| Production update host | HTTPS immutable release set | Actions-external post-deployment canary from a trusted WireGuard-connected host             | WireGuard-only                                      |
 
 `policy/compatibility-policy.json` is the source of truth for the desktop minimum, Android
 minimum, checksum-pinned stock-Firefox profiles, and geckodriver artifacts. `npm run
@@ -78,8 +78,14 @@ redirects:
 It enforces bounded nonempty bodies and expected MIME types, decodes JSON as strict UTF-8, checks
 the exact update/metadata schema and canonical versioned paths, validates the source ZIP against
 release metadata, checks the advertised signed-XPI SHA-256, and runs the same strict structural
-source/XPI verifier used by the release pipeline. The scheduled workflow and relevant pull
-requests execute the real external check.
+source/XPI verifier used by the release pipeline.
+
+The production hostname is intentionally available only through the private WireGuard path. Run
+this check after deployment from a trusted Actions-external operator checkout on the connected VPS,
+then run the old-signed-to-new-signed stock-Firefox update smoke from the actual PC. Public
+GitHub-hosted runners are expected to receive `NXDOMAIN`; do not add public DNS, weaken nginx or
+firewall exposure, or attach a trusted internal runner to pull-request code to make this canary
+green. Unit tests enforce that no repository workflow invokes the production canary.
 
 ## Repository-settings audit
 

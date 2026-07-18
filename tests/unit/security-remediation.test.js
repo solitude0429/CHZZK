@@ -261,11 +261,16 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(codeql, /python/i);
   });
 
-  it("pins direct dependencies and ignores local secrets and generated release artifacts", () => {
+  it("pins dependencies and ignores local secrets and generated release artifacts", () => {
     const packageJson = JSON.parse(read("package.json"));
     for (const [name, version] of Object.entries(packageJson.devDependencies)) {
       assert.doesNotMatch(version, /^[~^]/, `${name} must be exactly pinned`);
     }
+    for (const [name, version] of Object.entries(packageJson.overrides)) {
+      assert.equal(typeof version, "string", `${name} override must be a simple exact version`);
+      assert.doesNotMatch(version, /^[~^]/, `${name} override must be exactly pinned`);
+    }
+    assert.equal(packageJson.overrides["adm-zip"], "0.6.0");
     const ignore = read(".gitignore");
     assert.match(ignore, /^\.env$/m);
     assert.match(ignore, /^\.env\.\*$/m);

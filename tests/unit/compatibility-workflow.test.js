@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { parse } from "yaml";
 
@@ -74,22 +74,20 @@ describe("compatibility and production-health workflows", () => {
     assert.match(setupStep.env.CHZZK_SIGNED_SMOKE_TOOLS_DIR, /matrix\.architecture/);
   });
 
-  it("checks the complete production release set on schedule and relevant pull requests", () => {
-    const document = workflow(".github/workflows/live-update-health.yml");
-    assert.deepEqual(document.permissions, { contents: "read" });
-    assert.deepEqual(document.jobs["verify-live-update"].permissions, {
-      contents: "read",
-    });
-    assert.equal(Array.isArray(document.on.schedule), true);
-    assert.equal(Object.hasOwn(document.on, "pull_request"), true);
-    assert.equal(
-      document.jobs["verify-live-update"].steps.some((step) => step.run === "npm ci"),
-      true,
-    );
-    const run = document.jobs["verify-live-update"].steps.find(
-      (step) => step.name === "Verify the production update manifest and complete hosted release set",
-    ).run;
-    assert.equal(run, "npm run check:live-update");
+  it("keeps the WireGuard-only production canary outside GitHub Actions", () => {
+    const packageDocument = JSON.parse(read("package.json"));
+    assert.equal(packageDocument.scripts["check:live-update"], "node scripts/check-live-update.js");
+    assert.doesNotMatch(packageDocument.scripts.verify, /check:live-update/);
+
+    const workflowDirectory = new URL("../../.github/workflows/", import.meta.url);
+    for (const name of readdirSync(workflowDirectory)) {
+      if (!/\.ya?ml$/u.test(name)) continue;
+      assert.doesNotMatch(
+        read(`.github/workflows/${name}`),
+        /npm run check:live-update/,
+        `${name} must not contact the WireGuard-only production update host`,
+      );
+    }
   });
 
   it("checks Mozilla release freshness on schedule and relevant pull requests", () => {

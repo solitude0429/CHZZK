@@ -93,7 +93,7 @@ Remove NAVER Live Streaming Connector/NLiveConnector first. If the popup still a
 uninstalling it, inspect and apply `reg/fix-live-connector.reg` on Windows to remove the stale
 `naverliveconnector` protocol handler.
 
-## Firefox automatic updates fail or the canary reports `ENOTFOUND`
+## Firefox automatic updates fail or the internal canary cannot resolve the host
 
 The production update hostname is fixed in `manifest.json`:
 
@@ -101,7 +101,13 @@ The production update hostname is fixed in `manifest.json`:
 chzzk-updates.alpha-apple.dedyn.io
 ```
 
-First distinguish DNS failure from an HTTP, TLS, manifest, or artifact failure:
+The hostname is intentionally resolvable only through the private WireGuard DNS path. Public
+GitHub-hosted runners and public resolvers are expected to return `NXDOMAIN`; that result is not a
+production incident and must not be repaired by publishing DNS or broadening service exposure.
+
+First distinguish a private-path DNS failure from an HTTP, TLS, manifest, or artifact failure. The
+following bounded commands are for the trusted VPS; independently verify private DNS and HTTPS
+from the actual PC before running the browser update smoke:
 
 ```bash
 getent ahosts chzzk-updates.alpha-apple.dedyn.io
@@ -113,13 +119,15 @@ openssl s_client \
   -brief < /dev/null
 ```
 
-An `ENOTFOUND`, `Could not resolve host`, or `Name or service not known` result means the request
-never reached the update server. Restore the deSEC A/AAAA or CNAME record before debugging nginx,
-MIME types, or XPI bytes. When dynamic DNS is used, refresh it from the trusted VPS or router with a
-dedicated deSEC DynDNS token through `https://update.dedyn.io/`. Never paste that token into an
-issue, Actions log, commit, diagnostic export, or chat.
+On either trusted endpoint, `ENOTFOUND`, `Could not resolve host`, or `Name or service not known`
+means the private DNS or WireGuard path failed before reaching the update server. Verify the
+bounded private DNS query and existing WireGuard route first, then inspect the internal nginx
+endpoint without restarting DNS, WireGuard, or nginx merely for diagnosis. Do not create public
+A/AAAA/CNAME records, expose the service publicly, or attach an internal runner to untrusted
+pull-request code.
 
-After DNS and TLS are healthy, run:
+After private DNS and TLS are healthy, run this only from a trusted Actions-external checkout on
+the WireGuard-connected VPS:
 
 ```bash
 npm run check:live-update
@@ -127,9 +135,9 @@ npm run check:live-update
 
 The command must fetch `updates.json`, canonical release metadata, the deterministic source ZIP,
 and the signed XPI without redirects. It then verifies MIME types, bounds, exact schemas, canonical
-paths, metadata/source hashes, the advertised XPI SHA-256, and full source/XPI structure. Re-run the
-`Live update health` workflow and the old-signed-to-new-signed stock-Firefox update smoke. Track
-production DNS incidents in GitHub rather than weakening or skipping the canary.
+paths, metadata/source hashes, the advertised XPI SHA-256, and full source/XPI structure. Run the
+old-signed-to-new-signed stock-Firefox update smoke from the actual PC. Track private-path incidents
+without weakening or skipping the canary or changing the WireGuard-only access boundary.
 
 ## Sensitive data handling
 

@@ -109,7 +109,7 @@ The `Firefox compatibility freshness` workflow runs daily and on relevant pull r
 
 `npm run check:live-update` downloads the production `updates.json`, canonical release metadata, deterministic source ZIP, and advertised signed XPI without following redirects. It requires strict UTF-8 JSON, exact schemas, canonical immutable paths, expected MIME types, bounded nonempty bodies, the manifest minimum Firefox version, metadata/source size and SHA-256 consistency, the advertised signed-XPI SHA-256, and the same full source/XPI structural verification used by the release pipeline.
 
-`Live update health` runs the real external check daily, can be dispatched manually, and also runs when a pull request changes the canary, manifest, release verifier, or related workflow. This catches both production-host drift and canary regressions before merge.
+The production hostname is WireGuard-only. Run this command after deployment from a trusted Actions-external checkout on the connected VPS, then run the old-signed-to-new-signed stock-Firefox update smoke from the actual PC. Public GitHub-hosted runners are expected to receive `NXDOMAIN`; repository workflows must not invoke this command, publish the hostname through public DNS, or weaken the private access boundary. Unit tests cover the canary implementation and enforce that workflow separation.
 
 ## Repository-settings audit
 

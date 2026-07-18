@@ -3,7 +3,7 @@
 ## Release checklist
 
 1. Confirm `git status --short --branch` is clean before starting the release branch.
-2. Choose the canonical SemVer change (`MAJOR.MINOR.PATCH`, no leading zero, at most 9 digits per component) and update `package.json`, `package-lock.json`, and `manifest.json` together.
+2. Choose the canonical SemVer change (`MAJOR.MINOR.PATCH`, no leading zero, at most 9 digits per component) and update `package.json`, `package-lock.json`, `manifest.json`, and the release finalizer's `RELEASE_VERSION` together.
 3. Run `npm run build:runtime`, `npm ci`, and `npm run verify`.
 4. Run the checksum-pinned real Firefox E2E:
 
@@ -75,7 +75,7 @@ CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
 npm run deploy:updates:internal
 ```
 
-14. Run `npm run check:live-update`. It must download `updates.json`, release metadata, the deterministic source ZIP, and the signed XPI without redirects; verify exact schemas, MIME types, bounds, canonical immutable paths, metadata/source digests, signed-XPI SHA-256, and full source/XPI structure. Compare the reported metadata-bound source digest with the immutable GitHub Release; the signed-compatibility and deployment workflows remain the attestation authorities. Then run the old-signed-to-new-signed stock-Firefox update mode.
+14. From a trusted Actions-external checkout on the WireGuard-connected VPS, run `npm run check:live-update`. It must download `updates.json`, release metadata, the deterministic source ZIP, and the signed XPI without redirects; verify exact schemas, MIME types, bounds, canonical immutable paths, metadata/source digests, signed-XPI SHA-256, and full source/XPI structure. Compare the reported metadata-bound source digest with the immutable GitHub Release; the signed-compatibility and deployment workflows remain the attestation authorities. Never run this production check on a public GitHub-hosted runner or add public DNS/exposure for it. Then run the old-signed-to-new-signed stock-Firefox update mode from the actual PC.
 15. Ask the user to trigger Firefox AddonManager update checking. Do not stop Firefox or overwrite the installed profile XPI.
 
 ## Patch response
