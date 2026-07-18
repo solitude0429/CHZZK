@@ -29,10 +29,12 @@ Node architecture matches the selected policy record. Draft and immutable releas
 provenance verification against the exact source digest and `sign-unlisted.yml`.
 
 After the signing workflow has staged a draft, manually dispatch `Signed Firefox compatibility`
-with the draft tag before running the out-of-band finalizer. A published release triggers the same
-workflow again, and a weekly schedule rechecks the latest immutable release. Pull requests that
-change this compatibility or signed-release harness run it against the latest published release;
-legacy non-immutable releases are accepted only for that read-only harness regression check.
+with the draft tag before running the out-of-band finalizer. The finalizer refuses publication until
+every manual compatibility run for that exact protected-main source and draft tag is complete and
+the newest run succeeded. A published release triggers the same workflow again, and a weekly
+schedule rechecks the latest immutable release. Pull requests that change this compatibility or
+signed-release harness run it against the latest published release; legacy non-immutable releases
+are accepted only for that read-only harness regression check.
 
 CI separately runs the full repository verification twice for pull requests: once on the exact PR
 head and once on GitHub's effective pull-request event tree. The Firefox functional E2E remains on

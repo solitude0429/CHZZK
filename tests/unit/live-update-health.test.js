@@ -17,8 +17,7 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function releaseFixture() {
-  const version = "0.1.6";
+function releaseFixture(version = productionManifest.version) {
   const sourceArchive = Buffer.from("synthetic-source-archive");
   const signedXpi = Buffer.from("synthetic-signed-xpi");
   const metadata = {
@@ -90,13 +89,31 @@ describe("live Firefox update health", () => {
     };
 
     const result = await checkLiveUpdate({ fetchImpl, productionManifest });
-    assert.equal(result.version, "0.1.6");
+    assert.equal(result.version, productionManifest.version);
     assert.equal(result.signedXpiBytes, fixture.signedXpi.length);
     assert.equal(result.sourceArchiveBytes, fixture.sourceArchive.length);
     assert.equal(requested[0], productionManifest.browser_specific_settings.gecko.update_url);
-    assert.match(requested[1], /\/releases\/0\.1\.6\/chzzk-0\.1\.6-release-metadata\.json$/);
-    assert.match(requested[2], /\/releases\/0\.1\.6\/chzzk-0\.1\.6\.zip$/);
-    assert.match(requested[3], /\/releases\/0\.1\.6\/chzzk-0\.1\.6-signed\.xpi$/);
+    assert.equal(
+      requested[1],
+      `https://chzzk-updates.alpha-apple.dedyn.io/releases/${productionManifest.version}/chzzk-${productionManifest.version}-release-metadata.json`,
+    );
+    assert.equal(
+      requested[2],
+      `https://chzzk-updates.alpha-apple.dedyn.io/releases/${productionManifest.version}/chzzk-${productionManifest.version}.zip`,
+    );
+    assert.equal(
+      requested[3],
+      `https://chzzk-updates.alpha-apple.dedyn.io/releases/${productionManifest.version}/chzzk-${productionManifest.version}-signed.xpi`,
+    );
+  });
+
+  it("rejects a production host that still advertises the previous release", () => {
+    const identity = productionUpdateIdentity(productionManifest);
+    const { document } = releaseFixture("0.1.6");
+    assert.throws(
+      () => validateLiveUpdateDocument(document, identity),
+      /version does not match the production manifest/i,
+    );
   });
 
   it("rejects noncanonical origins, paths, versions, and minimum-version drift", () => {
@@ -104,7 +121,7 @@ describe("live Firefox update health", () => {
     for (const mutate of [
       (document) => {
         document.addons[identity.addOnId].updates[0].update_link =
-          "https://example.invalid/releases/0.1.6/chzzk-0.1.6-signed.xpi";
+          `https://example.invalid/releases/${identity.version}/chzzk-${identity.version}-signed.xpi`;
       },
       (document) => {
         document.addons[identity.addOnId].updates[0].update_link =

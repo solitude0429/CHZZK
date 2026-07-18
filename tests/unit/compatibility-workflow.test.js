@@ -15,6 +15,7 @@ describe("compatibility and production-health workflows", () => {
   it("binds signed minimum/current smokes to exact release sources on x64 and arm64", () => {
     const document = workflow(".github/workflows/release-compatibility.yml");
     assert.deepEqual(document.permissions, { contents: "read" });
+    assert.match(document["run-name"], /inputs\.tag/);
     assert.equal(Object.hasOwn(document.on, "pull_request"), true);
     assert.deepEqual(document.jobs["resolve-release"].permissions, {
       contents: "read",
@@ -51,13 +52,22 @@ describe("compatibility and production-health workflows", () => {
     assert.equal(sourceStep.env.EXPECTED_ARCHITECTURE, "${{ matrix.architecture }}");
     assert.match(sourceStep.run, /process\.arch/);
 
-    const verifyStep = document.jobs["signed-smoke"].steps.find(
-      (step) => step.name === "Download and verify the exact signed release inputs",
+    const downloadStep = document.jobs["signed-smoke"].steps.find(
+      (step) => step.name === "Download the exact signed release inputs",
     );
+    assert.equal(downloadStep.env.GH_TOKEN, "${{ github.token }}");
+    assert.match(downloadStep.run, /gh release download/);
+    assert.doesNotMatch(downloadStep.run, /\bnode\b|\bnpm\b|\.\/scripts\//);
+
+    const verifyStep = document.jobs["signed-smoke"].steps.find(
+      (step) => step.name === "Verify the exact signed release inputs without GitHub credentials",
+    );
+    assert.equal(Object.hasOwn(verifyStep.env, "GH_TOKEN"), false);
     assert.match(verifyStep.run, /assertReleaseMetadata/);
     assert.match(verifyStep.run, /metadata\.sourceDigest/);
     assert.match(verifyStep.run, /EXPECTED_SOURCE_SHA/);
     assert.match(verifyStep.run, /npm run verify:signed-release/);
+    assert.doesNotMatch(verifyStep.run, /\bgh\b/);
 
     const attestationStep = document.jobs["signed-smoke"].steps.find(
       (step) => step.name === "Verify release-asset attestations",
@@ -66,6 +76,7 @@ describe("compatibility and production-health workflows", () => {
     assert.match(attestationStep.run, /gh attestation verify/);
     assert.match(attestationStep.run, /--source-digest/);
     assert.match(attestationStep.run, /sign-unlisted\.yml/);
+    assert.doesNotMatch(attestationStep.run, /\bnode\b|\bnpm\b|\.\/scripts\//);
 
     const setupStep = document.jobs["signed-smoke"].steps.find(
       (step) => step.name === "Prepare checksum-pinned stock Firefox",

@@ -1,4 +1,5 @@
 name: Signed Firefox compatibility
+run-name: Signed Firefox compatibility ${{ inputs.tag || github.event.release.tag_name || github.event.pull_request.head.sha || github.sha }}
 
 on:
   pull_request:
@@ -172,9 +173,8 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Download and verify the exact signed release inputs
+      - name: Download the exact signed release inputs
         env:
-          EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
           VERSION: ${{ needs.resolve-release.outputs.version }}
@@ -187,6 +187,12 @@ jobs:
             --pattern "chzzk-${VERSION}-release-metadata.json" \
             --pattern "chzzk-${VERSION}-signed.xpi"
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" = "3"
+      - name: Verify the exact signed release inputs without GitHub credentials
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
           node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs";
           import { assertReleaseMetadata } from "./scripts/lib/release-artifacts.js";

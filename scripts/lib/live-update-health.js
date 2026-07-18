@@ -70,15 +70,19 @@ export function productionUpdateIdentity(manifest) {
   const gecko = manifest.browser_specific_settings?.gecko;
   const addOnId = gecko?.id;
   const minimumVersion = gecko?.strict_min_version;
+  const version = manifest.version;
   if (typeof addOnId !== "string" || !addOnId) throw new Error("Production add-on ID is missing");
   if (typeof minimumVersion !== "string" || !minimumVersion) {
     throw new Error("Production minimum Firefox version is missing");
+  }
+  if (!CANONICAL_VERSION_RE.test(String(version ?? ""))) {
+    throw new Error("Production manifest version is not canonical Semantic Versioning");
   }
   const manifestUrl = canonicalHttpsUrl(gecko?.update_url, "Production update manifest URL");
   if (manifestUrl.pathname !== "/updates.json") {
     throw new Error("Production update manifest URL must end at /updates.json");
   }
-  return Object.freeze({ addOnId, manifestUrl, minimumVersion });
+  return Object.freeze({ addOnId, manifestUrl, minimumVersion, version });
 }
 
 export function validateLiveUpdateDocument(document, identity) {
@@ -107,6 +111,9 @@ export function validateLiveUpdateDocument(document, identity) {
   );
   if (!CANONICAL_VERSION_RE.test(String(update.version ?? ""))) {
     throw new Error("Live update version is not canonical Semantic Versioning");
+  }
+  if (update.version !== identity.version) {
+    throw new Error("Live update version does not match the production manifest version");
   }
   if (update.applications.gecko.strict_min_version !== identity.minimumVersion) {
     throw new Error("Live update minimum Firefox version does not match the production manifest");
