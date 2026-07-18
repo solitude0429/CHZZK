@@ -402,6 +402,14 @@ export async function finalizeStagedReleaseFromAdminPreflight({
     );
     const releaseId = verifiedReleaseId(publishReadyState, "Publish-ready");
     immutableReleasesEnabled({ cwd, repository, runCommand });
+    assertReleaseCompatibilityComplete({
+      cwd,
+      defaultBranch: context.defaultBranch,
+      repository,
+      runCommand,
+      sourceSha: context.sourceSha,
+      tag,
+    });
     // GitHub does not support a conditional release PATCH. Targeting the exact inspected release ID
     // prevents tag substitution; the documented exclusive same-authority writer boundary still
     // covers mutation of that same draft between this last inspection and the PATCH.

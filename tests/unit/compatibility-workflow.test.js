@@ -20,10 +20,15 @@ describe("compatibility and production-health workflows", () => {
     assert.deepEqual(document.jobs["resolve-release"].permissions, {
       contents: "read",
     });
-    assert.deepEqual(document.jobs["signed-smoke"].permissions, {
+    assert.deepEqual(document.jobs["fetch-release"].permissions, {
       attestations: "read",
       contents: "read",
     });
+    assert.deepEqual(document.jobs["signed-smoke"].permissions, {
+      actions: "read",
+      contents: "read",
+    });
+    assert.deepEqual(document.jobs["signed-smoke"].needs, ["resolve-release", "fetch-release"]);
     assert.deepEqual(document.jobs["signed-smoke"].strategy.matrix.include, [
       { architecture: "x64", profile: "minimum", runner: "ubuntu-24.04" },
       { architecture: "x64", profile: "current", runner: "ubuntu-24.04" },
@@ -41,6 +46,30 @@ describe("compatibility and production-health workflows", () => {
     assert.match(resolveStep.run, /isImmutable/);
     assert.match(resolveStep.run, /pull_request/);
 
+    const fetchJob = document.jobs["fetch-release"];
+    const fetchJobText = JSON.stringify(fetchJob);
+    assert.doesNotMatch(fetchJobText, /actions\/checkout|\bnpm\b|\bnode\b|\.\/scripts\//);
+    const downloadStep = fetchJob.steps.find(
+      (step) => step.name === "Download the exact signed release inputs in the credential-isolated job",
+    );
+    assert.equal(downloadStep.env.GH_TOKEN, "${{ github.token }}");
+    assert.match(downloadStep.run, /\/usr\/bin\/gh release download/);
+    assert.doesNotMatch(downloadStep.run, /\bnpm\b|\bnode\b|\.\/scripts\//);
+    const attestationStep = fetchJob.steps.find(
+      (step) => step.name === "Verify release-asset attestations in the credential-isolated job",
+    );
+    assert.match(attestationStep.if, /draft.*immutable|immutable.*draft/);
+    assert.match(attestationStep.run, /\/usr\/bin\/gh attestation verify/);
+    assert.match(attestationStep.run, /--source-digest/);
+    assert.match(attestationStep.run, /sign-unlisted\.yml/);
+    assert.doesNotMatch(attestationStep.run, /\bnpm\b|\bnode\b|\.\/scripts\//);
+    const uploadStep = fetchJob.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
+    assert.match(uploadStep.with.name, /source_sha/);
+
+    const artifactDownload = document.jobs["signed-smoke"].steps[0];
+    assert.match(artifactDownload.uses, /^actions\/download-artifact@[a-f0-9]{40}$/);
+    assert.match(artifactDownload.with.path, /runner\.temp/);
+
     const checkout = document.jobs["signed-smoke"].steps.find((step) =>
       step.uses?.startsWith("actions/checkout@"),
     );
@@ -52,13 +81,6 @@ describe("compatibility and production-health workflows", () => {
     assert.equal(sourceStep.env.EXPECTED_ARCHITECTURE, "${{ matrix.architecture }}");
     assert.match(sourceStep.run, /process\.arch/);
 
-    const downloadStep = document.jobs["signed-smoke"].steps.find(
-      (step) => step.name === "Download the exact signed release inputs",
-    );
-    assert.equal(downloadStep.env.GH_TOKEN, "${{ github.token }}");
-    assert.match(downloadStep.run, /gh release download/);
-    assert.doesNotMatch(downloadStep.run, /\bnode\b|\bnpm\b|\.\/scripts\//);
-
     const verifyStep = document.jobs["signed-smoke"].steps.find(
       (step) => step.name === "Verify the exact signed release inputs without GitHub credentials",
     );
@@ -68,15 +90,7 @@ describe("compatibility and production-health workflows", () => {
     assert.match(verifyStep.run, /EXPECTED_SOURCE_SHA/);
     assert.match(verifyStep.run, /npm run verify:signed-release/);
     assert.doesNotMatch(verifyStep.run, /\bgh\b/);
-
-    const attestationStep = document.jobs["signed-smoke"].steps.find(
-      (step) => step.name === "Verify release-asset attestations",
-    );
-    assert.match(attestationStep.if, /draft.*immutable|immutable.*draft/);
-    assert.match(attestationStep.run, /gh attestation verify/);
-    assert.match(attestationStep.run, /--source-digest/);
-    assert.match(attestationStep.run, /sign-unlisted\.yml/);
-    assert.doesNotMatch(attestationStep.run, /\bnode\b|\bnpm\b|\.\/scripts\//);
+    assert.doesNotMatch(JSON.stringify(document.jobs["signed-smoke"]), /GH_TOKEN|github\.token/);
 
     const setupStep = document.jobs["signed-smoke"].steps.find(
       (step) => step.name === "Prepare checksum-pinned stock Firefox",

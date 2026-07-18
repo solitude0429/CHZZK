@@ -130,10 +130,59 @@ jobs:
             echo "version=${VERSION}"
           } >> "$GITHUB_OUTPUT"
 
-  signed-smoke:
+  fetch-release:
     needs: resolve-release
     permissions:
       attestations: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the exact signed release inputs in the credential-isolated job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/gh
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          /usr/bin/gh release download "$RELEASE_TAG" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --pattern "chzzk-${VERSION}.zip" \
+            --pattern "chzzk-${VERSION}-release-metadata.json" \
+            --pattern "chzzk-${VERSION}-signed.xpi"
+          test "$(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | wc -l)" = "3"
+      - if: needs.resolve-release.outputs.draft == 'true' || needs.resolve-release.outputs.immutable == 'true'
+        name: Verify release-asset attestations in the credential-isolated job
+        env:
+          EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/gh
+          for ASSET in \
+            "$RUNNER_TEMP/release-assets/chzzk-${VERSION}.zip" \
+            "$RUNNER_TEMP/release-assets/chzzk-${VERSION}-release-metadata.json" \
+            "$RUNNER_TEMP/release-assets/chzzk-${VERSION}-signed.xpi"
+          do
+            /usr/bin/gh attestation verify "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$EXPECTED_SOURCE_SHA" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          if-no-files-found: error
+          name: signed-release-inputs-${{ needs.resolve-release.outputs.source_sha }}
+          path: ${{ runner.temp }}/release-assets
+          retention-days: 1
+
+  signed-smoke:
+    needs: [resolve-release, fetch-release]
+    permissions:
+      actions: read
       contents: read
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -154,6 +203,10 @@ jobs:
             profile: current
             runner: ubuntu-24.04-arm
     steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-inputs-${{ needs.resolve-release.outputs.source_sha }}
+          path: ${{ runner.temp }}/release-assets
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
@@ -173,23 +226,10 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Download the exact signed release inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
-          VERSION: ${{ needs.resolve-release.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          gh release download "$RELEASE_TAG" \
-            --dir release-assets \
-            --pattern "chzzk-${VERSION}.zip" \
-            --pattern "chzzk-${VERSION}-release-metadata.json" \
-            --pattern "chzzk-${VERSION}-signed.xpi"
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" = "3"
       - name: Verify the exact signed release inputs without GitHub credentials
         env:
           EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_ASSETS_DIR: ${{ runner.temp }}/release-assets
           VERSION: ${{ needs.resolve-release.outputs.version }}
         run: |
           set -euo pipefail
@@ -199,7 +239,7 @@ jobs:
 
           const metadata = JSON.parse(
             readFileSync(
-              `release-assets/chzzk-${process.env.VERSION}-release-metadata.json`,
+              `${process.env.RELEASE_ASSETS_DIR}/chzzk-${process.env.VERSION}-release-metadata.json`,
               "utf8",
             ),
           );
@@ -214,28 +254,10 @@ jobs:
             throw new Error("release metadata is not bound to the resolved release source commit");
           }
           NODE
-          CHZZK_RELEASE_METADATA="release-assets/chzzk-${VERSION}-release-metadata.json" \
-            CHZZK_SIGNED_XPI="release-assets/chzzk-${VERSION}-signed.xpi" \
-            CHZZK_UNSIGNED_XPI="release-assets/chzzk-${VERSION}.zip" \
+          CHZZK_RELEASE_METADATA="${RELEASE_ASSETS_DIR}/chzzk-${VERSION}-release-metadata.json" \
+            CHZZK_SIGNED_XPI="${RELEASE_ASSETS_DIR}/chzzk-${VERSION}-signed.xpi" \
+            CHZZK_UNSIGNED_XPI="${RELEASE_ASSETS_DIR}/chzzk-${VERSION}.zip" \
             npm run verify:signed-release
-      - if: needs.resolve-release.outputs.draft == 'true' || needs.resolve-release.outputs.immutable == 'true'
-        name: Verify release-asset attestations
-        env:
-          EXPECTED_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.resolve-release.outputs.version }}
-        run: |
-          set -euo pipefail
-          for ASSET in \
-            "release-assets/chzzk-${VERSION}.zip" \
-            "release-assets/chzzk-${VERSION}-release-metadata.json" \
-            "release-assets/chzzk-${VERSION}-signed.xpi"
-          do
-            gh attestation verify "$ASSET" \
-              --repo "$GITHUB_REPOSITORY" \
-              --source-digest "$EXPECTED_SOURCE_SHA" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/sign-unlisted.yml"
-          done
       - name: Prepare checksum-pinned stock Firefox
         env:
           CHZZK_SIGNED_SMOKE_PROFILE: ${{ matrix.profile }}
@@ -243,9 +265,9 @@ jobs:
         run: npm run setup:firefox-signed-smoke
       - name: Permanently install the AMO-signed XPI with default signature enforcement
         env:
-          CHZZK_RELEASE_METADATA: release-assets/chzzk-${{ needs.resolve-release.outputs.version }}-release-metadata.json
+          CHZZK_RELEASE_METADATA: ${{ runner.temp }}/release-assets/chzzk-${{ needs.resolve-release.outputs.version }}-release-metadata.json
           CHZZK_SIGNED_SMOKE_MODE: install
-          CHZZK_SIGNED_XPI: release-assets/chzzk-${{ needs.resolve-release.outputs.version }}-signed.xpi
+          CHZZK_SIGNED_XPI: ${{ runner.temp }}/release-assets/chzzk-${{ needs.resolve-release.outputs.version }}-signed.xpi
           FIREFOX_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools-${{ matrix.profile }}-${{ matrix.architecture }}/firefox/firefox
           GECKODRIVER_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools-${{ matrix.profile }}-${{ matrix.architecture }}/geckodriver
         run: npm run test:firefox-signed-smoke

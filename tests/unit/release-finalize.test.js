@@ -51,6 +51,7 @@ function compatibilityRun(overrides = {}) {
 
 function commandHarness({
   compatibilityRunPages = null,
+  compatibilityRunResponses = null,
   compatibilityRuns = [compatibilityRun()],
   immutableEnabled,
   publishError = null,
@@ -67,6 +68,7 @@ function commandHarness({
   ],
 }) {
   const calls = [];
+  let compatibilityLookupCount = 0;
   const run = (command, args) => {
     calls.push({ args: [...args], command });
     if (command === "git" && args.join(" ") === "rev-parse HEAD") return `${sourceSha}\n`;
@@ -100,7 +102,12 @@ function commandHarness({
       endpoint ===
         `repos/${repository}/actions/workflows/release-compatibility.yml/runs?branch=main&event=workflow_dispatch&head_sha=${sourceSha}&per_page=100`
     ) {
-      return `${JSON.stringify(compatibilityRunPages ?? { workflow_runs: compatibilityRuns })}\n`;
+      const response = compatibilityRunResponses
+        ? compatibilityRunResponses[compatibilityLookupCount]
+        : (compatibilityRunPages ?? { workflow_runs: compatibilityRuns });
+      compatibilityLookupCount += 1;
+      if (response === undefined) throw new Error("unexpected extra compatibility workflow lookup");
+      return `${JSON.stringify(response)}\n`;
     }
     if (args[0] === "api" && endpoint === `repos/${repository}/immutable-releases`) {
       return `${JSON.stringify({ enabled: immutableEnabled })}\n`;
@@ -1565,6 +1572,43 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
     }
   });
 
+  it("rechecks compatibility immediately before publication and blocks a newly dispatched run", async () => {
+    const cwd = makeSourceTree();
+    const harness = commandHarness({
+      compatibilityRunResponses: [
+        { workflow_runs: [compatibilityRun()] },
+        {
+          workflow_runs: [
+            compatibilityRun(),
+            compatibilityRun({ conclusion: null, id: 9102, run_number: 44, status: "queued" }),
+          ],
+        },
+      ],
+      immutableEnabled: true,
+    });
+    try {
+      await assert.rejects(
+        finalizeStagedReleaseFromAdminPreflight({
+          cwd,
+          inspectReleaseState: stagedInspection,
+          prepareArtifacts,
+          repository,
+          runCommand: harness.run,
+        }),
+        /exact-tag signed compatibility workflow.*complete/i,
+      );
+      assert.equal(
+        harness.calls.filter(({ args }) =>
+          args.some((argument) => argument.includes("actions/workflows/release-compatibility.yml/runs?")),
+        ).length,
+        2,
+      );
+      assert.equal(harness.calls.some(isReleasePublicationCall), false);
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+    }
+  });
+
   it("refuses to publish when the just-in-time administrator check says immutable releases are disabled", async () => {
     const cwd = makeSourceTree();
     const harness = commandHarness({ immutableEnabled: false });
@@ -1713,6 +1757,17 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         args.includes(`repos/${repository}/releases/6001`),
       );
       const attestationIndex = harness.calls.findLastIndex(({ args }) => args[0] === "attestation");
+      const compatibilityIndices = harness.calls
+        .map(({ args }, index) =>
+          args.some((argument) => argument.includes("actions/workflows/release-compatibility.yml/runs?"))
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      assert.equal(compatibilityIndices.length, 2);
+      assert.equal(compatibilityIndices[0] < immutableIndex, true);
+      assert.equal(immutableIndex < compatibilityIndices[1], true);
+      assert.equal(compatibilityIndices[1] < publishIndex, true);
       assert.equal(attestationIndex < immutableIndex, true);
       assert.equal(immutableIndex < publishIndex, true);
     } finally {
