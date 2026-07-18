@@ -416,20 +416,28 @@ describe("release and repository security guardrails", () => {
     assert.match(persistForceText, /force_review=false/);
     assert.match(persistForceText, /force_generation/);
     assert.match(persistForceText, /reconcile=true/);
+    assert.match(persistForceRun, /external_id="force-review-\$\{MARKER_STAGE\}-\$\{GITHUB_RUN_ID\}"/);
     const persistLines = persistForceRun.split("\n").map((line) => line.trim());
     const markerCalls = persistLines.flatMap((line, index) =>
-      line === "publish_force_marker" ? [index] : [],
+      line.startsWith("publish_force_marker ") ? [{ index, stage: line.split(" ")[1] }] : [],
     );
     const labelWriteIndex = persistLines.findIndex((line) => line.includes("issues/${PR_NUMBER}/labels"));
+    const labelVerificationIndex = persistLines.findIndex((line) =>
+      line.includes('any(.labels[]?; .name == "security-review-required")'),
+    );
     const activeScanIndex = persistLines.findIndex((line) => line.startsWith('ACTIVE_RUNS="$RUNNER_TEMP/'));
     const dispatchIndex = persistLines.findIndex((line) => line === "gh workflow run review-gate.yml \\");
-    assert.deepEqual(markerCalls.length, 2);
+    assert.deepEqual(
+      markerCalls.map(({ stage }) => stage),
+      ["pending", "labeled"],
+    );
     assert.ok(
-      markerCalls[0] < labelWriteIndex &&
-        labelWriteIndex < activeScanIndex &&
-        activeScanIndex < markerCalls[1] &&
-        markerCalls[1] < dispatchIndex,
-      "force label must be durable before the final scan and marker republish",
+      markerCalls[0].index < labelWriteIndex &&
+        labelWriteIndex < labelVerificationIndex &&
+        labelVerificationIndex < activeScanIndex &&
+        activeScanIndex < markerCalls[1].index &&
+        markerCalls[1].index < dispatchIndex,
+      "a pending marker must precede durable label verification and the labeled marker",
     );
     assert.doesNotMatch(persistForceText, /actions\/checkout|npm\s|node scripts\//);
     assert.deepEqual(gate.jobs.evaluate.needs, ["persist-force-review"]);
@@ -456,12 +464,18 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(reconcileText, /actions\/checkout|npm\s|node scripts\//);
     assert.match(JSON.stringify(gate.jobs.status), /check-runs\?check_name=/);
     assert.match(JSON.stringify(gate.jobs.status), /inputs\.reconcile/);
-    const statusRun = gate.jobs.status.steps.find((step) =>
+    const statusStep = gate.jobs.status.steps.find((step) =>
       String(step.name ?? "").includes("review completion check"),
-    ).run;
+    );
+    const statusRun = statusStep.run;
+    const evaluateStep = gate.jobs.evaluate.steps.find((step) => step.id === "gate");
     const statusCheckout = gate.jobs.status.steps.find((step) =>
       String(step.uses ?? "").startsWith("actions/checkout@"),
     );
+    assert.equal(statusStep.env.EVALUATED_HEAD_SHA, "${{ needs.evaluate.outputs.head_sha }}");
+    assert.equal(statusStep.env.FORCE_GENERATION, "${{ inputs.force_generation || '' }}");
+    assert.equal(Object.hasOwn(evaluateStep.env, "EVALUATED_HEAD_SHA"), false);
+    assert.equal(Object.hasOwn(evaluateStep.env, "FORCE_GENERATION"), false);
     assert.equal(statusCheckout.with.ref, "${{ github.event.repository.default_branch }}");
     assert.equal(statusCheckout.with["persist-credentials"], false);
     assert.ok(
@@ -474,6 +488,11 @@ describe("release and repository security guardrails", () => {
     assert.match(statusRun, /force-review-/);
     assert.match(statusRun, /security-review-required/);
     assert.match(statusRun, /HEAD_SHA=\$EVALUATED_HEAD_SHA/);
+    assert.ok(
+      statusRun.indexOf('if [ -z "$HEAD_SHA" ]') <
+        statusRun.indexOf('[[ "$EVALUATED_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]'),
+      "the cached evaluate head must be validated only inside the empty-head failure fallback",
+    );
     assert.match(statusRun, /max_by\(\.id\)/);
     assert.equal(statusRun.match(/gh api "\$CHECKS_ENDPOINT"/g)?.length, 1);
     const harness = mkdtempSync(join(dirname(rootDir), "chzzk-review-status-race-"));
@@ -483,7 +502,7 @@ describe("release and repository security guardrails", () => {
     try {
       writeFileSync(
         fakeGh,
-        `#!/bin/sh\ncase " $* " in\n  *" --method POST "*)\n    test -f "$TEST_EVALUATION_MARKER"\n    case " $* " in *" head_sha=${"a".repeat(40)} "*) : ;; *) exit 1 ;; esac\n    : > "$TEST_POST_MARKER"\n    exit 0\n    ;;\n  *"/issues/66 "*)\n    if [ "$TEST_GH_MODE" = "force-labeled" ]; then\n      /usr/bin/printf '%s\\n' true\n    else\n      /usr/bin/printf '%s\\n' false\n    fi\n    exit 0\n    ;;\nesac\ncase "$TEST_GH_MODE" in\n  force-*)\n    /usr/bin/printf '%s\\n' '{"check_runs":[{"id":200,"app":{"slug":"github-actions"},"conclusion":"failure","external_id":"force-review-123","output":{"summary":"Forced automated review is pending"}}]}'\n    ;;\n  *) /usr/bin/printf '%s\\n' '{"check_runs":[]}' ;;\nesac\n`,
+        `#!/bin/sh\ncase " $* " in\n  *" --method POST "*)\n    test -f "$TEST_EVALUATION_MARKER"\n    case " $* " in *" head_sha=${"a".repeat(40)} "*) : ;; *) exit 1 ;; esac\n    : > "$TEST_POST_MARKER"\n    exit 0\n    ;;\n  *"/issues/66 "*)\n    if [ "$TEST_GH_MODE" = "force-labeled" ]; then\n      /usr/bin/printf '%s\\n' true\n    else\n      /usr/bin/printf '%s\\n' false\n    fi\n    exit 0\n    ;;\nesac\ncase "$TEST_GH_MODE" in\n  force-pending)\n    EXTERNAL_ID=force-review-pending-123\n    ;;\n  force-labeled|force-removed|force-generation|force-mismatch)\n    EXTERNAL_ID=force-review-labeled-123\n    ;;\n  force-legacy)\n    EXTERNAL_ID=force-review-123\n    ;;\n  *)\n    /usr/bin/printf '%s\\n' '{"check_runs":[]}'\n    exit 0\n    ;;\nesac\n/usr/bin/printf '%s\\n' "{\\"check_runs\\":[{\\"id\\":200,\\"app\\":{\\"slug\\":\\"github-actions\\"},\\"conclusion\\":\\"failure\\",\\"external_id\\":\\"$EXTERNAL_ID\\",\\"output\\":{\\"summary\\":\\"Forced automated review is pending\\"}}]}"\n`,
       );
       writeFileSync(
         fakeNode,
@@ -492,6 +511,7 @@ describe("release and repository security guardrails", () => {
       chmodSync(fakeGh, 0o755);
       chmodSync(fakeNode, 0o755);
       const runStatus = ({
+        evaluatedHeadSha = "a".repeat(40),
         forceGeneration = "",
         ghMode = "ordinary",
         nodeMode = "success",
@@ -502,7 +522,7 @@ describe("release and repository security guardrails", () => {
           encoding: "utf8",
           env: {
             CHZZK_PR_NUMBER: "66",
-            EVALUATED_HEAD_SHA: "a".repeat(40),
+            EVALUATED_HEAD_SHA: evaluatedHeadSha,
             FORCE_GENERATION: forceGeneration,
             GH_TOKEN: "synthetic",
             GITHUB_REPOSITORY: "solitude0429/CHZZK",
@@ -522,6 +542,15 @@ describe("release and repository security guardrails", () => {
       assert.equal(existsSync(evaluationMarker), true, "final evidence evaluation must execute");
       assert.equal(existsSync(ordinaryMarker), true, "publication must follow final evidence evaluation");
 
+      const recoveredMarker = join(harness, "recovered-posted");
+      const recovered = runStatus({ evaluatedHeadSha: "", marker: recoveredMarker });
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.equal(
+        existsSync(recoveredMarker),
+        true,
+        "a successful final lookup must not depend on the cached evaluate head",
+      );
+
       const fallbackMarker = join(harness, "fallback-posted");
       const fallback = runStatus({
         marker: fallbackMarker,
@@ -531,15 +560,24 @@ describe("release and repository security guardrails", () => {
       assert.equal(fallback.status, 0, fallback.stderr);
       assert.equal(existsSync(fallbackMarker), true, "evaluate head must publish final-check failure");
 
-      const lockedMarker = join(harness, "locked-posted");
-      const locked = runStatus({ ghMode: "force-unlabeled", marker: lockedMarker });
-      assert.notEqual(locked.status, 0, "an unlabeled ordinary run must preserve a force marker");
-      assert.equal(existsSync(lockedMarker), false);
+      const pendingMarker = join(harness, "pending-posted");
+      const pending = runStatus({ ghMode: "force-pending", marker: pendingMarker });
+      assert.notEqual(pending.status, 0, "no ordinary run may replace a pending force marker");
+      assert.equal(existsSync(pendingMarker), false);
 
       const labeledMarker = join(harness, "labeled-posted");
       const labeled = runStatus({ ghMode: "force-labeled", marker: labeledMarker });
       assert.equal(labeled.status, 0, labeled.stderr);
       assert.equal(existsSync(labeledMarker), true, "durable force label may unlock live evidence");
+
+      const removedMarker = join(harness, "removed-posted");
+      const removed = runStatus({ ghMode: "force-removed", marker: removedMarker });
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.equal(
+        existsSync(removedMarker),
+        true,
+        "an absent label may clear a marker that proves the label was previously durable",
+      );
 
       const generationMarker = join(harness, "generation-posted");
       const generation = runStatus({
@@ -549,6 +587,20 @@ describe("release and repository security guardrails", () => {
       });
       assert.equal(generation.status, 0, generation.stderr);
       assert.equal(existsSync(generationMarker), true, "matching force generation may publish");
+
+      const mismatchMarker = join(harness, "mismatch-posted");
+      const mismatch = runStatus({
+        forceGeneration: "124",
+        ghMode: "force-mismatch",
+        marker: mismatchMarker,
+      });
+      assert.notEqual(mismatch.status, 0, "a different force generation must preserve the marker");
+      assert.equal(existsSync(mismatchMarker), false);
+
+      const legacyMarker = join(harness, "legacy-posted");
+      const legacy = runStatus({ ghMode: "force-legacy", marker: legacyMarker });
+      assert.notEqual(legacy.status, 0, "an unbound legacy force marker must fail closed");
+      assert.equal(existsSync(legacyMarker), false);
     } finally {
       rmSync(harness, { force: true, recursive: true });
     }

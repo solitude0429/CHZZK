@@ -31,7 +31,7 @@ on:
         required: true
         type: number
       reconcile:
-        description: Quiet periodic reconciliation of reaction-backed review evidence
+        description: Quiet periodic reconciliation of exact-head review evidence
         required: true
         type: boolean
         default: false
@@ -74,10 +74,12 @@ jobs:
           HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
           publish_force_marker() {
+            MARKER_STAGE=$1
+            case "$MARKER_STAGE" in pending|labeled) ;; *) return 1 ;; esac
             gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" \
               -f name="CHZZK review completion" \
               -f head_sha="$HEAD_SHA" \
-              -f external_id="force-review-${GITHUB_RUN_ID}" \
+              -f external_id="force-review-${MARKER_STAGE}-${GITHUB_RUN_ID}" \
               -f status="completed" \
               -f conclusion="failure" \
               -f "output[title]=Exact-head review required" \
@@ -88,7 +90,7 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/actions/workflows/review-gate.yml/runs?per_page=100" \
               --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | select(.status != \"completed\") | select(.display_title == \"Review gate PR #${PR_NUMBER} ordinary\" or .display_title == \"Review gate PR #${PR_NUMBER} forced-evaluation\" or (.event != \"workflow_dispatch\" and any(.pull_requests[]?; .number == ${PR_NUMBER}))) | .id"
           }
-          publish_force_marker
+          publish_force_marker pending
           LABEL="security-review-required"
           LABEL_ENDPOINT="repos/${GITHUB_REPOSITORY}/labels/${LABEL}"
           if ! gh api "$LABEL_ENDPOINT" >/dev/null 2>&1; then
@@ -101,6 +103,8 @@ jobs:
           fi
           gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
             -f "labels[]=$LABEL"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}" \
+            --jq 'any(.labels[]?; .name == "security-review-required")')" = true
           ACTIVE_RUNS="$RUNNER_TEMP/chzzk-active-review-runs"
           for ATTEMPT in {1..30}; do
             list_active_runs > "$ACTIVE_RUNS"
@@ -115,7 +119,7 @@ jobs:
           done
           list_active_runs > "$ACTIVE_RUNS"
           test ! -s "$ACTIVE_RUNS"
-          publish_force_marker
+          publish_force_marker labeled
           gh workflow run review-gate.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$DEFAULT_BRANCH" \
@@ -160,8 +164,6 @@ jobs:
           CHZZK_POLL_SECONDS: ${{ github.event_name == 'pull_request_target' && (github.event.action == 'opened' || github.event.action == 'synchronize') && '180' || '0' }}
           CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
           CHZZK_RELEASE_OPERATOR_LOGIN: ${{ vars.RELEASE_OPERATOR_LOGIN }}
-          EVALUATED_HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
-          FORCE_GENERATION: ${{ inputs.force_generation || '' }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-review-gate.js
 
@@ -189,6 +191,8 @@ jobs:
           CHZZK_POLL_SECONDS: "0"
           CHZZK_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
           CHZZK_RELEASE_OPERATOR_LOGIN: ${{ vars.RELEASE_OPERATOR_LOGIN }}
+          EVALUATED_HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
+          FORCE_GENERATION: ${{ inputs.force_generation || '' }}
           GH_TOKEN: ${{ github.token }}
           RECONCILE: ${{ github.event_name == 'workflow_dispatch' && inputs.reconcile || false }}
         run: |
@@ -236,10 +240,10 @@ jobs:
           test "$HEAD_SHA_SEEN" = true
           test "$REQUIRED_SEEN" = true
           test "$STATE_SEEN" = true
-          [[ "$EVALUATED_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
           if [ -z "$HEAD_SHA" ]; then
             test "$GATE_EXIT" -ne 0
             test "$STATE" = "failure"
+            [[ "$EVALUATED_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
             HEAD_SHA=$EVALUATED_HEAD_SHA
           fi
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
@@ -265,16 +269,26 @@ jobs:
               [[ "$FORCE_GENERATION" =~ ^[1-9][0-9]*$ ]]
             fi
             case "$CURRENT_EXTERNAL_ID" in
-              force-review-*)
+              force-review-pending-*)
+                return 1
+                ;;
+              force-review-labeled-*)
                 if [ -n "$FORCE_GENERATION" ]; then
-                  test "$CURRENT_EXTERNAL_ID" = "force-review-${FORCE_GENERATION}"
+                  test "$CURRENT_EXTERNAL_ID" = "force-review-labeled-${FORCE_GENERATION}"
                 else
-                  test "$REQUIRED" = true
                   LABEL_PRESENT=$(gh api \
                     "repos/${GITHUB_REPOSITORY}/issues/${CHZZK_PR_NUMBER}" \
                     --jq 'any(.labels[]?; .name == "security-review-required")')
-                  test "$LABEL_PRESENT" = true
+                  case "$LABEL_PRESENT" in
+                    true) test "$REQUIRED" = true ;;
+                    false) : ;;
+                    *) return 1 ;;
+                  esac
                 fi
+                ;;
+              force-review-*)
+                test -n "$FORCE_GENERATION"
+                test "$CURRENT_EXTERNAL_ID" = "force-review-${FORCE_GENERATION}"
                 ;;
               *)
                 test -z "$FORCE_GENERATION"
