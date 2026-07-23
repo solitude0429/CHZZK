@@ -133,6 +133,30 @@ function blockingProbeBudgetMs() {
   return Number.isFinite(configured) && configured > 0 ? configured : 50;
 }
 
+function createBlockingRequestBudget() {
+  const timedOut = Symbol("blocking-request-timeout");
+  let timeout = null;
+  let timeoutPromise = null;
+  return {
+    clear() {
+      if (timeout !== null) clearTimeout(timeout);
+    },
+    async wait(promise) {
+      if (!timeoutPromise) {
+        timeoutPromise = new Promise((resolve) => {
+          timeout = setTimeout(() => resolve(timedOut), blockingProbeBudgetMs());
+        });
+      }
+      const result = await Promise.race([promise, timeoutPromise]);
+      return result === timedOut ? null : result;
+    },
+  };
+}
+
+async function waitWithinBlockingRequestBudget(promise, budget) {
+  return budget.wait(promise);
+}
+
 function probeResolutionBudgetMs() {
   const configured = Number(policy.probeResolutionBudgetMs ?? 3000);
   return Number.isFinite(configured) && configured > 0 ? configured : 3000;
@@ -504,20 +528,8 @@ function startSessionResolution(details, resolver, resolverKind) {
   return state.promise;
 }
 
-async function waitForBlockingResolution(promise) {
-  const timedOut = Symbol("blocking-probe-timeout");
-  let timeout;
-  try {
-    const result = await Promise.race([
-      promise,
-      new Promise((resolve) => {
-        timeout = setTimeout(() => resolve(timedOut), blockingProbeBudgetMs());
-      }),
-    ]);
-    return result === timedOut ? null : result;
-  } finally {
-    clearTimeout(timeout);
-  }
+async function waitForBlockingResolution(promise, budget) {
+  return waitWithinBlockingRequestBudget(promise, budget);
 }
 
 function startHighestTargetResolution(details, decision) {
@@ -547,33 +559,33 @@ function tabHasQualityState(tabId) {
 
 function dropTabQualityState(
   tabId,
-  { dropToken = false, preserveTrustedRequest = false } = {},
+  { dropToken = false, preserveVerifiedTrustedRequest = false } = {},
 ) {
-  const shouldPreserve = (state) =>
-    preserveTrustedRequest && state.contextKey === "trusted-request";
+  const shouldPreserveVerified = (state) =>
+    preserveVerifiedTrustedRequest && state.contextKey === "trusted-request";
   let hadTarget = false;
   for (const [key, state] of resolutionBySession) {
-    if (state.tabId !== tabId || shouldPreserve(state)) continue;
+    if (state.tabId !== tabId) continue;
     state.controller.abort();
     resolutionBySession.delete(key);
   }
   for (const [key, state] of activeTargetsBySession) {
-    if (state.tabId !== tabId || shouldPreserve(state)) continue;
+    if (state.tabId !== tabId || shouldPreserveVerified(state)) continue;
     hadTarget = true;
     activeTargetsBySession.delete(key);
   }
   for (const [key, state] of failedTargetsBySession) {
-    if (state.tabId === tabId && !shouldPreserve(state)) failedTargetsBySession.delete(key);
+    if (state.tabId === tabId) failedTargetsBySession.delete(key);
   }
   for (const [requestId, state] of redirectedRequestsById) {
-    if (state.tabId === tabId && !shouldPreserve(state)) {
+    if (state.tabId === tabId && !shouldPreserveVerified(state)) {
       state.settled = true;
       redirectedRequestsById.delete(requestId);
     }
   }
   if (dropToken) {
     tabContextTokenByTab.delete(tabId);
-  } else if (!preserveTrustedRequest) {
+  } else {
     tabContextTokenByTab.set(tabId, {});
   }
   return hadTarget;
@@ -648,7 +660,7 @@ async function removeTabTrustContext(tabId) {
 async function preserveSameSiteMiniPlayerState(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   pendingTrustValidationByTab.delete(tabId);
-  const hadTarget = dropTabQualityState(tabId, { preserveTrustedRequest: true });
+  const hadTarget = dropTabQualityState(tabId, { preserveVerifiedTrustedRequest: true });
   const hadLiveTab = activeLiveTabIds.delete(tabId);
   const hadContext = liveContextByTab.delete(tabId);
   if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
@@ -700,22 +712,10 @@ function startReloadTrustValidation(tabId) {
   return validation.promise;
 }
 
-async function awaitPendingTrustValidation(tabId) {
+async function awaitPendingTrustValidation(tabId, budget) {
   const validation = pendingTrustValidationByTab.get(tabId);
   if (!validation?.promise) return true;
-  const timedOut = Symbol("tab-trust-validation-timeout");
-  let timeout;
-  try {
-    const result = await Promise.race([
-      validation.promise,
-      new Promise((resolve) => {
-        timeout = setTimeout(() => resolve(timedOut), blockingProbeBudgetMs());
-      }),
-    ]);
-    return result !== timedOut && result === true;
-  } finally {
-    clearTimeout(timeout);
-  }
+  return (await waitWithinBlockingRequestBudget(validation.promise, budget)) === true;
 }
 
 function settleRedirectedRequest(record) {
@@ -1010,6 +1010,15 @@ async function recordRequestDiagnostics(details, decision) {
 }
 
 async function handleRequest(details) {
+  const blockingBudget = createBlockingRequestBudget();
+  try {
+    return await handleRequestWithinBlockingBudget(details, blockingBudget);
+  } finally {
+    blockingBudget.clear();
+  }
+}
+
+async function handleRequestWithinBlockingBudget(details, blockingBudget) {
   // Firefox keeps requestId stable across redirects and invokes onBeforeRequest
   // again for the target URL. Attach there so the filter sees the HLS response,
   // rather than the bodyless synthetic redirect created by this listener.
@@ -1019,7 +1028,7 @@ async function handleRequest(details) {
     if (isChzzkLiveUrl(details.documentUrl, policy)) {
       pendingTrustValidationByTab.delete(details.tabId);
     }
-  } else if (!(await awaitPendingTrustValidation(details?.tabId))) {
+  } else if (!(await awaitPendingTrustValidation(details?.tabId, blockingBudget))) {
     return undefined;
   }
   const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
@@ -1033,7 +1042,10 @@ async function handleRequest(details) {
       let targetState = session ? activeTargetForSession(session) : null;
       let targetQuality = targetState?.targetQuality ?? null;
       if (!targetQuality) {
-        targetQuality = await waitForBlockingResolution(startHighestTargetResolution(details, decision));
+        targetQuality = await waitForBlockingResolution(
+          startHighestTargetResolution(details, decision),
+          blockingBudget,
+        );
         targetState = session ? activeTargetForSession(session) : null;
       } else if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
         startHighestTargetResolution(details, decision).catch((error) => {
@@ -1141,21 +1153,28 @@ async function resetAndPrewarmRuntimeState() {
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (changeInfo?.status === "loading") {
     if (!changeInfo?.url) {
-      if (liveContextByTab.has(tabId)) {
-        clearTabQualityState(tabId).catch((error) =>
-          console.warn("[CHZZK] failed to clear tab quality state for document load", error),
-        );
-      }
+      clearTabQualityState(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear tab quality state for document load", error),
+      );
       startReloadTrustValidation(tabId)?.catch((error) =>
         console.warn("[CHZZK] failed to validate tab trust after document load", error),
       );
       return;
     }
+    pendingTrustValidationByTab.delete(tabId);
     if (isChzzkLiveUrl(changeInfo.url, policy)) {
       clearTabQualityState(tabId).catch((error) =>
         console.warn("[CHZZK] failed to clear tab quality state for live document load", error),
       );
+      prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
+        console.warn("[CHZZK] failed to prewarm live tab from document load", error),
+      );
+    } else {
+      removeTabTrustContext(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear tab trust context for document load", error),
+      );
     }
+    return;
   }
   if (!changeInfo?.url) return;
   pendingTrustValidationByTab.delete(tabId);
