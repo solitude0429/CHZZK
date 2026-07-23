@@ -681,19 +681,43 @@ async function awaitPendingTrustValidation(tabId) {
 function settleRedirectedRequest(record) {
   if (record.settled) return;
   const statusCode = record.statusCode;
-  const statusFailed =
-    record.networkFailed ||
-    (Number.isSafeInteger(statusCode) &&
-      (statusCode === 204 ||
-        statusCode === 205 ||
-        (statusCode >= 300 && statusCode <= 399) ||
-        (statusCode >= 400 && statusCode <= 599)));
-  if (statusFailed || record.bodyEvidence === "invalid") {
+  if (record.networkFailed) {
     record.settled = true;
     invalidateRedirectedTarget(record);
     return;
   }
-  if (!Number.isSafeInteger(statusCode) || statusCode < 200 || statusCode > 299) return;
+  // Body completion can precede webRequest.onCompleted. In particular, a
+  // conditional 304 has an empty transfer body but reuses the previously
+  // validated cached playlist, so wait for its status before judging emptiness.
+  if (!Number.isSafeInteger(statusCode)) return;
+  if (statusCode === 304) {
+    if (record.bodyEvidence === "pending") return;
+    record.settled = true;
+    if (redirectedRequestsById.get(record.requestId) === record) {
+      redirectedRequestsById.delete(record.requestId);
+    }
+    if (record.bodyEvidence === "empty" || record.bodyEvidence === "valid") {
+      renewSuccessfulRedirectTarget(record);
+    } else if (record.bodyEvidence !== "unavailable") {
+      invalidateRedirectedTarget(record);
+    }
+    return;
+  }
+  const statusFailed =
+    statusCode === 204 ||
+    statusCode === 205 ||
+    (statusCode >= 300 && statusCode <= 399) ||
+    (statusCode >= 400 && statusCode <= 599);
+  if (
+    statusFailed ||
+    record.bodyEvidence === "empty" ||
+    record.bodyEvidence === "invalid"
+  ) {
+    record.settled = true;
+    invalidateRedirectedTarget(record);
+    return;
+  }
+  if (statusCode < 200 || statusCode > 299) return;
   if (record.bodyEvidence === "pending") return;
   record.settled = true;
   if (redirectedRequestsById.get(record.requestId) === record) {
@@ -739,6 +763,8 @@ function attachRedirectBodyVerifier(record) {
       filter.close();
       if (oversized) {
         record.bodyEvidence = "invalid";
+      } else if (totalBytes === 0) {
+        record.bodyEvidence = "empty";
       } else {
         const body = new Uint8Array(totalBytes);
         let offset = 0;

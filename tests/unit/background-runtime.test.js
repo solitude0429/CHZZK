@@ -564,6 +564,58 @@ describe("background runtime quality resolution", () => {
     }
   });
 
+  it("renews a validated target when Firefox completes an empty 304 cache revalidation", async () => {
+    for (const firstEvent of ["body", "status"]) {
+      const availableQualities = new Set(["2160p"]);
+      const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+        availableQualities,
+      });
+      const family = `cache-304-${firstEvent}`;
+      const firstRequest = familyRequest(619, family, `${family}-first`);
+      const first = plain(await listeners.onBeforeRequest(firstRequest));
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, firstRequest, first.redirectUrl);
+      const complete304 = () =>
+        listeners.onCompleted({
+          requestId: firstRequest.requestId,
+          statusCode: 304,
+          url: first.redirectUrl,
+        });
+      const empty304 = () => deliverFilteredResponse(responseFilters, firstRequest.requestId, "");
+      if (firstEvent === "body") {
+        empty304();
+        complete304();
+      } else {
+        complete304();
+        empty304();
+      }
+
+      availableQualities.clear();
+      availableQualities.add("1080p");
+      const fetchCountAfterWarmup = fetches.length;
+      advanceClock(9_000);
+      const secondRequest = familyRequest(619, family, `${family}-second`);
+      const second = plain(await listeners.onBeforeRequest(secondRequest));
+      assert.match(second.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, secondRequest, second.redirectUrl);
+      listeners.onCompleted({
+        requestId: secondRequest.requestId,
+        statusCode: 304,
+        url: second.redirectUrl,
+      });
+      deliverFilteredResponse(responseFilters, secondRequest.requestId, "");
+
+      advanceClock(9_000);
+      const third = plain(await listeners.onBeforeRequest(familyRequest(619, family, `${family}-third`)));
+      assert.match(third.redirectUrl, /chunklist_2160p/);
+      assert.equal(
+        fetches.length,
+        fetchCountAfterWarmup,
+        `empty 304 evidence must renew the validated target when ${firstEvent} arrives first`,
+      );
+    }
+  });
+
   it("invalidates a redirected family target on exposed 404/error events and downgrades without looping", async () => {
     for (const eventName of ["onCompleted", "onErrorOccurred"]) {
       const { fetches, listeners } = await loadBackground({

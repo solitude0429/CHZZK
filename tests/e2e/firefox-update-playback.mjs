@@ -188,7 +188,14 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     (request, response) => {
       const host = String(request.headers.host ?? "").split(":")[0];
       const requestUrl = new URL(request.url ?? "/", `https://${host}`);
-      requests.push({ host, method: request.method, path: requestUrl.pathname, search: requestUrl.search });
+      const requestRecord = {
+        cacheRevalidation: false,
+        host,
+        method: request.method,
+        path: requestUrl.pathname,
+        search: requestUrl.search,
+      };
+      requests.push(requestRecord);
       response.setHeader("access-control-allow-origin", "*");
       response.setHeader("cache-control", "no-store");
 
@@ -226,6 +233,15 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i,
         )?.[1];
         if (quality === "1080p" || quality === "720p" || quality === "480p") {
+          const etag = `"fixture-${quality}"`;
+          response.setHeader("cache-control", "no-cache");
+          response.setHeader("etag", etag);
+          if (request.headers["if-none-match"] === etag) {
+            requestRecord.cacheRevalidation = true;
+            response.statusCode = 304;
+            response.end();
+            return;
+          }
           response.statusCode = 200;
           response.setHeader("content-type", "application/vnd.apple.mpegurl");
           response.end(`#EXTM3U\n# fixture-quality=${quality}\n`);
@@ -595,9 +611,20 @@ async function main() {
         `mini-player re-probed ${unavailableQuality} after a streamed HLS body should have renewed the target`,
       );
     }
+    assert.equal(
+      miniPlayerRequests.some(
+        (request) =>
+          request.cacheRevalidation &&
+          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.path.includes("/1080p/"),
+      ),
+      true,
+      "Firefox did not exercise the 304 cached-playlist revalidation path",
+    );
 
     console.log(
       JSON.stringify({
+        cacheRevalidation: "304",
         firefox: basename(firefoxBinary),
         functionalOnly: true,
         hostPermissionUpgrade: "/live/* -> /*",
