@@ -2,6 +2,7 @@ import { parseQualityFromUrl, qualityNumber, urlQualityMarkersAreSafe } from "./
 
 const DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
 const DEFAULT_REQUEST_METHODS = ["get"];
+const HLS_PLAYLIST_EXTENSION_CASE_VARIANTS = ["M3U8", "M3u8", "m3U8", "m3u8"];
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -102,7 +103,7 @@ function isDedicatedChzzkHlsUrl(url, policy) {
   return isNumericHlsPlaylistUrl(url) && isDedicatedChzzkHlsPlaylistUrl(url, policy);
 }
 
-function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
+export function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
   if (!isHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
 
   try {
@@ -191,9 +192,11 @@ function requestContextEvidence(details, policy) {
   };
 }
 
-function contextRequiresDedicatedHls(evidence, tabId, trustedLiveTabIds) {
+function contextRequiresDedicatedHls(evidence, tabId, trustedLiveTabIds, miniPlayerTabIds) {
   return (
-    evidence.requiresDedicatedHls || (evidence.genericHlsRequiresLiveTab && !trustedLiveTabIds?.has?.(tabId))
+    miniPlayerTabIds?.has?.(tabId) ||
+    evidence.requiresDedicatedHls ||
+    (evidence.genericHlsRequiresLiveTab && !trustedLiveTabIds?.has?.(tabId))
   );
 }
 
@@ -206,11 +209,15 @@ export function hasTrustedChzzkMetadata(details, policy) {
   return evidence.trusted && !evidence.veto;
 }
 
-export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
+export function isTrustedChzzkContext(
+  details,
+  policy,
+  { miniPlayerTabIds = null, trustedLiveTabIds = null } = {},
+) {
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
-  if (contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)) {
+  if (contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds, miniPlayerTabIds)) {
     return isDedicatedChzzkHlsUrl(details.url, policy);
   }
   if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
@@ -219,7 +226,11 @@ export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = nul
   return isDedicatedChzzkHlsUrl(details.url, policy);
 }
 
-export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTabIds = null } = {}) {
+export function isTrustedMasterPlaylistRequest(
+  details,
+  policy,
+  { miniPlayerTabIds = null, trustedLiveTabIds = null } = {},
+) {
   if (!details || !isValidRedirectTabId(details.tabId) || !isHttpsUrl(details.url)) return false;
   if (!isHlsPlaylistUrl(details.url) || parseQualityFromUrl(details.url)) return false;
   if (details.type && !resourceTypes(policy).includes(details.type)) return false;
@@ -228,7 +239,7 @@ export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTab
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
   if (evidence.trusted) {
-    return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)
+    return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds, miniPlayerTabIds)
       ? isDedicatedChzzkHlsPlaylistUrl(details.url, policy)
       : true;
   }
@@ -302,7 +313,11 @@ function displayPermissionKey(permission) {
 }
 
 export function configuredWebRequestUrls(policy) {
-  return configuredRequiredOrigins(policy);
+  return trustedRequestDomains(policy)
+    .flatMap((domain) =>
+      HLS_PLAYLIST_EXTENSION_CASE_VARIANTS.map((extension) => `https://*.${domain}/*.${extension}*`),
+    )
+    .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
 }
 
 export function configuredResourceTypes(policy) {

@@ -741,7 +741,7 @@ function policyUrl(host, quality, secret, { mixed = false, playlist = true, prot
 
 function runRequestPolicyCase(context) {
   const { check, implementation, index, rng, trackInput } = context;
-  const scenario = index % 14;
+  const scenario = index % 16;
   const quality = rng.pick(QUALITY_NUMBERS);
   const tabId = 1 + rng.int(100_000);
   const secret = secretCanary(rng, index);
@@ -882,7 +882,7 @@ function runRequestPolicyCase(context) {
     const decision = implementation.shouldRedirectRequest(trustedDetails(mixed, tabId), policy);
     check(decision.ok === false, "mixed quality markers passed request policy");
     check(decision.reason === "contradictory-quality-markers", "mixed marker veto reason changed");
-  } else {
+  } else if (scenario === 12 || scenario === 13) {
     const host = scenario === 12 ? dedicatedRequestHost(rng) : genericTrustedRequestHost(rng);
     const miniPlayerUrl = policyUrl(host, quality, secret);
     const miniPlayer = trustedDetails(miniPlayerUrl, tabId, {
@@ -901,6 +901,28 @@ function runRequestPolicyCase(context) {
     check(
       implementation.isTrustedMasterPlaylistRequest(master, policy) === (scenario === 12),
       "same-site mini-player master boundary changed",
+    );
+  } else {
+    const host = scenario === 15 ? dedicatedRequestHost(rng) : genericTrustedRequestHost(rng);
+    const staleLiveMetadata = trustedDetails(policyUrl(host, quality, secret), tabId);
+    const miniPlayerState = {
+      miniPlayerTabIds: new Set([tabId]),
+      trustedLiveTabIds: new Set([tabId]),
+    };
+    const master = {
+      ...staleLiveMetadata,
+      url: `https://${host}/live/master.m3u8?Policy=${secret}`,
+    };
+    trackInput(staleLiveMetadata.url);
+    trackInput(master.url);
+    check(
+      implementation.shouldRedirectRequest(staleLiveMetadata, policy, miniPlayerState).ok ===
+        (scenario === 15),
+      "authoritative mini-player mode did not override stale live request metadata",
+    );
+    check(
+      implementation.isTrustedMasterPlaylistRequest(master, policy, miniPlayerState) === (scenario === 15),
+      "mini-player master boundary trusted stale live metadata on a generic CDN",
     );
   }
 }

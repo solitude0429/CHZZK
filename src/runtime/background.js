@@ -16,6 +16,8 @@ import {
   hasTrustedChzzkMetadata,
   isChzzkLiveUrl,
   isChzzkSiteUrl,
+  isDedicatedChzzkHlsPlaylistUrl,
+  isHlsPlaylistUrl,
   isTrustedMasterPlaylistRequest,
   isTrustedRequestDomain,
   isValidRedirectTabId,
@@ -32,6 +34,7 @@ import {
   playlistFamilyKey,
   qualityNumber,
   replaceQualityInUrl,
+  urlQualityMarkersAreSafe,
 } from "../shared/quality.js";
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -41,6 +44,7 @@ const activeLiveTabIds = new Set();
 const activeTargetsBySession = new Map();
 const failedTargetsBySession = new Map();
 const liveContextByTab = new Map();
+const miniPlayerTabIds = new Set();
 const pendingTrustValidationByTab = new Map();
 const redirectedRequestsById = new Map();
 const resolutionBySession = new Map();
@@ -269,7 +273,11 @@ async function fetchPlaylistEvidence(url, { signal = null } = {}) {
 
 function urlQualityMarkersMatch(url, expectedQuality) {
   const qualities = parseQualitiesFromUrl(url);
-  return qualities.length > 0 && qualities.every((quality) => quality === expectedQuality);
+  return (
+    qualities.length > 0 &&
+    urlQualityMarkersAreSafe(url) &&
+    parseQualityFromUrl(url) === expectedQuality
+  );
 }
 
 function networkRequestUrl(url) {
@@ -396,6 +404,7 @@ function currentTabContextToken(tabId) {
 }
 
 function resolutionContextKey(details) {
+  if (miniPlayerTabIds.has(details.tabId)) return "trusted-request";
   return (
     liveContextByTab.get(details.tabId) ??
     liveContextKey(details.documentUrl) ??
@@ -411,6 +420,7 @@ function playlistSession(details) {
   const tabId = details.tabId;
   return {
     contextKey,
+    dedicatedHls: isDedicatedChzzkHlsPlaylistUrl(details.url, policy),
     familyKey,
     key: JSON.stringify([tabId, contextKey, familyKey]),
     tabId,
@@ -557,12 +567,7 @@ function tabHasQualityState(tabId) {
   );
 }
 
-function dropTabQualityState(
-  tabId,
-  { dropToken = false, preserveVerifiedTrustedRequest = false } = {},
-) {
-  const shouldPreserveVerified = (state) =>
-    preserveVerifiedTrustedRequest && state.contextKey === "trusted-request";
+function dropTabQualityState(tabId, { dropToken = false } = {}) {
   let hadTarget = false;
   for (const [key, state] of resolutionBySession) {
     if (state.tabId !== tabId) continue;
@@ -570,7 +575,7 @@ function dropTabQualityState(
     resolutionBySession.delete(key);
   }
   for (const [key, state] of activeTargetsBySession) {
-    if (state.tabId !== tabId || shouldPreserveVerified(state)) continue;
+    if (state.tabId !== tabId) continue;
     hadTarget = true;
     activeTargetsBySession.delete(key);
   }
@@ -578,7 +583,7 @@ function dropTabQualityState(
     if (state.tabId === tabId) failedTargetsBySession.delete(key);
   }
   for (const [requestId, state] of redirectedRequestsById) {
-    if (state.tabId === tabId && !shouldPreserveVerified(state)) {
+    if (state.tabId === tabId) {
       state.settled = true;
       redirectedRequestsById.delete(requestId);
     }
@@ -591,6 +596,78 @@ function dropTabQualityState(
   return hadTarget;
 }
 
+function targetHasInFlightResponseVerification(state) {
+  for (const record of redirectedRequestsById.values()) {
+    if (
+      !record.settled &&
+      record.key === state.key &&
+      record.targetEpoch === state.targetEpoch &&
+      record.targetQuality === state.targetQuality
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function targetCanContinueInMiniPlayer(state, now) {
+  if (!state?.dedicatedHls || !state.resolved) return false;
+  if (state.expiresAt != null && state.expiresAt <= now) return false;
+  if (state.contextKey === "trusted-request") return true;
+  return (
+    (state.validatedNetworkUrls instanceof Map && state.validatedNetworkUrls.size > 0) ||
+    targetHasInFlightResponseVerification(state)
+  );
+}
+
+function migrateTabQualityStateToMiniPlayer(tabId) {
+  const now = Date.now();
+  const tabTargets = [...activeTargetsBySession.entries()].filter(
+    ([, state]) => state.tabId === tabId,
+  );
+  const targetGroups = new Map();
+  const preservedTargetByOldKey = new Map();
+
+  for (const [key, state] of resolutionBySession) {
+    if (state.tabId !== tabId) continue;
+    state.controller.abort();
+    resolutionBySession.delete(key);
+  }
+  for (const [key, state] of failedTargetsBySession) {
+    if (state.tabId === tabId) failedTargetsBySession.delete(key);
+  }
+  for (const [oldKey, state] of tabTargets) {
+    activeTargetsBySession.delete(oldKey);
+    if (!targetCanContinueInMiniPlayer(state, now)) continue;
+    const key = JSON.stringify([tabId, "trusted-request", state.familyKey]);
+    const target = { ...state, contextKey: "trusted-request", key };
+    const group = targetGroups.get(key) ?? [];
+    group.push({ oldKey, target });
+    targetGroups.set(key, group);
+  }
+  for (const group of targetGroups.values()) {
+    // Multiple contexts for one family should not normally coexist. If they do,
+    // fail open instead of guessing which stream survived the navigation.
+    if (group.length !== 1) continue;
+    const [{ oldKey, target }] = group;
+    activeTargetsBySession.set(target.key, target);
+    preservedTargetByOldKey.set(oldKey, target);
+  }
+  for (const [requestId, record] of redirectedRequestsById) {
+    if (record.tabId !== tabId) continue;
+    const target = preservedTargetByOldKey.get(record.key);
+    if (target?.targetEpoch === record.targetEpoch && target.targetQuality === record.targetQuality) {
+      record.contextKey = target.contextKey;
+      record.key = target.key;
+      continue;
+    }
+    record.settled = true;
+    redirectedRequestsById.delete(requestId);
+  }
+  tabContextTokenByTab.set(tabId, {});
+  return tabTargets.length > 0;
+}
+
 function registerRequestContext(details) {
   const tabId = details?.tabId;
   if (!isValidRedirectTabId(tabId)) return false;
@@ -600,7 +677,11 @@ function registerRequestContext(details) {
     );
     return false;
   }
-  const requestContext = requestLiveContext(details);
+  // Firefox may retain the original live documentUrl after a same-document
+  // pushState into CHZZK's mini-player search/list UI. tabs.onUpdated is
+  // authoritative for this mode; accepting that stale URL would repeatedly
+  // re-adopt the old live context and discard the migrated target.
+  const requestContext = miniPlayerTabIds.has(tabId) ? null : requestLiveContext(details);
   if (!requestContext) return true;
   const knownContext = liveContextByTab.get(tabId);
   if (knownContext && knownContext !== requestContext) {
@@ -622,6 +703,7 @@ function registerRequestContext(details) {
 
 async function prewarmLiveTab(tabId, url = null) {
   if (!isValidRedirectTabId(tabId)) return;
+  miniPlayerTabIds.delete(tabId);
   currentTabContextToken(tabId);
   const nextContext = liveContextKey(url);
   const previousContext = liveContextByTab.get(tabId);
@@ -654,29 +736,19 @@ async function removeTabTrustContext(tabId) {
   const hadTarget = dropTabQualityState(tabId, { dropToken: true });
   const hadLiveTab = activeLiveTabIds.delete(tabId);
   const hadContext = liveContextByTab.delete(tabId);
-  if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
+  const hadMiniPlayer = miniPlayerTabIds.delete(tabId);
+  if (hadTarget || hadLiveTab || hadContext || hadMiniPlayer) await updateRedirectDiagnostics();
 }
 
 async function preserveSameSiteMiniPlayerState(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   pendingTrustValidationByTab.delete(tabId);
-  const hadTarget = dropTabQualityState(tabId, { preserveVerifiedTrustedRequest: true });
+  const hadTarget = migrateTabQualityStateToMiniPlayer(tabId);
   const hadLiveTab = activeLiveTabIds.delete(tabId);
   const hadContext = liveContextByTab.delete(tabId);
-  if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
-}
-
-async function clearRuntimeRedirectState() {
-  for (const state of resolutionBySession.values()) state.controller.abort();
-  activeLiveTabIds.clear();
-  activeTargetsBySession.clear();
-  failedTargetsBySession.clear();
-  liveContextByTab.clear();
-  pendingTrustValidationByTab.clear();
-  redirectedRequestsById.clear();
-  resolutionBySession.clear();
-  tabContextTokenByTab.clear();
-  await updateRedirectDiagnostics();
+  const addedMiniPlayer = !miniPlayerTabIds.has(tabId);
+  miniPlayerTabIds.add(tabId);
+  if (hadTarget || hadLiveTab || hadContext || addedMiniPlayer) await updateRedirectDiagnostics();
 }
 
 function startReloadTrustValidation(tabId) {
@@ -710,12 +782,6 @@ function startReloadTrustValidation(tabId) {
       }
     });
   return validation.promise;
-}
-
-async function awaitPendingTrustValidation(tabId, budget) {
-  const validation = pendingTrustValidationByTab.get(tabId);
-  if (!validation?.promise) return true;
-  return (await waitWithinBlockingRequestBudget(validation.promise, budget)) === true;
 }
 
 function settleRedirectedRequest(record) {
@@ -784,7 +850,9 @@ function attachRedirectBodyVerifier(record) {
 
   record.bodyEvidence = "pending";
   record.bodyVerificationFailed = false;
-  const chunks = [];
+  const decoder = new TextDecoder();
+  const textChunks = [];
+  const maxBytes = probeMaxBytes();
   let totalBytes = 0;
   let oversized = false;
   filter.ondata = (event) => {
@@ -795,10 +863,11 @@ function attachRedirectBodyVerifier(record) {
       const bytes = new Uint8Array(event.data);
       if (!oversized) {
         totalBytes += bytes.byteLength;
-        if (totalBytes <= probeMaxBytes()) chunks.push(bytes.slice());
-        else {
+        if (totalBytes <= maxBytes) {
+          textChunks.push(decoder.decode(bytes, { stream: true }));
+        } else {
           oversized = true;
-          chunks.length = 0;
+          textChunks.length = 0;
         }
       }
     } catch {
@@ -815,13 +884,8 @@ function attachRedirectBodyVerifier(record) {
       } else if (totalBytes === 0) {
         record.bodyEvidence = "empty";
       } else {
-        const body = new Uint8Array(totalBytes);
-        let offset = 0;
-        for (const chunk of chunks) {
-          body.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-        const text = new TextDecoder().decode(body);
+        textChunks.push(decoder.decode());
+        const text = textChunks.join("");
         record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
           { finalUrl: record.redirectNetworkUrl, text },
           record.targetQuality,
@@ -1009,16 +1073,138 @@ async function recordRequestDiagnostics(details, decision) {
   });
 }
 
-async function handleRequest(details) {
-  const blockingBudget = createBlockingRequestBudget();
-  try {
-    return await handleRequestWithinBlockingBudget(details, blockingBudget);
-  } finally {
-    blockingBudget.clear();
-  }
+function scheduleRequestDiagnostics(details, decision, shouldRecord) {
+  if (!shouldRecord) return;
+  recordRequestDiagnostics(details, decision).catch((error) =>
+    console.warn("[CHZZK] diagnostics recording failed", error),
+  );
 }
 
-async function handleRequestWithinBlockingBudget(details, blockingBudget) {
+function finalizeEligibleRequest(
+  details,
+  decision,
+  shouldRecord,
+  attachedRedirectVerifier,
+  session,
+  targetState,
+) {
+  const targetQuality = targetState?.targetQuality ?? null;
+  let redirectUrl = null;
+  if (targetQuality) {
+    redirectUrl = buildHighestQualityRedirectUrl(details.url, {
+      minRedirectQuality: policy.minRedirectQuality,
+      targetQuality,
+    });
+    decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
+  }
+  if (redirectUrl) {
+    rememberRedirectedRequest(details, session, targetState, redirectUrl);
+  } else if (
+    !attachedRedirectVerifier &&
+    targetState?.targetQuality === decision.quality &&
+    urlQualityMarkersMatch(details.url, targetState.targetQuality)
+  ) {
+    const record = rememberRedirectedRequest(details, session, targetState, details.url);
+    if (record) attachRedirectBodyVerifier(record);
+  }
+  scheduleRequestDiagnostics(details, decision, shouldRecord);
+  return redirectUrl ? { redirectUrl } : undefined;
+}
+
+function resolveTargetForRequest(
+  details,
+  decision,
+  shouldRecord,
+  attachedRedirectVerifier,
+  session,
+  inheritedBudget,
+) {
+  const blockingBudget = inheritedBudget ?? createBlockingRequestBudget();
+  const ownsBudget = inheritedBudget == null;
+  let resolution;
+  try {
+    resolution = startHighestTargetResolution(details, decision);
+  } catch (error) {
+    if (ownsBudget) blockingBudget.clear();
+    scheduleRedirectDiagnostics(String(error?.message ?? error));
+    console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+    scheduleRequestDiagnostics(details, decision, shouldRecord);
+    return undefined;
+  }
+
+  const result = waitForBlockingResolution(resolution, blockingBudget)
+    .then(() => {
+      const targetState = session ? activeTargetForSession(session) : null;
+      return finalizeEligibleRequest(
+        details,
+        decision,
+        shouldRecord,
+        attachedRedirectVerifier,
+        session,
+        targetState,
+      );
+    })
+    .catch((error) => {
+      scheduleRedirectDiagnostics(String(error?.message ?? error));
+      console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+      scheduleRequestDiagnostics(details, decision, shouldRecord);
+      return undefined;
+    });
+  return ownsBudget ? result.finally(() => blockingBudget.clear()) : result;
+}
+
+function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inheritedBudget = null) {
+  const redirectOptions = { miniPlayerTabIds, trustedLiveTabIds: activeLiveTabIds };
+  const shouldRecord = shouldRecordDiagnostics(details, policy, redirectOptions);
+  const decision = shouldRedirectRequest(details, policy, redirectOptions);
+
+  if (decision.ok) {
+    try {
+      const session = playlistSession(details);
+      const targetState = session ? activeTargetForSession(session) : null;
+      if (!targetState?.targetQuality) {
+        return resolveTargetForRequest(
+          details,
+          decision,
+          shouldRecord,
+          attachedRedirectVerifier,
+          session,
+          inheritedBudget,
+        );
+      }
+      if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
+        startHighestTargetResolution(details, decision).catch((error) => {
+          reportRedirectError(error).catch(() => {});
+          console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+        });
+      }
+      return finalizeEligibleRequest(
+        details,
+        decision,
+        shouldRecord,
+        attachedRedirectVerifier,
+        session,
+        targetState,
+      );
+    } catch (error) {
+      scheduleRedirectDiagnostics(String(error?.message ?? error));
+      console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+      scheduleRequestDiagnostics(details, decision, shouldRecord);
+      return undefined;
+    }
+  }
+  if (isTrustedMasterPlaylistRequest(details, policy, redirectOptions)) {
+    startMasterTargetResolution(details).catch((error) => {
+      reportRedirectError(error).catch(() => {});
+      console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+    });
+  }
+  scheduleRequestDiagnostics(details, decision, shouldRecord);
+  return undefined;
+}
+
+function handleRequest(details) {
+  if (!isHlsPlaylistUrl(details?.url)) return undefined;
   // Firefox keeps requestId stable across redirects and invokes onBeforeRequest
   // again for the target URL. Attach there so the filter sees the HLS response,
   // rather than the bodyless synthetic redirect created by this listener.
@@ -1028,68 +1214,36 @@ async function handleRequestWithinBlockingBudget(details, blockingBudget) {
     if (isChzzkLiveUrl(details.documentUrl, policy)) {
       pendingTrustValidationByTab.delete(details.tabId);
     }
-  } else if (!(await awaitPendingTrustValidation(details?.tabId, blockingBudget))) {
+    return handleTrustedPlaylistRequest(details, attachedRedirectVerifier);
+  }
+
+  const validation = pendingTrustValidationByTab.get(details?.tabId);
+  if (!validation?.promise) {
+    return handleTrustedPlaylistRequest(details, attachedRedirectVerifier);
+  }
+  const blockingBudget = createBlockingRequestBudget();
+  return waitWithinBlockingRequestBudget(validation.promise, blockingBudget)
+    .then((trusted) =>
+      trusted === true
+        ? handleTrustedPlaylistRequest(details, attachedRedirectVerifier, blockingBudget)
+        : undefined,
+    )
+    .finally(() => blockingBudget.clear());
+}
+
+function handleRequestSafely(details) {
+  try {
+    const result = handleRequest(details);
+    return typeof result?.then === "function"
+      ? result.catch((error) => {
+          console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+          return undefined;
+        })
+      : result;
+  } catch (error) {
+    console.warn("[CHZZK] diagnostics/redirect handling failed", error);
     return undefined;
   }
-  const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
-  const shouldRecord = shouldRecordDiagnostics(details, policy, redirectOptions);
-  let decision = shouldRedirectRequest(details, policy, redirectOptions);
-  let redirectUrl = null;
-
-  if (decision.ok) {
-    try {
-      const session = playlistSession(details);
-      let targetState = session ? activeTargetForSession(session) : null;
-      let targetQuality = targetState?.targetQuality ?? null;
-      if (!targetQuality) {
-        targetQuality = await waitForBlockingResolution(
-          startHighestTargetResolution(details, decision),
-          blockingBudget,
-        );
-        targetState = session ? activeTargetForSession(session) : null;
-      } else if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
-        startHighestTargetResolution(details, decision).catch((error) => {
-          reportRedirectError(error).catch(() => {});
-          console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
-        });
-      }
-      if (!redirectUrl && targetQuality) {
-        redirectUrl = buildHighestQualityRedirectUrl(details.url, {
-          minRedirectQuality: policy.minRedirectQuality,
-          targetQuality,
-        });
-      }
-      if (targetQuality) {
-        decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
-      }
-      if (redirectUrl) {
-        rememberRedirectedRequest(details, session, targetState, redirectUrl);
-      } else if (
-        !attachedRedirectVerifier &&
-        targetState?.targetQuality === decision.quality &&
-        urlQualityMarkersMatch(details.url, targetState.targetQuality)
-      ) {
-        const record = rememberRedirectedRequest(details, session, targetState, details.url);
-        if (record) attachRedirectBodyVerifier(record);
-      }
-    } catch (error) {
-      scheduleRedirectDiagnostics(String(error?.message ?? error));
-      console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
-    }
-  } else if (isTrustedMasterPlaylistRequest(details, policy, redirectOptions)) {
-    startMasterTargetResolution(details).catch((error) => {
-      reportRedirectError(error).catch(() => {});
-      console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
-    });
-  }
-
-  if (shouldRecord) {
-    recordRequestDiagnostics(details, decision).catch((error) =>
-      console.warn("[CHZZK] diagnostics recording failed", error),
-    );
-  }
-
-  return redirectUrl ? { redirectUrl } : undefined;
 }
 
 const WEB_REQUEST_FILTER = {
@@ -1098,11 +1252,7 @@ const WEB_REQUEST_FILTER = {
 };
 
 api.webRequest.onBeforeRequest.addListener(
-  (details) =>
-    handleRequest(details).catch((error) => {
-      console.warn("[CHZZK] diagnostics/redirect handling failed", error);
-      return undefined;
-    }),
+  handleRequestSafely,
   WEB_REQUEST_FILTER,
   ["blocking"],
 );
@@ -1141,17 +1291,27 @@ async function prewarmExistingLiveTabs() {
   await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
 }
 
-async function resetAndPrewarmRuntimeState() {
-  await Promise.all([
-    clearRuntimeRedirectState().catch((error) =>
-      console.warn("[CHZZK] failed to persist startup redirect cleanup", error),
-    ),
-    prewarmExistingLiveTabs(),
-  ]);
+async function refreshAndPrewarmRuntimeState() {
+  let prewarmError = null;
+  try {
+    await prewarmExistingLiveTabs();
+  } catch (error) {
+    prewarmError = error;
+  }
+  try {
+    // A new background context already starts with empty in-memory maps. Do
+    // not clear them from a delayed install/startup event: a playlist request
+    // may have established a verified target before that event settles.
+    await updateRedirectDiagnostics();
+  } catch (error) {
+    if (!prewarmError) throw error;
+  }
+  if (prewarmError) throw prewarmError;
 }
 
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (changeInfo?.status === "loading") {
+    miniPlayerTabIds.delete(tabId);
     if (!changeInfo?.url) {
       clearTabQualityState(tabId).catch((error) =>
         console.warn("[CHZZK] failed to clear tab quality state for document load", error),
@@ -1200,9 +1360,13 @@ api.tabs?.onRemoved?.addListener((tabId) => {
 });
 
 api.runtime.onInstalled?.addListener(() => {
-  resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  refreshAndPrewarmRuntimeState().catch((error) =>
+    console.warn("[CHZZK] startup prewarm failed", error),
+  );
 });
 
 api.runtime.onStartup?.addListener(() => {
-  resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+  refreshAndPrewarmRuntimeState().catch((error) =>
+    console.warn("[CHZZK] startup prewarm failed", error),
+  );
 });

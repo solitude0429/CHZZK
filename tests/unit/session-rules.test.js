@@ -32,10 +32,21 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
     ]);
-    assert.deepEqual(
-      configuredWebRequestUrls(policy),
-      configuredRequiredOrigins(policy),
-      "webRequest must observe every required origin so real CHZZK/livecloud playlist hosts are not missed",
+    const webRequestUrls = configuredWebRequestUrls(policy);
+    assert.equal(
+      webRequestUrls.length,
+      configuredRequiredOrigins(policy).length * 4,
+      "every trusted origin must cover all m3u8 extension case variants",
+    );
+    assert.equal(
+      webRequestUrls.every((pattern) => /\/\*\.(?:m3u8|m3U8|M3u8|M3U8)\*$/.test(pattern)),
+      true,
+      "the blocking listener must observe playlist paths without intercepting media segments",
+    );
+    assert.equal(
+      configuredRequiredOrigins(policy).some((origin) => webRequestUrls.includes(origin)),
+      false,
+      "broad install permissions must not become broad blocking-listener filters",
     );
     assert.deepEqual([...configuredResourceTypes(policy)].sort(), ["media", "other", "xmlhttprequest"]);
   });
@@ -392,6 +403,30 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
         policy,
       ),
       false,
+    );
+    assert.equal(
+      shouldRedirectRequest(
+        {
+          ...genericCdn,
+          documentUrl: "https://chzzk.naver.com/live/original-document",
+        },
+        policy,
+        { miniPlayerTabIds: new Set([15]), trustedLiveTabIds: new Set([15]) },
+      ).ok,
+      false,
+      "authoritative mini-player mode must override Firefox's stale live documentUrl",
+    );
+    assert.equal(
+      shouldRedirectRequest(
+        {
+          ...miniPlayer,
+          documentUrl: "https://chzzk.naver.com/live/original-document",
+        },
+        policy,
+        { miniPlayerTabIds: new Set([15]), trustedLiveTabIds: new Set([15]) },
+      ).ok,
+      true,
+      "the stale documentUrl override must retain only the dedicated livecloud path",
     );
   });
 
