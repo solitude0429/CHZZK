@@ -21,6 +21,7 @@ const testPolicy = {
   directRewriteMaxQuality: "highest-supported",
   knownChzzkHlsPathMarkers: ["/chzzk/"],
   knownChzzkHlsRequestDomains: ["pstatic.net"],
+  markerEvidenceTtlMs: 1000,
   probeMaxBytes: 256000,
   probeResolutionBudgetMs: 3000,
   probeTimeoutMs: 1000,
@@ -203,10 +204,15 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   try {
     const mediaUrl =
       "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F";
-    await fetch(mediaUrl);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const response = await fetch(mediaUrl);
-    document.getElementById("result").textContent = response.status + ":" + (await response.text());
+    let finalBody = "";
+    let finalStatus = 0;
+    for (let index = 0; index < 4; index += 1) {
+      const response = await fetch(mediaUrl);
+      finalStatus = response.status;
+      finalBody = await response.text();
+      if (index < 3) await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    document.getElementById("result").textContent = finalStatus + ":" + finalBody;
   } catch (error) {
     document.getElementById("result").textContent = "error:" + error.name + ":" + error.message;
   }
@@ -548,6 +554,7 @@ async function main() {
         request.path.includes("/1080p/") &&
         request.path.includes("chunklist_1080p_highbitrate.m3u8"),
     ).length;
+    const requestCountBeforeMiniPlayer = requests.length;
     await driver.setContext("content");
     await driver.command("POST", "/url", {
       url: `https://www.chzzk.naver.com:${state.port}/lives?keyword=another-channel`,
@@ -576,6 +583,18 @@ async function main() {
       true,
       "Firefox did not expose the /lives-initiated playlist to the extension",
     );
+    const miniPlayerRequests = requests.slice(requestCountBeforeMiniPlayer);
+    for (const unavailableQuality of ["2160p", "1440p"]) {
+      assert.equal(
+        miniPlayerRequests.filter(
+          (request) =>
+            request.host === "nvelop-livecloud.pstatic.net" &&
+            request.path.includes(`/${unavailableQuality}/`),
+        ).length,
+        1,
+        `mini-player re-probed ${unavailableQuality} after a streamed HLS body should have renewed the target`,
+      );
+    }
 
     console.log(
       JSON.stringify({
@@ -584,6 +603,7 @@ async function main() {
         hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,
+        miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
         playbackQuality: "1080p",
         queryPreserved: true,

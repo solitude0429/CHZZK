@@ -496,6 +496,12 @@ describe("release and repository security guardrails", () => {
     assert.match(checker, /apps\/\$\{encodeURIComponent\(slug\)\}/);
     assert.match(checker, /commits\/\$\{marker\}/);
     assert.match(checker, /Final pull request lookup/);
+    assert.match(checker, /reviewEvidenceFingerprint/);
+    assert.equal(
+      checker.match(/collectReviewEvidence\(repository, pullNumber, currentHeadSha\)/g)?.length,
+      2,
+      "review evidence must be collected twice before acceptance",
+    );
     const gateLibrary = read("scripts/lib/review-gate.js");
     assert.match(gateLibrary, /pullRequest\?\.updated_at/);
     assert.match(gateLibrary, /performed_via_github_app/);

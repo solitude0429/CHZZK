@@ -25,7 +25,7 @@
       "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
       "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
-      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: usable redirected playlist completions renew it, while HTTP 204/205, 4xx/5xx, and request errors invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
+      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately and renewal requires both a successful 2xx completion and a bounded streamed body that proves usable HLS evidence; status-only, empty/HTML/malformed or oversized, 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
@@ -1077,7 +1077,10 @@
   }
   async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
     const evidence = await fetchPlaylistEvidence(url, { signal });
-    if (!evidence) return false;
+    return playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality);
+  }
+  function playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality) {
+    if (!evidence || !isLikelyHlsPlaylist(evidence.text)) return false;
     const variants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl);
     if (variants.length > 0 || /#EXT-X-STREAM-INF:/i.test(evidence.text)) {
       return variants.some((variant) => {
@@ -1332,7 +1335,10 @@
       if (state.tabId === tabId) failedTargetsBySession.delete(key);
     }
     for (const [requestId, state] of redirectedRequestsById) {
-      if (state.tabId === tabId) redirectedRequestsById.delete(requestId);
+      if (state.tabId === tabId) {
+        state.settled = true;
+        redirectedRequestsById.delete(requestId);
+      }
     }
     if (dropToken) {
       tabContextTokenByTab.delete(tabId);
@@ -1460,14 +1466,125 @@
       clearTimeout(timeout);
     }
   }
-  function rememberRedirectedRequest(details, session, targetQuality) {
-    if (details?.requestId == null || !session || !targetQuality) return;
+  function settleRedirectedRequest(record) {
+    if (record.settled) return;
+    const statusCode = record.statusCode;
+    const statusFailed =
+      record.networkFailed ||
+      (Number.isSafeInteger(statusCode) &&
+        (statusCode === 204 ||
+          statusCode === 205 ||
+          (statusCode >= 300 && statusCode <= 399) ||
+          (statusCode >= 400 && statusCode <= 599)));
+    if (statusFailed || record.bodyEvidence === "invalid") {
+      record.settled = true;
+      invalidateRedirectedTarget(record);
+      return;
+    }
+    if (!Number.isSafeInteger(statusCode) || statusCode < 200 || statusCode > 299) return;
+    if (record.bodyEvidence === "pending") return;
+    record.settled = true;
+    if (redirectedRequestsById.get(record.requestId) === record) {
+      redirectedRequestsById.delete(record.requestId);
+    }
+    if (record.bodyEvidence === "valid") renewSuccessfulRedirectTarget(record);
+  }
+  function attachRedirectBodyVerifier(record) {
+    if (typeof api.webRequest.filterResponseData !== "function") return;
+    let filter;
+    try {
+      filter = api.webRequest.filterResponseData(record.requestId);
+    } catch {
+      return;
+    }
+    record.bodyEvidence = "pending";
+    const chunks = [];
+    let totalBytes = 0;
+    let oversized = false;
+    filter.ondata = (event) => {
+      try {
+        filter.write(event.data);
+        const bytes = new Uint8Array(event.data);
+        if (!oversized) {
+          totalBytes += bytes.byteLength;
+          if (totalBytes <= probeMaxBytes()) chunks.push(bytes.slice());
+          else {
+            oversized = true;
+            chunks.length = 0;
+          }
+        }
+      } catch {
+        record.bodyEvidence = "invalid";
+        settleRedirectedRequest(record);
+      }
+    };
+    filter.onstop = () => {
+      try {
+        filter.close();
+        if (oversized) {
+          record.bodyEvidence = "invalid";
+        } else {
+          const body = new Uint8Array(totalBytes);
+          let offset = 0;
+          for (const chunk of chunks) {
+            body.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          const text = new TextDecoder().decode(body);
+          record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
+            { finalUrl: record.redirectUrl, text },
+            record.targetQuality,
+          )
+            ? "valid"
+            : "invalid";
+        }
+      } catch {
+        record.bodyEvidence = "invalid";
+      }
+      settleRedirectedRequest(record);
+    };
+    filter.onerror = () => {
+      record.bodyEvidence = "invalid";
+      settleRedirectedRequest(record);
+    };
+  }
+  function attachPendingRedirectBodyVerifier(details) {
+    const requestId = details?.requestId == null ? null : String(details.requestId);
+    if (!requestId) return;
+    const record = redirectedRequestsById.get(requestId);
+    if (
+      !record ||
+      record.settled ||
+      record.bodyEvidence !== "unavailable" ||
+      details.url !== record.redirectUrl
+    ) {
+      return;
+    }
+    attachRedirectBodyVerifier(record);
+  }
+  function rememberRedirectedRequest(details, session, targetQuality, redirectUrl) {
+    if (details?.requestId == null || !session || !targetQuality || !redirectUrl) return;
     const requestId = String(details.requestId);
     if (requestId === "" || requestId.length > 128) return;
+    const replacedRecord = redirectedRequestsById.get(requestId);
+    if (replacedRecord) replacedRecord.settled = true;
     redirectedRequestsById.delete(requestId);
-    redirectedRequestsById.set(requestId, { ...session, targetQuality });
+    const record = {
+      ...session,
+      bodyEvidence: "unavailable",
+      networkFailed: false,
+      redirectUrl,
+      requestId,
+      settled: false,
+      statusCode: null,
+      targetQuality,
+    };
+    redirectedRequestsById.set(requestId, record);
     while (redirectedRequestsById.size > MAX_TRACKED_REDIRECT_REQUESTS) {
-      redirectedRequestsById.delete(redirectedRequestsById.keys().next().value);
+      const oldestRequestId = redirectedRequestsById.keys().next().value;
+      const oldestRecord = redirectedRequestsById.get(oldestRequestId);
+      if (oldestRecord) oldestRecord.settled = true;
+      redirectedRequestsById.delete(oldestRequestId);
     }
   }
   function invalidateRedirectedTarget(record) {
@@ -1482,6 +1599,7 @@
     failedTargetsBySession.set(record.key, failures);
     for (const [requestId, pending] of redirectedRequestsById) {
       if (pending.key === record.key && pending.targetQuality === record.targetQuality) {
+        pending.settled = true;
         redirectedRequestsById.delete(requestId);
       }
     }
@@ -1503,25 +1621,20 @@
     if (!requestId) return;
     const record = redirectedRequestsById.get(requestId);
     if (!record) return;
-    redirectedRequestsById.delete(requestId);
     const statusCode = Number(details.statusCode);
-    const bodylessPlaylistResponse = statusCode === 204 || statusCode === 205;
-    if (
-      Number.isSafeInteger(statusCode) &&
-      (bodylessPlaylistResponse || (statusCode >= 400 && statusCode <= 599))
-    ) {
-      invalidateRedirectedTarget(record);
-    } else if (Number.isSafeInteger(statusCode) && statusCode >= 200 && statusCode <= 399) {
-      renewSuccessfulRedirectTarget(record);
+    record.statusCode = statusCode;
+    if (typeof details.url !== "string" || details.url !== record.redirectUrl) {
+      record.bodyEvidence = "invalid";
     }
+    settleRedirectedRequest(record);
   }
   function handleRedirectError(details) {
     const requestId = details?.requestId == null ? null : String(details.requestId);
     if (!requestId) return;
     const record = redirectedRequestsById.get(requestId);
     if (!record) return;
-    redirectedRequestsById.delete(requestId);
-    invalidateRedirectedTarget(record);
+    record.networkFailed = true;
+    settleRedirectedRequest(record);
   }
   async function recordRequestDiagnostics(details, decision) {
     await enqueueDiagnosticsMutation((current) => {
@@ -1530,6 +1643,7 @@
     });
   }
   async function handleRequest(details) {
+    attachPendingRedirectBodyVerifier(details);
     if (!registerRequestContext(details)) return void 0;
     if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
       if (isChzzkLiveUrl(details.documentUrl, quality_policy_default)) {
@@ -1565,7 +1679,7 @@
         if (targetQuality) {
           decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
         }
-        if (redirectUrl) rememberRedirectedRequest(details, session, targetQuality);
+        if (redirectUrl) rememberRedirectedRequest(details, session, targetQuality, redirectUrl);
       } catch (error) {
         scheduleRedirectDiagnostics(String(error?.message ?? error));
         console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);

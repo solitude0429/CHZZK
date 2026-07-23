@@ -30,7 +30,7 @@ if (args[1] === "graphql") {
         pullRequest: {
           headRefOid: state.headSha,
           reviewThreads: {
-            nodes: [{ isResolved: true }],
+            nodes: [{ id: "thread-1", isResolved: true }],
             pageInfo: { endCursor: null, hasNextPage: false },
           },
         },
@@ -54,9 +54,24 @@ if (endpoint === "repos/example/repository/pulls/42") {
 if (endpoint === "repos/example/repository/pulls/42/files?per_page=100") {
   pages([{ filename: "scripts/lib/review-gate.js", status: "modified" }]);
 }
-if (endpoint === "repos/example/repository/pulls/42/reviews?per_page=100") pages([]);
+if (endpoint === "repos/example/repository/pulls/42/reviews?per_page=100") {
+  state.reviewReads = (state.reviewReads || 0) + 1;
+  fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(state));
+  if (state.reviewsChangeBetweenSnapshots && state.reviewReads > 1) {
+    pages([{
+      commit_id: state.headSha,
+      id: 300,
+      state: "COMMENTED",
+      submitted_at: "2026-07-15T10:02:00Z",
+      user: { id: 1, login: "${reviewerLogin}", type: "Bot" },
+    }]);
+  }
+  pages([]);
+}
 if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
-  pages([
+  state.commentReads = (state.commentReads || 0) + 1;
+  fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(state));
+  const comments = [
     {
       body: "@codex review " + state.headSha,
       created_at: "2026-07-15T10:00:30Z",
@@ -76,7 +91,18 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
       updated_at: "2026-07-15T10:02:00Z",
       user: { login: "${reviewerLogin}", type: "Bot" },
     },
-  ]);
+  ];
+  if (state.commentsChangeBetweenSnapshots && state.commentReads > 1) {
+    comments.push({
+      body: "same-second late comment",
+      created_at: "2026-07-15T10:02:00Z",
+      id: 201,
+      performed_via_github_app: null,
+      updated_at: "2026-07-15T10:02:00Z",
+      user: { id: 999, login: "late-writer", type: "User" },
+    });
+  }
+  pages(comments);
 }
 if (endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100") pages([]);
 if (endpoint === "repos/example/repository/commits/" + state.headSha.slice(0, 10)) {
@@ -151,15 +177,23 @@ describe("review-gate GitHub evidence collection", () => {
     );
   });
 
-  it("fails closed on mismatched App provenance, ambiguous refs, or a collection race", () => {
+  it("fails closed on provenance, ref, metadata, same-second comment, or review races", () => {
     for (const overrides of [
       { wrongApp: true },
       { commitResolutionFails: true },
       { finalBaseChanges: true },
+      { commentsChangeBetweenSnapshots: true },
+      { reviewsChangeBetweenSnapshots: true },
     ]) {
       const run = runGate(overrides);
       assert.notEqual(run.result.status, 0);
       assert.match(run.output, /^state=failure$/m);
     }
+  });
+
+  it("reports a pending collection race when a same-second comment appears between snapshots", () => {
+    const run = runGate({ commentsChangeBetweenSnapshots: true });
+    assert.notEqual(run.result.status, 0);
+    assert.match(run.result.stderr, /review evidence changed while it was collected/i);
   });
 });

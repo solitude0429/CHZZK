@@ -36,6 +36,8 @@ describe("background hardening invariants", () => {
 
   it("uses blocking webRequest redirect so the first playlist request is not missed", () => {
     assert.match(source, /buildHighestQualityRedirectUrl\(details\.url/);
+    assert.match(source, /filterResponseData\(record\.requestId\)/);
+    assert.match(source, /playlistEvidenceSupportsExpectedQuality/);
     assert.match(source, /return redirectUrl \? \{ redirectUrl \} : undefined/);
     assert.match(source, /\["blocking"\]/);
   });

@@ -22,6 +22,7 @@ async function loadBackground({
   const storage = {};
   const fetches = [];
   const fetchOptions = [];
+  const responseFilters = new Map();
   const tabQueries = [];
   let clockMs = clockStartMs;
   class HarnessDate extends Date {
@@ -144,6 +145,24 @@ async function loadBackground({
       },
     },
     webRequest: {
+      filterResponseData(requestId) {
+        const writes = [];
+        const filter = {
+          closed: false,
+          ondata: null,
+          onerror: null,
+          onstop: null,
+          write(data) {
+            writes.push(new Uint8Array(data).slice());
+          },
+          close() {
+            filter.closed = true;
+          },
+          writes,
+        };
+        responseFilters.set(String(requestId), filter);
+        return filter;
+      },
       onBeforeRequest: {
         addListener(fn, filter, extraInfoSpec) {
           listeners.onBeforeRequest = fn;
@@ -176,6 +195,7 @@ async function loadBackground({
     fetches,
     fetchOptions,
     listeners,
+    responseFilters,
     storage,
     tabQueries,
   };
@@ -203,6 +223,30 @@ function playlistResponse(url, body = "#EXTM3U\n#EXT-X-VERSION:3\n") {
     text: async () => body,
     url,
   };
+}
+
+function deliverFilteredResponse(responseFilters, requestId, body) {
+  const filter = responseFilters.get(String(requestId));
+  assert.ok(filter, `response filter ${requestId} must exist`);
+  if (body) {
+    filter.ondata({ data: new TextEncoder().encode(body).buffer });
+  }
+  filter.onstop();
+  return new TextDecoder().decode(
+    filter.writes.length === 0
+      ? new Uint8Array()
+      : filter.writes.reduce((combined, chunk) => {
+          const output = new Uint8Array(combined.byteLength + chunk.byteLength);
+          output.set(combined);
+          output.set(chunk, combined.byteLength);
+          return output;
+        }, new Uint8Array()),
+  );
+}
+
+async function observeRedirectTarget(listeners, details, redirectUrl) {
+  const decision = await listeners.onBeforeRequest({ ...details, url: redirectUrl });
+  assert.equal(decision, undefined, "the selected redirect target must not redirect again");
 }
 
 function firstLowQualityRequest(tabId) {
@@ -364,7 +408,9 @@ describe("background runtime quality resolution", () => {
 
   it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
     const availableQualities = new Set(["2160p"]);
-    const { advanceClock, fetches, listeners } = await loadBackground({ availableQualities });
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
     const tabId = 615;
     const liveUrl = "https://chzzk.naver.com/live/example-channel";
     const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
@@ -378,7 +424,17 @@ describe("background runtime quality resolution", () => {
     };
     const fullPlayerRedirect = plain(await listeners.onBeforeRequest(liveRequest));
     assert.match(fullPlayerRedirect.redirectUrl, /chunklist_2160p/);
-    listeners.onCompleted({ requestId: "full-player", statusCode: 200 });
+    await observeRedirectTarget(listeners, liveRequest, fullPlayerRedirect.redirectUrl);
+    deliverFilteredResponse(
+      responseFilters,
+      "full-player",
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: "full-player",
+      statusCode: 200,
+      url: fullPlayerRedirect.redirectUrl,
+    });
 
     listeners.onUpdated(tabId, { url: miniPlayerUrl });
     await waitForDiagnosticsQueue();
@@ -391,15 +447,36 @@ describe("background runtime quality resolution", () => {
       await listeners.onBeforeRequest(miniPlayerRequest("mini-player-0")),
     );
     assert.match(firstMiniPlayerRedirect.redirectUrl, /chunklist_2160p/);
-    listeners.onCompleted({ requestId: "mini-player-0", statusCode: 200 });
+    await observeRedirectTarget(
+      listeners,
+      miniPlayerRequest("mini-player-0"),
+      firstMiniPlayerRedirect.redirectUrl,
+    );
+    listeners.onCompleted({
+      requestId: "mini-player-0",
+      statusCode: 200,
+      url: firstMiniPlayerRedirect.redirectUrl,
+    });
+    deliverFilteredResponse(
+      responseFilters,
+      "mini-player-0",
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
     const fetchCountAfterMiniPlayerWarmup = fetches.length;
     advanceClock(9_000);
 
     for (let index = 1; index < 5; index += 1) {
       const requestId = `mini-player-${index}`;
-      const redirect = plain(await listeners.onBeforeRequest(miniPlayerRequest(requestId)));
+      const request = miniPlayerRequest(requestId);
+      const redirect = plain(await listeners.onBeforeRequest(request));
       assert.match(redirect.redirectUrl, /chunklist_2160p/);
-      listeners.onCompleted({ requestId, statusCode: 200 });
+      await observeRedirectTarget(listeners, request, redirect.redirectUrl);
+      deliverFilteredResponse(
+        responseFilters,
+        requestId,
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+      );
+      listeners.onCompleted({ requestId, statusCode: 200, url: redirect.redirectUrl });
       advanceClock(9_000);
     }
 
@@ -420,6 +497,71 @@ describe("background runtime quality resolution", () => {
       true,
       "an idle family must still expire and re-probe",
     );
+  });
+
+  it("does not renew a target from HTTP status before its streamed playlist body is verified", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners } = await loadBackground({ availableQualities });
+    const family = "status-only";
+    const first = plain(await listeners.onBeforeRequest(familyRequest(617, family, "status-only-first")));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(
+      listeners,
+      familyRequest(617, family, "status-only-first"),
+      first.redirectUrl,
+    );
+    listeners.onCompleted({
+      requestId: "status-only-first",
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    const fetchCountBeforeExpiry = fetches.length;
+    advanceClock(11_000);
+    const afterUnverifiedStatus = plain(
+      await listeners.onBeforeRequest(familyRequest(617, family, "status-only-second")),
+    );
+
+    assert.match(afterUnverifiedStatus.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.length > fetchCountBeforeExpiry,
+      true,
+      "a status-only completion must not keep stale marker evidence alive",
+    );
+  });
+
+  it("passes streamed response bytes through unchanged but invalidates unusable HTTP 200 bodies", async () => {
+    for (const [label, body] of [
+      ["empty", ""],
+      ["html", "<!doctype html><title>gateway error</title>"],
+      ["malformed", "this is not an HLS playlist"],
+    ]) {
+      const family = `invalid-200-${label}`;
+      const requestId = `${family}-first`;
+      const { fetches, listeners, responseFilters } = await loadBackground({
+        availableQualities: new Set(["2160p", "1080p"]),
+      });
+      const first = plain(await listeners.onBeforeRequest(familyRequest(618, family, requestId)));
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, familyRequest(618, family, requestId), first.redirectUrl);
+      const passedThrough = deliverFilteredResponse(responseFilters, requestId, body);
+      assert.equal(passedThrough, body, `${label} response bytes must not be delayed or changed`);
+      listeners.onCompleted({
+        requestId,
+        statusCode: 200,
+        url: first.redirectUrl,
+      });
+
+      const second = plain(await listeners.onBeforeRequest(familyRequest(618, family, `${requestId}-retry`)));
+      assert.match(second.redirectUrl, /chunklist_1080p/);
+      assert.equal(
+        fetches.filter((url) => url.includes(family) && url.includes("2160p")).length,
+        1,
+        `${label} HTTP 200 body must suppress the unusable target`,
+      );
+    }
   });
 
   it("invalidates a redirected family target on exposed 404/error events and downgrades without looping", async () => {
