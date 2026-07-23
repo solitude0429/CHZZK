@@ -22,11 +22,11 @@ describe("personal CHZZK extension policy", () => {
       [
         {
           js: ["site-observer.js"],
-          matches: ["https://*.chzzk.naver.com/live/*"],
+          matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
           run_at: "document_start",
         },
       ],
-      "MV2 content script is required install-time access and must only prewarm the background redirect target",
+      "MV2 content script must prewarm exact and nested CHZZK live pages only",
     );
     assert.equal(
       existsSync(new URL("../../inject.js", import.meta.url)),
