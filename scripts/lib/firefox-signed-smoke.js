@@ -7,6 +7,7 @@ import { basename, join, resolve } from "node:path";
 import { MAX_AMO_JSON_BYTES, MAX_SIGNED_XPI_BYTES, assertReleaseMetadata } from "./amo-client.js";
 
 const SIGNED_XPI_NAME_RE = /^chzzk-(\d+\.\d+\.\d+)-signed\.xpi$/;
+const WEB_ELEMENT_ID = "element-6066-11e4-a52e-4f735466cecf";
 
 function resolveInputPath(path, environmentName) {
   if (typeof path !== "string" || !path) throw new Error(`${environmentName} is required`);
@@ -226,6 +227,14 @@ class WebDriver {
     return this.command("POST", "/execute/sync", { args, script });
   }
 
+  async clickWebElement(element) {
+    const elementId = element?.[WEB_ELEMENT_ID];
+    if (typeof elementId !== "string" || !elementId) {
+      throw new Error("WebDriver did not return a valid W3C element reference");
+    }
+    return this.command("POST", `/element/${encodeURIComponent(elementId)}/click`, {});
+  }
+
   async close() {
     if (!this.sessionId) return;
     try {
@@ -283,12 +292,16 @@ const enabled = arguments[1];
 const { AddonManager } = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
 return AddonManager.getAddonByID(addonId).then((addon) => {
   if (!addon) return { status: "missing" };
-  addon.applyBackgroundUpdates = enabled
+  const expectedPolicy = enabled
     ? AddonManager.AUTOUPDATE_DEFAULT
     : AddonManager.AUTOUPDATE_DISABLE;
+  addon.applyBackgroundUpdates = expectedPolicy;
+  const appliedPolicy = addon.applyBackgroundUpdates;
   return {
-    applyBackgroundUpdates: addon.applyBackgroundUpdates,
-    status: enabled ? "default" : "disabled",
+    applyBackgroundUpdates: appliedPolicy,
+    status: appliedPolicy === expectedPolicy
+      ? (enabled ? "default" : "disabled")
+      : "mismatch",
   };
 });`,
     [addOnId, enabled],
@@ -298,21 +311,39 @@ return AddonManager.getAddonByID(addonId).then((addon) => {
 async function triggerAddonUpdateThroughManagerUi(driver) {
   await driver.setContext("content");
   await driver.command("POST", "/url", { url: "about:addons" });
-  await poll(async () =>
+  const menuButton = await poll(async () =>
     driver.execute(
-      `return document.readyState === "complete" &&
-  Boolean(document.querySelector('addon-page-options [action="check-for-updates"]'));`,
+      `const button = document.querySelector(
+  'addon-page-header [action="page-options"]'
+);
+return document.readyState === "complete" &&
+  button &&
+  !button.hidden &&
+  !button.disabled &&
+  button.getClientRects().length > 0
+  ? button
+  : null;`,
     ),
   );
-  const clicked = await driver.execute(
-    `const option = document.querySelector(
+  await driver.clickWebElement(menuButton);
+  const updateAction = await poll(async () =>
+    driver.execute(
+      `const button = document.querySelector(
+  'addon-page-header [action="page-options"]'
+);
+const option = document.querySelector(
   'addon-page-options [action="check-for-updates"]'
 );
-if (!option || option.disabled) return false;
-option.click();
-return true;`,
+return button?.getAttribute("aria-expanded") === "true" &&
+  option &&
+  !option.hidden &&
+  !option.disabled &&
+  option.getClientRects().length > 0
+  ? option
+  : null;`,
+    ),
   );
-  if (clicked !== true) throw new Error("Firefox add-on manager update control is unavailable");
+  await driver.clickWebElement(updateAction);
   const message = await poll(
     async () => {
       const state = await driver.execute(
@@ -340,58 +371,64 @@ return message ? {
 async function discoverManualAddonUpdateThroughDetailsUi(driver, addOnId) {
   await driver.setContext("content");
   await driver.command("POST", "/url", { url: "about:addons" });
-  const listLoaded = await driver.execute(
-    `return window.promiseInitialized
-  .then(() => window.loadView("list/extension"))
-  .then(() => true);`,
+  const extensionCategory = await poll(async () =>
+    driver.execute(
+      `const category = document.querySelector(
+  'categories-box button[name="extension"]'
+);
+return document.readyState === "complete" &&
+  category &&
+  !category.hidden &&
+  !category.disabled &&
+  category.getClientRects().length > 0
+  ? category
+  : null;`,
+    ),
   );
-  if (listLoaded !== true) throw new Error("Firefox extension list did not load");
-  let opened;
+  await driver.clickWebElement(extensionCategory);
+  let detailLink;
   try {
-    opened = await poll(async () =>
+    detailLink = await poll(async () =>
       driver.execute(
         `const addonId = arguments[0];
 const card = [...document.querySelectorAll("addon-card")].find(
   (candidate) => candidate.addon?.id === addonId
 );
 const link = card?.querySelector(".addon-name-link");
-if (!link) return false;
-link.click();
-return true;`,
+return link &&
+  !link.hidden &&
+  link.getClientRects().length > 0
+  ? link
+  : null;`,
         [addOnId],
       ),
     );
   } catch (error) {
     throw new Error(`Firefox add-on detail navigation failed: ${error.message}`);
   }
-  if (opened !== true) throw new Error("Firefox add-on detail page is unavailable");
+  await driver.clickWebElement(detailLink);
+  let updateAction;
   try {
-    await poll(async () =>
+    updateAction = await poll(async () =>
       driver.execute(
         `const addonId = arguments[0];
 const card = [...document.querySelectorAll("addon-card")].find(
   (candidate) => candidate.addon?.id === addonId && candidate.expanded
 );
 const option = card?.querySelector('[action="update-check"]');
-return Boolean(option && !option.hidden && !option.disabled);`,
+return option &&
+  !option.hidden &&
+  !option.disabled &&
+  option.getClientRects().length > 0
+  ? option
+  : null;`,
         [addOnId],
       ),
     );
   } catch (error) {
     throw new Error(`Firefox per-add-on update control did not appear: ${error.message}`);
   }
-  const clicked = await driver.execute(
-    `const addonId = arguments[0];
-const card = [...document.querySelectorAll("addon-card")].find(
-  (candidate) => candidate.addon?.id === addonId && candidate.expanded
-);
-const option = card?.querySelector('[action="update-check"]');
-if (!option || option.hidden || option.disabled) return false;
-option.click();
-return true;`,
-    [addOnId],
-  );
-  if (clicked !== true) throw new Error("Firefox per-add-on update control is unavailable");
+  await driver.clickWebElement(updateAction);
   try {
     return await poll(async () => {
       const available = await driver.execute(
@@ -402,11 +439,11 @@ const card = [...document.querySelectorAll("addon-card")].find(
 const install = card?.querySelector('addon-options [action="install-update"]');
 return {
   installAvailable: Boolean(card?.updateInstall),
-  installControlVisible: Boolean(install && !install.hidden && !install.disabled),
+  installControlAvailable: Boolean(install && !install.hidden && !install.disabled),
 };`,
         [addOnId],
       );
-      return available?.installAvailable && available.installControlVisible
+      return available?.installAvailable && available.installControlAvailable
         ? { status: "manual-update", uiState: "install-update" }
         : null;
     });
@@ -417,18 +454,48 @@ return {
 
 async function installManualAddonUpdateThroughDetailsUi(driver, addOnId) {
   await driver.setContext("content");
-  const clicked = await driver.execute(
-    `const addonId = arguments[0];
+  const menuButton = await poll(async () =>
+    driver.execute(
+      `const addonId = arguments[0];
 const card = [...document.querySelectorAll("addon-card")].find(
   (candidate) => candidate.addon?.id === addonId && candidate.expanded
 );
-const option = card?.querySelector('addon-options [action="install-update"]');
-if (!option || option.hidden || option.disabled) return false;
-option.click();
-return true;`,
-    [addOnId],
+const button = card?.querySelector(
+  '.more-options-button[action="more-options"]'
+);
+return button &&
+  !button.hidden &&
+  !button.disabled &&
+  button.getClientRects().length > 0
+  ? button
+  : null;`,
+      [addOnId],
+    ),
   );
-  if (clicked !== true) throw new Error("Firefox pending update install control is unavailable");
+  await driver.clickWebElement(menuButton);
+  const installAction = await poll(async () =>
+    driver.execute(
+      `const addonId = arguments[0];
+const card = [...document.querySelectorAll("addon-card")].find(
+  (candidate) => candidate.addon?.id === addonId && candidate.expanded
+);
+const button = card?.querySelector(
+  '.more-options-button[action="more-options"]'
+);
+const option = card?.querySelector(
+  'addon-options [action="install-update"]'
+);
+return button?.getAttribute("aria-expanded") === "true" &&
+  option &&
+  !option.hidden &&
+  !option.disabled &&
+  option.getClientRects().length > 0
+  ? option
+  : null;`,
+      [addOnId],
+    ),
+  );
+  await driver.clickWebElement(installAction);
   return { status: "clicked", uiState: "install-update" };
 }
 
