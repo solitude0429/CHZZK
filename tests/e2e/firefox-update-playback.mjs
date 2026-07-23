@@ -217,6 +217,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       const response = await fetch(mediaUrl);
       finalStatus = response.status;
       finalBody = await response.text();
+      if (location.pathname === "/lives" && index < 3) {
+        history.pushState({}, "", "/lives?keyword=another-channel-" + (index + 1));
+      }
       if (index < 3) await new Promise((resolve) => setTimeout(resolve, 700));
     }
     document.getElementById("result").textContent = finalStatus + ":" + finalBody;
@@ -632,6 +635,7 @@ async function main() {
         installedBefore: before.version,
         miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
+        miniPlayerRouteChanges: 3,
         playbackQuality: "1080p",
         queryPreserved: true,
         updatePath: "AddonManager.findUpdates",

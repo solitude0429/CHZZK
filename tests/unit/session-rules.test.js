@@ -6,6 +6,7 @@ import {
   configuredRequiredOrigins,
   configuredResourceTypes,
   configuredWebRequestUrls,
+  isChzzkSiteUrl,
   isTrustedChzzkContext,
   isTrustedMasterPlaylistRequest,
   shouldRecordDiagnostics,
@@ -15,6 +16,14 @@ import {
 const policy = JSON.parse(readFileSync(new URL("../../policy/quality-policy.json", import.meta.url), "utf8"));
 
 describe("MV2 required-permission CHZZK redirect request policy", () => {
+  it("recognizes only HTTPS CHZZK site URLs for same-site navigation state", () => {
+    assert.equal(isChzzkSiteUrl("https://chzzk.naver.com/lives?keyword=channel", policy), true);
+    assert.equal(isChzzkSiteUrl("https://m.chzzk.naver.com/", policy), true);
+    assert.equal(isChzzkSiteUrl("http://chzzk.naver.com/lives", policy), false);
+    assert.equal(isChzzkSiteUrl("https://chzzk.naver.com.example/lives", policy), false);
+    assert.equal(isChzzkSiteUrl("https://example.com/lives", policy), false);
+  });
+
   it("derives required install permissions from CHZZK and trusted HLS domains", () => {
     assert.deepEqual(configuredRequiredOrigins(policy), [
       "https://*.akamaized.net/*",

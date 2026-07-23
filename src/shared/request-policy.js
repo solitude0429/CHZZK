@@ -114,7 +114,7 @@ function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
   }
 }
 
-function trustedInitiatorUrl(value, policy) {
+export function isChzzkSiteUrl(value, policy) {
   const hostname = canonicalHttpsDomainFromUrl(value);
   return Boolean(
     hostname && trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain)),
@@ -142,7 +142,7 @@ function requestContextEvidence(details, policy) {
     if (isChzzkLiveUrl(details.documentUrl, policy)) {
       hasLivePageEvidence = true;
       trusted = true;
-    } else if (trustedInitiatorUrl(details.documentUrl, policy)) {
+    } else if (isChzzkSiteUrl(details.documentUrl, policy)) {
       // CHZZK keeps live playback in a small player while the same tab visits
       // channel lists/search. Limit that continuation to dedicated live hosts.
       requiresDedicatedHls = true;
@@ -154,7 +154,7 @@ function requestContextEvidence(details, policy) {
 
   if (hasExplicitMetadataValue(details?.originUrl)) {
     hasMetadata = true;
-    if (!trustedInitiatorUrl(details.originUrl, policy)) {
+    if (!isChzzkSiteUrl(details.originUrl, policy)) {
       return { hasMetadata, trusted: false, veto: true };
     }
     if (isChzzkLiveUrl(details.originUrl, policy)) {
@@ -169,7 +169,7 @@ function requestContextEvidence(details, policy) {
 
   if (hasExplicitMetadataValue(details?.initiator)) {
     hasMetadata = true;
-    if (!trustedInitiatorUrl(details.initiator, policy)) {
+    if (!isChzzkSiteUrl(details.initiator, policy)) {
       return { hasMetadata, trusted: false, veto: true };
     }
     if (isChzzkLiveUrl(details.initiator, policy)) {

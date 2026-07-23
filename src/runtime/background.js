@@ -15,6 +15,7 @@ import {
   hasContradictoryChzzkMetadata,
   hasTrustedChzzkMetadata,
   isChzzkLiveUrl,
+  isChzzkSiteUrl,
   isTrustedMasterPlaylistRequest,
   isTrustedRequestDomain,
   isValidRedirectTabId,
@@ -128,8 +129,8 @@ function probeTimeoutMs() {
 }
 
 function blockingProbeBudgetMs() {
-  const configured = Number(policy.blockingProbeBudgetMs ?? 150);
-  return Number.isFinite(configured) && configured > 0 ? configured : 150;
+  const configured = Number(policy.blockingProbeBudgetMs ?? 50);
+  return Number.isFinite(configured) && configured > 0 ? configured : 50;
 }
 
 function probeResolutionBudgetMs() {
@@ -143,10 +144,10 @@ function probeMaxBytes() {
 }
 
 function markerEvidenceTtlMs() {
-  const configured = Number(policy.markerEvidenceTtlMs ?? 10_000);
+  const configured = Number(policy.markerEvidenceTtlMs ?? 30_000);
   return Number.isSafeInteger(configured) && configured > 0
     ? Math.min(configured, MAX_MARKER_EVIDENCE_TTL_MS)
-    : 10_000;
+    : 30_000;
 }
 
 function redirectFailureBackoffMs() {
@@ -544,30 +545,35 @@ function tabHasQualityState(tabId) {
   );
 }
 
-function dropTabQualityState(tabId, { dropToken = false } = {}) {
+function dropTabQualityState(
+  tabId,
+  { dropToken = false, preserveTrustedRequest = false } = {},
+) {
+  const shouldPreserve = (state) =>
+    preserveTrustedRequest && state.contextKey === "trusted-request";
   let hadTarget = false;
   for (const [key, state] of resolutionBySession) {
-    if (state.tabId !== tabId) continue;
+    if (state.tabId !== tabId || shouldPreserve(state)) continue;
     state.controller.abort();
     resolutionBySession.delete(key);
   }
   for (const [key, state] of activeTargetsBySession) {
-    if (state.tabId !== tabId) continue;
+    if (state.tabId !== tabId || shouldPreserve(state)) continue;
     hadTarget = true;
     activeTargetsBySession.delete(key);
   }
   for (const [key, state] of failedTargetsBySession) {
-    if (state.tabId === tabId) failedTargetsBySession.delete(key);
+    if (state.tabId === tabId && !shouldPreserve(state)) failedTargetsBySession.delete(key);
   }
   for (const [requestId, state] of redirectedRequestsById) {
-    if (state.tabId === tabId) {
+    if (state.tabId === tabId && !shouldPreserve(state)) {
       state.settled = true;
       redirectedRequestsById.delete(requestId);
     }
   }
   if (dropToken) {
     tabContextTokenByTab.delete(tabId);
-  } else {
+  } else if (!preserveTrustedRequest) {
     tabContextTokenByTab.set(tabId, {});
   }
   return hadTarget;
@@ -639,6 +645,15 @@ async function removeTabTrustContext(tabId) {
   if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
 }
 
+async function preserveSameSiteMiniPlayerState(tabId) {
+  if (!isValidRedirectTabId(tabId)) return;
+  pendingTrustValidationByTab.delete(tabId);
+  const hadTarget = dropTabQualityState(tabId, { preserveTrustedRequest: true });
+  const hadLiveTab = activeLiveTabIds.delete(tabId);
+  const hadContext = liveContextByTab.delete(tabId);
+  if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
+}
+
 async function clearRuntimeRedirectState() {
   for (const state of resolutionBySession.values()) state.controller.abort();
   activeLiveTabIds.clear();
@@ -663,6 +678,10 @@ function startReloadTrustValidation(tabId) {
       if (tab?.id === tabId && isChzzkLiveUrl(tab.url, policy)) {
         await prewarmLiveTab(tabId, tab.url);
         return pendingTrustValidationByTab.get(tabId) === validation;
+      }
+      if (tab?.id === tabId && isChzzkSiteUrl(tab.url, policy)) {
+        await preserveSameSiteMiniPlayerState(tabId);
+        return false;
       }
       await removeTabTrustContext(tabId);
       return false;
@@ -1121,20 +1140,33 @@ async function resetAndPrewarmRuntimeState() {
 
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (changeInfo?.status === "loading") {
-    clearTabQualityState(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to clear tab quality state for document load", error),
-    );
     if (!changeInfo?.url) {
+      if (liveContextByTab.has(tabId)) {
+        clearTabQualityState(tabId).catch((error) =>
+          console.warn("[CHZZK] failed to clear tab quality state for document load", error),
+        );
+      }
       startReloadTrustValidation(tabId)?.catch((error) =>
         console.warn("[CHZZK] failed to validate tab trust after document load", error),
       );
       return;
+    }
+    if (isChzzkLiveUrl(changeInfo.url, policy)) {
+      clearTabQualityState(tabId).catch((error) =>
+        console.warn("[CHZZK] failed to clear tab quality state for live document load", error),
+      );
     }
   }
   if (!changeInfo?.url) return;
   pendingTrustValidationByTab.delete(tabId);
   if (isChzzkLiveUrl(changeInfo.url, policy)) {
     prewarmLiveTab(tabId, changeInfo.url).catch((error) => console.warn("[CHZZK] failed to prewarm live tab from URL update", error));
+    return;
+  }
+  if (isChzzkSiteUrl(changeInfo.url, policy)) {
+    preserveSameSiteMiniPlayerState(tabId).catch((error) =>
+      console.warn("[CHZZK] failed to preserve same-site mini-player state", error),
+    );
     return;
   }
   removeTabTrustContext(tabId).catch((error) =>

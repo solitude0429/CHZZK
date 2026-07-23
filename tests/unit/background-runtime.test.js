@@ -491,7 +491,7 @@ describe("background runtime quality resolution", () => {
 
     availableQualities.clear();
     availableQualities.add("1080p");
-    advanceClock(11_000);
+    advanceClock(31_000);
     const afterIdle = plain(await listeners.onBeforeRequest(miniPlayerRequest("mini-player-after-idle")));
 
     assert.match(afterIdle.redirectUrl, /chunklist_1080p/);
@@ -499,6 +499,66 @@ describe("background runtime quality resolution", () => {
       fetches.length > fetchCountAfterMiniPlayerWarmup,
       true,
       "an idle family must still expire and re-probe",
+    );
+  });
+
+  it("preserves verified mini-player targets across same-site SPA route changes", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners, responseFilters, storage } = await loadBackground({
+      availableQualities,
+    });
+    const tabId = 626;
+    const validPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+    const miniPlayerRequest = (requestId, documentUrl) => ({
+      ...firstLowQualityRequest(tabId),
+      documentUrl,
+      requestId,
+    });
+    const firstRoute = "https://chzzk.naver.com/lives?keyword=channel-0";
+
+    listeners.onUpdated(tabId, { status: "loading", url: firstRoute });
+    await waitForDiagnosticsQueue();
+    const firstRequest = miniPlayerRequest("spa-mini-player-0", firstRoute);
+    const firstRedirect = plain(await listeners.onBeforeRequest(firstRequest));
+    assert.match(firstRedirect.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, firstRequest, firstRedirect.redirectUrl);
+    deliverFilteredResponse(responseFilters, firstRequest.requestId, validPlaylist);
+    listeners.onCompleted({
+      requestId: firstRequest.requestId,
+      statusCode: 200,
+      url: firstRedirect.redirectUrl,
+    });
+    const fetchCountAfterWarmup = fetches.length;
+
+    for (let index = 1; index < 5; index += 1) {
+      advanceClock(9_000);
+      const route = `https://chzzk.naver.com/lives?keyword=channel-${index}`;
+      listeners.onUpdated(tabId, { status: "loading", url: route });
+      await waitForDiagnosticsQueue();
+      const request = miniPlayerRequest(`spa-mini-player-${index}`, route);
+      const redirect = plain(await listeners.onBeforeRequest(request));
+      assert.match(redirect.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, request, redirect.redirectUrl);
+      deliverFilteredResponse(responseFilters, request.requestId, validPlaylist);
+      listeners.onCompleted({
+        requestId: request.requestId,
+        statusCode: 200,
+        url: redirect.redirectUrl,
+      });
+    }
+
+    assert.equal(
+      fetches.length,
+      fetchCountAfterWarmup,
+      "same-site SPA navigation must not restart candidate probes while verified mini-player playback continues",
+    );
+
+    listeners.onUpdated(tabId, { status: "loading", url: "https://unrelated.example/watch" });
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(
+      plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab),
+      {},
+      "foreign navigation must still remove the preserved mini-player target",
     );
   });
 
@@ -532,7 +592,7 @@ describe("background runtime quality resolution", () => {
       "verified same-target playback must renew the idle TTL without probing",
     );
 
-    advanceClock(11_000);
+    advanceClock(31_000);
     const afterIdle = plain(
       await listeners.onBeforeRequest(familyRequest(622, family, "selected-quality-after-idle")),
     );
@@ -560,7 +620,7 @@ describe("background runtime quality resolution", () => {
     availableQualities.clear();
     availableQualities.add("1080p");
     const fetchCountBeforeExpiry = fetches.length;
-    advanceClock(11_000);
+    advanceClock(31_000);
     const afterUnverifiedStatus = plain(
       await listeners.onBeforeRequest(familyRequest(617, family, "status-only-second")),
     );
