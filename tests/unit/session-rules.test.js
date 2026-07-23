@@ -292,6 +292,51 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     );
   });
 
+  it("continues same-site CHZZK mini-player playback only on dedicated livecloud hosts", () => {
+    const miniPlayer = {
+      documentUrl: "https://chzzk.naver.com/lives?keyword=another-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      originUrl: undefined,
+      tabId: 15,
+      type: "xmlhttprequest",
+      url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/480p/segment/chunklist_480p.m3u8?Policy=redacted",
+    };
+
+    assert.deepEqual(shouldRedirectRequest(miniPlayer, policy), {
+      ok: true,
+      quality: "480p",
+      reason: "eligible-chzzk-hls-quality",
+      tabId: 15,
+    });
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        {
+          ...miniPlayer,
+          url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/master.m3u8?Policy=redacted",
+        },
+        policy,
+      ),
+      true,
+    );
+
+    const genericCdn = {
+      ...miniPlayer,
+      url: "https://edge.pstatic.net/chzzk/example/chunklist_480p.m3u8?Policy=redacted",
+    };
+    assert.equal(shouldRedirectRequest(genericCdn, policy).ok, false);
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        {
+          ...genericCdn,
+          url: "https://edge.pstatic.net/chzzk/example/master.m3u8?Policy=redacted",
+        },
+        policy,
+      ),
+      false,
+    );
+  });
+
   it("rejects generic-CDN CHZZK path markers without page context", () => {
     const request = {
       documentUrl: undefined,

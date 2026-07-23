@@ -25,10 +25,10 @@
       "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
       "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
-      "URL-marker-only media evidence expires after markerEvidenceTtlMs, and redirect failures suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
+      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: successful redirected playlist completions renew it, while redirect failures invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK live context constrain redirects; explicit foreign metadata vetoes cache, and metadata-free contextless compatibility is limited to the two dedicated CHZZK livecloud host suffixes rather than generic CDN path markers.",
+      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. Metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
       "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
       "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
@@ -702,7 +702,10 @@
     return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
   }
   function isDedicatedChzzkHlsUrl(url, policy) {
-    if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
+    return isNumericHlsPlaylistUrl(url) && isDedicatedChzzkHlsPlaylistUrl(url, policy);
+  }
+  function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
+    if (!isHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
     try {
       const parsed = new URL(url);
       if (parsed.protocol !== "https:") return false;
@@ -719,13 +722,18 @@
   }
   function requestContextEvidence(details, policy) {
     let hasMetadata = false;
+    let requiresDedicatedHls = false;
     let trusted = false;
     if (hasExplicitMetadataValue(details?.documentUrl)) {
       hasMetadata = true;
-      if (!isChzzkLiveUrl(details.documentUrl, policy)) {
+      if (isChzzkLiveUrl(details.documentUrl, policy)) {
+        trusted = true;
+      } else if (trustedInitiatorUrl(details.documentUrl, policy)) {
+        requiresDedicatedHls = true;
+        trusted = true;
+      } else {
         return { hasMetadata, trusted: false, veto: true };
       }
-      trusted = true;
     }
     if (hasExplicitMetadataValue(details?.originUrl)) {
       hasMetadata = true;
@@ -741,7 +749,7 @@
       }
       trusted = true;
     }
-    return { hasMetadata, trusted, veto: false };
+    return { hasMetadata, requiresDedicatedHls, trusted, veto: false };
   }
   function hasContradictoryChzzkMetadata(details, policy) {
     return requestContextEvidence(details, policy).veto;
@@ -754,6 +762,7 @@
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
     const evidence = requestContextEvidence(details, policy);
     if (evidence.veto) return false;
+    if (evidence.requiresDedicatedHls) return isDedicatedChzzkHlsUrl(details.url, policy);
     if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
     if (evidence.hasMetadata) return false;
     if (trustedLiveTabIds?.has?.(details.tabId)) return true;
@@ -768,7 +777,9 @@
       return false;
     const evidence = requestContextEvidence(details, policy);
     if (evidence.veto) return false;
-    if (evidence.trusted) return true;
+    if (evidence.trusted) {
+      return !evidence.requiresDedicatedHls || isDedicatedChzzkHlsPlaylistUrl(details.url, policy);
+    }
     if (evidence.hasMetadata) return false;
     return Boolean(trustedLiveTabIds?.has?.(details.tabId));
   }
@@ -1439,6 +1450,17 @@
     }
     scheduleRedirectDiagnostics();
   }
+  function renewSuccessfulRedirectTarget(record) {
+    const current = activeTargetsBySession.get(record.key);
+    if (
+      current?.targetQuality !== record.targetQuality ||
+      current.evidenceKind !== "url-marker" ||
+      !resolutionContextIsCurrent(record.tabId, record.contextKey)
+    ) {
+      return;
+    }
+    current.expiresAt = Date.now() + markerEvidenceTtlMs();
+  }
   function handleRedirectCompleted(details) {
     const requestId = details?.requestId == null ? null : String(details.requestId);
     if (!requestId) return;
@@ -1448,6 +1470,8 @@
     const statusCode = Number(details.statusCode);
     if (Number.isSafeInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
       invalidateRedirectedTarget(record);
+    } else if (Number.isSafeInteger(statusCode) && statusCode >= 200 && statusCode <= 399) {
+      renewSuccessfulRedirectTarget(record);
     }
   }
   function handleRedirectError(details) {

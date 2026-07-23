@@ -700,6 +700,18 @@ function invalidateRedirectedTarget(record) {
   scheduleRedirectDiagnostics();
 }
 
+function renewSuccessfulRedirectTarget(record) {
+  const current = activeTargetsBySession.get(record.key);
+  if (
+    current?.targetQuality !== record.targetQuality ||
+    current.evidenceKind !== "url-marker" ||
+    !resolutionContextIsCurrent(record.tabId, record.contextKey)
+  ) {
+    return;
+  }
+  current.expiresAt = Date.now() + markerEvidenceTtlMs();
+}
+
 function handleRedirectCompleted(details) {
   const requestId = details?.requestId == null ? null : String(details.requestId);
   if (!requestId) return;
@@ -709,6 +721,8 @@ function handleRedirectCompleted(details) {
   const statusCode = Number(details.statusCode);
   if (Number.isSafeInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
     invalidateRedirectedTarget(record);
+  } else if (Number.isSafeInteger(statusCode) && statusCode >= 200 && statusCode <= 399) {
+    renewSuccessfulRedirectTarget(record);
   }
 }
 

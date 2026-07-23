@@ -99,7 +99,11 @@ function knownChzzkHlsHost(hostname) {
 }
 
 function isDedicatedChzzkHlsUrl(url, policy) {
-  if (!isNumericHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
+  return isNumericHlsPlaylistUrl(url) && isDedicatedChzzkHlsPlaylistUrl(url, policy);
+}
+
+function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
+  if (!isHlsPlaylistUrl(url) || !isTrustedRequestDomain(url, policy)) return false;
 
   try {
     const parsed = new URL(url);
@@ -119,14 +123,21 @@ function trustedInitiatorUrl(value, policy) {
 
 function requestContextEvidence(details, policy) {
   let hasMetadata = false;
+  let requiresDedicatedHls = false;
   let trusted = false;
 
   if (hasExplicitMetadataValue(details?.documentUrl)) {
     hasMetadata = true;
-    if (!isChzzkLiveUrl(details.documentUrl, policy)) {
+    if (isChzzkLiveUrl(details.documentUrl, policy)) {
+      trusted = true;
+    } else if (trustedInitiatorUrl(details.documentUrl, policy)) {
+      // CHZZK keeps live playback in a small player while the same tab visits
+      // channel lists/search. Limit that continuation to dedicated live hosts.
+      requiresDedicatedHls = true;
+      trusted = true;
+    } else {
       return { hasMetadata, trusted: false, veto: true };
     }
-    trusted = true;
   }
 
   if (hasExplicitMetadataValue(details?.originUrl)) {
@@ -145,7 +156,7 @@ function requestContextEvidence(details, policy) {
     trusted = true;
   }
 
-  return { hasMetadata, trusted, veto: false };
+  return { hasMetadata, requiresDedicatedHls, trusted, veto: false };
 }
 
 export function hasContradictoryChzzkMetadata(details, policy) {
@@ -161,6 +172,7 @@ export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = nul
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
+  if (evidence.requiresDedicatedHls) return isDedicatedChzzkHlsUrl(details.url, policy);
   if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
   if (evidence.hasMetadata) return false;
   if (trustedLiveTabIds?.has?.(details.tabId)) return true;
@@ -175,7 +187,9 @@ export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTab
   if (!requestMethods(policy).includes(method) || !isTrustedRequestDomain(details.url, policy)) return false;
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
-  if (evidence.trusted) return true;
+  if (evidence.trusted) {
+    return !evidence.requiresDedicatedHls || isDedicatedChzzkHlsPlaylistUrl(details.url, policy);
+  }
   if (evidence.hasMetadata) return false;
   return Boolean(trustedLiveTabIds?.has?.(details.tabId));
 }

@@ -362,6 +362,66 @@ describe("background runtime quality resolution", () => {
     assert.equal(fetches.length > fetchCountBeforeExpiry, true, "expired evidence must be re-probed");
   });
 
+  it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners } = await loadBackground({ availableQualities });
+    const tabId = 615;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    await waitForDiagnosticsQueue();
+    const liveRequest = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "full-player",
+    };
+    const fullPlayerRedirect = plain(await listeners.onBeforeRequest(liveRequest));
+    assert.match(fullPlayerRedirect.redirectUrl, /chunklist_2160p/);
+    listeners.onCompleted({ requestId: "full-player", statusCode: 200 });
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    await waitForDiagnosticsQueue();
+    const miniPlayerRequest = (requestId) => ({
+      ...firstLowQualityRequest(tabId),
+      documentUrl: miniPlayerUrl,
+      requestId,
+    });
+    const firstMiniPlayerRedirect = plain(
+      await listeners.onBeforeRequest(miniPlayerRequest("mini-player-0")),
+    );
+    assert.match(firstMiniPlayerRedirect.redirectUrl, /chunklist_2160p/);
+    listeners.onCompleted({ requestId: "mini-player-0", statusCode: 200 });
+    const fetchCountAfterMiniPlayerWarmup = fetches.length;
+    advanceClock(9_000);
+
+    for (let index = 1; index < 5; index += 1) {
+      const requestId = `mini-player-${index}`;
+      const redirect = plain(await listeners.onBeforeRequest(miniPlayerRequest(requestId)));
+      assert.match(redirect.redirectUrl, /chunklist_2160p/);
+      listeners.onCompleted({ requestId, statusCode: 200 });
+      advanceClock(9_000);
+    }
+
+    assert.equal(
+      fetches.length,
+      fetchCountAfterMiniPlayerWarmup,
+      "successful low-quality playlist redirects must keep the family target warm",
+    );
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    advanceClock(11_000);
+    const afterIdle = plain(await listeners.onBeforeRequest(miniPlayerRequest("mini-player-after-idle")));
+
+    assert.match(afterIdle.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.length > fetchCountAfterMiniPlayerWarmup,
+      true,
+      "an idle family must still expire and re-probe",
+    );
+  });
+
   it("invalidates a redirected family target on exposed 404/error events and downgrades without looping", async () => {
     for (const eventName of ["onCompleted", "onErrorOccurred"]) {
       const { fetches, listeners } = await loadBackground({

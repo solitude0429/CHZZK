@@ -33,9 +33,9 @@ Current candidate order:
 2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p
 ```
 
-Runtime redirects are constrained by tab, CHZZK live context or current-URL-validated prewarmed live-tab state, trusted CDN domains, GET requests, and media/XHR/other resource types. Explicit non-CHZZK document/origin metadata always vetoes cached trust. When Firefox provides no page metadata, the compatibility fallback is limited to numeric playlists on the dedicated `livecloud.pstatic.net.live.gscdn.net` and `nvelop-livecloud.pstatic.net` host suffixes; generic CDN path markers are never contextless trust evidence. There is no static or session DNR ruleset and no fixed startup target quality.
+Runtime redirects are constrained by tab, CHZZK context, trusted CDN domains, GET requests, and media/XHR/other resource types. Explicit non-CHZZK document/origin metadata always vetoes cached trust. When a live stream continues in CHZZK's small player on a same-site list/search page, only playlists on the dedicated `livecloud.pstatic.net.live.gscdn.net` and `nvelop-livecloud.pstatic.net` host suffixes remain eligible. The metadata-free compatibility fallback is limited to those same hosts; generic CDN path markers are never contextless trust evidence. There is no static or session DNR ruleset and no fixed startup target quality.
 
-Numeric media-playlist evidence necessarily relies on the requested URL marker because ordinary media bodies do not declare rendition resolution. That evidence is scoped to its secret-free playlist family and expires after `markerEvidenceTtlMs`; an exposed redirected-request error or 4xx/5xx completion invalidates the target and temporarily suppresses it so the next request can re-resolve or downgrade without looping.
+Numeric media-playlist evidence necessarily relies on the requested URL marker because ordinary media bodies do not declare rendition resolution. That evidence is scoped to its secret-free playlist family and uses `markerEvidenceTtlMs` as an idle timeout. A successful redirected playlist completion renews the timeout so repeated small-player quality requests do not trigger periodic blocking probes; an exposed redirected-request error or 4xx/5xx completion invalidates the target and temporarily suppresses it so the next request can re-resolve or downgrade without looping.
 
 ## Build and verify
 
