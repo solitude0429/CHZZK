@@ -1,12 +1,6 @@
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
-const ABBREVIATED_GIT_SHA_RE = /^[a-f0-9]{10,40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/;
-const GITHUB_APP_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const STANDARD_CLEAN_REVIEW_RE =
-  /^Codex Review: Didn't find any major issues\.[^\r\n]*\r?\n\r?\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`(?:\r?\n|$)/;
-const EXACT_HEAD_CLEAN_REVIEW_RE =
-  /^## Review Result\r?\n\r?\nNo major issues found in exact head `([a-f0-9]{40})`\.(?:\r?\n|$)/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
@@ -43,21 +37,6 @@ function normalizeLogin(value, label) {
     throw new Error(`${label} is missing or malformed`);
   }
   return value.toLowerCase();
-}
-
-function normalizeAppIdentity(value, label) {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    !Number.isSafeInteger(value.id) ||
-    value.id < 1 ||
-    typeof value.slug !== "string" ||
-    value.slug !== value.slug.toLowerCase() ||
-    !GITHUB_APP_SLUG_RE.test(value.slug)
-  ) {
-    throw new Error(`${label} is missing or malformed`);
-  }
-  return { id: value.id, slug: value.slug };
 }
 
 function timestampMilliseconds(value, label) {
@@ -200,27 +179,6 @@ function fullShaAppearsInComment(body, headSha) {
   return !/[a-f0-9]/.test(before) && !/[a-f0-9]/.test(after);
 }
 
-export function isCodexReviewCommand(body) {
-  return typeof body === "string" && /^\s*@codex\s+review(?:\s|$)/i.test(body);
-}
-
-function isCodexReviewRequest(body, headSha) {
-  return isCodexReviewCommand(body) && fullShaAppearsInComment(body, headSha);
-}
-
-export function cleanReviewCommitMarker(body) {
-  if (typeof body !== "string") return null;
-  const match = STANDARD_CLEAN_REVIEW_RE.exec(body) ?? EXACT_HEAD_CLEAN_REVIEW_RE.exec(body);
-  return match?.[1] ?? null;
-}
-
-function positiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${label} is missing or malformed`);
-  }
-  return value;
-}
-
 function validReviewerReaction(reaction, reviewerLogin, headTimestamp, label) {
   const actorLogin = normalizeLogin(reaction?.user?.login, `${label} actor identity`);
   if (actorLogin !== reviewerLogin || reaction.content !== "+1") return null;
@@ -270,126 +228,11 @@ function hasBoundRequestReaction({
   return false;
 }
 
-function hasBoundCleanReviewComment({
-  automatedReviewApp,
-  cleanReviewComments,
-  headSha,
-  latestIssueCommentId,
-  latestReviewerFindingTimestamp,
-  pullRequestTimestamp,
-  releaseOperatorLogin,
-  reviewRequestComments,
-  reviewerLogin,
-}) {
-  if (!Array.isArray(cleanReviewComments)) {
-    throw new Error("Automated reviewer clean-comment response is missing");
-  }
-  if (cleanReviewComments.length === 0) return false;
-  const reviewerApp = normalizeAppIdentity(automatedReviewApp, "Automated reviewer app identity");
-  const operatorLogin = normalizeLogin(releaseOperatorLogin, "Release operator login");
-  const latestCommentId = positiveInteger(latestIssueCommentId, "Latest issue-comment identity");
-
-  for (const comment of cleanReviewComments) {
-    const actorLogin = normalizeLogin(comment?.user?.login, "Clean-review comment actor identity");
-    const marker = cleanReviewCommitMarker(comment?.body);
-    if (actorLogin !== reviewerLogin || marker === null) continue;
-    if (comment.user.type !== "Bot") {
-      throw new Error("Clean-review comment actor type is missing or malformed");
-    }
-    const performedViaApp = normalizeAppIdentity(
-      comment.performed_via_github_app,
-      "Clean-review comment GitHub App identity",
-    );
-    if (performedViaApp.id !== reviewerApp.id || performedViaApp.slug !== reviewerApp.slug) continue;
-
-    const commentId = positiveInteger(comment.id, "Clean-review comment identity");
-    const createdTimestamp = timestampMilliseconds(
-      comment.created_at,
-      "Clean-review comment creation timestamp",
-    );
-    const updatedTimestamp = timestampMilliseconds(
-      comment.updated_at,
-      "Clean-review comment update timestamp",
-    );
-    if (updatedTimestamp !== createdTimestamp) continue;
-    if (commentId !== latestCommentId || createdTimestamp !== pullRequestTimestamp) continue;
-    if (createdTimestamp <= latestReviewerFindingTimestamp) continue;
-
-    const resolvedCommitSha = String(comment.resolved_commit_sha ?? "").toLowerCase();
-    if (
-      !ABBREVIATED_GIT_SHA_RE.test(marker) ||
-      !FULL_GIT_SHA_RE.test(resolvedCommitSha) ||
-      !resolvedCommitSha.startsWith(marker) ||
-      resolvedCommitSha !== headSha
-    ) {
-      continue;
-    }
-
-    for (const request of reviewRequestComments) {
-      const requestAuthor = normalizeLogin(request?.user?.login, "Review-request comment author identity");
-      if (requestAuthor !== operatorLogin || !isCodexReviewRequest(request.body, headSha)) continue;
-      const requestId = positiveInteger(request.id, "Review-request comment identity");
-      const requestCreatedTimestamp = timestampMilliseconds(
-        request.created_at,
-        "Review-request comment creation timestamp",
-      );
-      const requestUpdatedTimestamp = timestampMilliseconds(
-        request.updated_at,
-        "Review-request comment update timestamp",
-      );
-      if (requestUpdatedTimestamp < requestCreatedTimestamp) {
-        throw new Error("Review-request comment timestamps are malformed");
-      }
-      if (requestUpdatedTimestamp !== requestCreatedTimestamp) continue;
-      if (
-        requestId < commentId &&
-        requestUpdatedTimestamp < createdTimestamp &&
-        requestCreatedTimestamp < createdTimestamp
-      ) {
-        const hasInterveningForeignRequest = reviewRequestComments.some((intervening) => {
-          if (!isCodexReviewCommand(intervening?.body)) return false;
-          const interveningId = positiveInteger(
-            intervening.id,
-            "Intervening review-request comment identity",
-          );
-          const interveningAuthor = normalizeLogin(
-            intervening?.user?.login,
-            "Intervening review-request comment author identity",
-          );
-          if (interveningAuthor === operatorLogin || interveningId >= commentId) return false;
-          const interveningCreatedTimestamp = timestampMilliseconds(
-            intervening.created_at,
-            "Intervening review-request comment creation timestamp",
-          );
-          const interveningUpdatedTimestamp = timestampMilliseconds(
-            intervening.updated_at,
-            "Intervening review-request comment update timestamp",
-          );
-          if (interveningUpdatedTimestamp < interveningCreatedTimestamp) {
-            throw new Error("Intervening review-request comment timestamps are malformed");
-          }
-          const followsOperatorRequest =
-            interveningId > requestId || interveningUpdatedTimestamp > requestUpdatedTimestamp;
-          const precedesCleanReply =
-            interveningCreatedTimestamp < createdTimestamp && interveningUpdatedTimestamp < createdTimestamp;
-          return followsOperatorRequest && precedesCleanReply;
-        });
-        if (hasInterveningForeignRequest) continue;
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 export function evaluateReviewCompletion({
-  automatedReviewApp,
   automatedReviewLogin,
-  cleanReviewComments,
   expectedHeadSha = "",
   files,
   forceReview = false,
-  latestIssueCommentId,
   labels,
   pullRequest,
   releaseOperatorLogin,
@@ -442,27 +285,5 @@ export function evaluateReviewCompletion({
       state: "success",
     };
   }
-  if (
-    hasBoundCleanReviewComment({
-      automatedReviewApp,
-      cleanReviewComments,
-      headSha,
-      latestIssueCommentId,
-      latestReviewerFindingTimestamp: reviewEvidence?.submittedAt ?? 0,
-      pullRequestTimestamp: pullRequestActivityTimestamp(pullRequest),
-      releaseOperatorLogin,
-      reviewRequestComments,
-      reviewerLogin,
-    })
-  ) {
-    return {
-      description: "Verified reviewer-app clean comment is bound to the exact PR head; no unresolved threads",
-      headSha,
-      required: true,
-      state: "success",
-    };
-  }
-  pending(
-    "Automated reviewer has no exact-head approval, bound +1 reaction, or verified exact-head clean comment",
-  );
+  pending("Automated reviewer has no exact-head approval or exact-head operator-request +1 reaction");
 }

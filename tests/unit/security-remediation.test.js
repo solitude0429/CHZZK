@@ -493,8 +493,8 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(checker, /issues\/\$\{pullNumber\}\/reactions/);
     assert.match(checker, /issues\/comments\/\$\{comment\.id\}\/reactions/);
     assert.doesNotMatch(checker, /commits\/\$\{currentHeadSha\}/);
-    assert.match(checker, /apps\/\$\{encodeURIComponent\(slug\)\}/);
-    assert.match(checker, /commits\/\$\{marker\}/);
+    assert.doesNotMatch(checker, /apps\/\$\{encodeURIComponent\(slug\)\}/);
+    assert.doesNotMatch(checker, /commits\/\$\{marker\}/);
     assert.match(checker, /Final pull request lookup/);
     assert.match(checker, /reviewEvidenceFingerprint/);
     assert.equal(
@@ -504,9 +504,9 @@ describe("release and repository security guardrails", () => {
     );
     const gateLibrary = read("scripts/lib/review-gate.js");
     assert.match(gateLibrary, /pullRequest\?\.updated_at/);
-    assert.match(gateLibrary, /performed_via_github_app/);
-    assert.match(gateLibrary, /resolved_commit_sha/);
-    assert.match(gateLibrary, /Didn't find any major issues/);
+    assert.doesNotMatch(gateLibrary, /performed_via_github_app/);
+    assert.doesNotMatch(gateLibrary, /resolved_commit_sha/);
+    assert.doesNotMatch(gateLibrary, /Didn't find any major issues/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
     assert.match(settings, /required_conversation_resolution/);

@@ -901,8 +901,10 @@
   var MAX_MARKER_EVIDENCE_TTL_MS = 3e4;
   var MAX_REDIRECT_FAILURE_BACKOFF_MS = 3e4;
   var MAX_TRACKED_REDIRECT_REQUESTS = 500;
+  var MAX_VALIDATED_TARGET_URLS = 16;
   var diagnosticsMutationQueue = Promise.resolve();
   var diagnosticsMutationQueueDepth = 0;
+  var redirectVerificationSequence = 0;
   async function loadDiagnostics() {
     const stored = await api.storage.local.get(STORAGE_KEY);
     return normalizeDiagnostics(stored?.[STORAGE_KEY], {
@@ -1122,7 +1124,11 @@
         return { evidenceKind: "url-marker", targetQuality: candidate };
       }
       if (await fetchSupportsExpectedQuality(candidateUrl, candidate, { signal })) {
-        return { evidenceKind: "url-marker", targetQuality: candidate };
+        return {
+          evidenceKind: "url-marker",
+          targetQuality: candidate,
+          validatedNetworkUrl: networkRequestUrl(candidateUrl),
+        };
       }
     }
     return signal?.aborted ? null : { evidenceKind: "url-marker", targetQuality: observedQuality };
@@ -1235,13 +1241,22 @@
     if (!resolutionContextIsCurrent(session.tabId, session.contextKey)) return false;
     if (failedTargetsForSession(session).has(targetQuality)) return false;
     const previous = activeTargetsBySession.get(session.key);
-    activeTargetsBySession.set(session.key, {
+    const targetEpoch = {};
+    const validatedNetworkUrls = /* @__PURE__ */ new Map();
+    if (resolution.validatedNetworkUrl) {
+      validatedNetworkUrls.set(resolution.validatedNetworkUrl, 0);
+    }
+    const state = {
       ...session,
       evidenceKind: resolution.evidenceKind,
       expiresAt: resolution.evidenceKind === "url-marker" ? Date.now() + markerEvidenceTtlMs() : null,
+      lastSuccessfulVerificationSequence: 0,
       resolved: true,
+      targetEpoch,
       targetQuality,
-    });
+      validatedNetworkUrls,
+    };
+    activeTargetsBySession.set(session.key, state);
     if (previous?.targetQuality !== targetQuality || !previous?.resolved) scheduleRedirectDiagnostics();
     return true;
   }
@@ -1486,9 +1501,12 @@
       if (redirectedRequestsById.get(record.requestId) === record) {
         redirectedRequestsById.delete(record.requestId);
       }
-      if (record.bodyEvidence === "empty" || record.bodyEvidence === "valid") {
+      if (
+        record.bodyEvidence === "valid" ||
+        (record.bodyEvidence === "empty" && targetPreviouslyValidatedNetworkUrl(record))
+      ) {
         renewSuccessfulRedirectTarget(record);
-      } else if (record.bodyEvidence !== "unavailable") {
+      } else {
         invalidateRedirectedTarget(record);
       }
       return;
@@ -1509,15 +1527,19 @@
     if (redirectedRequestsById.get(record.requestId) === record) {
       redirectedRequestsById.delete(record.requestId);
     }
-    if (record.bodyEvidence === "valid") renewSuccessfulRedirectTarget(record);
+    if (record.bodyEvidence === "valid") {
+      renewSuccessfulRedirectTarget(record);
+    } else {
+      invalidateRedirectedTarget(record);
+    }
   }
   function attachRedirectBodyVerifier(record) {
-    if (typeof api.webRequest.filterResponseData !== "function") return;
+    if (typeof api.webRequest.filterResponseData !== "function") return false;
     let filter;
     try {
       filter = api.webRequest.filterResponseData(record.requestId);
     } catch {
-      return;
+      return false;
     }
     record.bodyEvidence = "pending";
     record.bodyVerificationFailed = false;
@@ -1574,25 +1596,31 @@
       record.bodyEvidence = "invalid";
       settleRedirectedRequest(record);
     };
+    return true;
   }
   function attachPendingRedirectBodyVerifier(details) {
     const requestId = details?.requestId == null ? null : String(details.requestId);
-    if (!requestId) return;
+    if (!requestId) return false;
     const record = redirectedRequestsById.get(requestId);
-    if (
-      !record ||
-      record.settled ||
-      record.bodyEvidence !== "unavailable" ||
-      networkRequestUrl(details.url) !== record.redirectNetworkUrl
-    ) {
-      return;
+    if (!record || record.settled || networkRequestUrl(details.url) !== record.redirectNetworkUrl) {
+      return false;
     }
-    attachRedirectBodyVerifier(record);
+    if (record.bodyEvidence === "unavailable") attachRedirectBodyVerifier(record);
+    return true;
   }
-  function rememberRedirectedRequest(details, session, targetQuality, redirectUrl) {
-    if (details?.requestId == null || !session || !targetQuality || !redirectUrl) return;
+  function nextRedirectVerificationSequence() {
+    redirectVerificationSequence += 1;
+    if (!Number.isSafeInteger(redirectVerificationSequence)) {
+      throw new Error("redirect verification sequence exhausted");
+    }
+    return redirectVerificationSequence;
+  }
+  function rememberRedirectedRequest(details, session, targetState, responseUrl) {
+    if (details?.requestId == null || !session || !targetState?.targetQuality || !responseUrl) {
+      return null;
+    }
     const requestId = String(details.requestId);
-    const redirectNetworkUrl = networkRequestUrl(redirectUrl);
+    const redirectNetworkUrl = networkRequestUrl(responseUrl);
     if (requestId === "" || requestId.length > 128 || !redirectNetworkUrl) return;
     const replacedRecord = redirectedRequestsById.get(requestId);
     if (replacedRecord) replacedRecord.settled = true;
@@ -1603,11 +1631,13 @@
       bodyVerificationFailed: false,
       networkFailed: false,
       redirectNetworkUrl,
-      redirectUrl,
+      redirectUrl: responseUrl,
       requestId,
+      sequence: nextRedirectVerificationSequence(),
       settled: false,
       statusCode: null,
-      targetQuality,
+      targetEpoch: targetState.targetEpoch,
+      targetQuality: targetState.targetQuality,
     };
     redirectedRequestsById.set(requestId, record);
     while (redirectedRequestsById.size > MAX_TRACKED_REDIRECT_REQUESTS) {
@@ -1616,10 +1646,40 @@
       if (oldestRecord) oldestRecord.settled = true;
       redirectedRequestsById.delete(oldestRequestId);
     }
+    return record;
+  }
+  function currentTargetMatchesRecord(record) {
+    const current = activeTargetsBySession.get(record.key);
+    return current?.targetQuality === record.targetQuality && current.targetEpoch === record.targetEpoch
+      ? current
+      : null;
+  }
+  function targetPreviouslyValidatedNetworkUrl(record) {
+    const current = currentTargetMatchesRecord(record);
+    const validatedSequence = current?.validatedNetworkUrls?.get(record.redirectNetworkUrl);
+    return Number.isSafeInteger(validatedSequence) && validatedSequence < record.sequence;
+  }
+  function hasNewerPendingVerification(record) {
+    for (const pending of redirectedRequestsById.values()) {
+      if (
+        !pending.settled &&
+        pending.key === record.key &&
+        pending.targetEpoch === record.targetEpoch &&
+        pending.targetQuality === record.targetQuality &&
+        pending.sequence > record.sequence
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
   function invalidateRedirectedTarget(record) {
-    const current = activeTargetsBySession.get(record.key);
-    if (current?.targetQuality === record.targetQuality) activeTargetsBySession.delete(record.key);
+    const current = currentTargetMatchesRecord(record);
+    if (!current) return;
+    if (current.lastSuccessfulVerificationSequence > record.sequence || hasNewerPendingVerification(record)) {
+      return;
+    }
+    activeTargetsBySession.delete(record.key);
     invalidateSessionResolution(record.key);
     const failures = failedTargetsBySession.get(record.key) ?? {
       ...record,
@@ -1628,7 +1688,12 @@
     failures.targets.set(record.targetQuality, Date.now() + redirectFailureBackoffMs());
     failedTargetsBySession.set(record.key, failures);
     for (const [requestId, pending] of redirectedRequestsById) {
-      if (pending.key === record.key && pending.targetQuality === record.targetQuality) {
+      if (
+        pending.key === record.key &&
+        pending.targetEpoch === record.targetEpoch &&
+        pending.targetQuality === record.targetQuality &&
+        pending.sequence <= record.sequence
+      ) {
         pending.settled = true;
         redirectedRequestsById.delete(requestId);
       }
@@ -1636,15 +1701,22 @@
     scheduleRedirectDiagnostics();
   }
   function renewSuccessfulRedirectTarget(record) {
-    const current = activeTargetsBySession.get(record.key);
-    if (
-      current?.targetQuality !== record.targetQuality ||
-      current.evidenceKind !== "url-marker" ||
-      !resolutionContextIsCurrent(record.tabId, record.contextKey)
-    ) {
+    const current = currentTargetMatchesRecord(record);
+    if (!current || !resolutionContextIsCurrent(record.tabId, record.contextKey)) {
       return;
     }
-    current.expiresAt = Date.now() + markerEvidenceTtlMs();
+    current.lastSuccessfulVerificationSequence = Math.max(
+      current.lastSuccessfulVerificationSequence,
+      record.sequence,
+    );
+    current.validatedNetworkUrls.delete(record.redirectNetworkUrl);
+    current.validatedNetworkUrls.set(record.redirectNetworkUrl, record.sequence);
+    while (current.validatedNetworkUrls.size > MAX_VALIDATED_TARGET_URLS) {
+      current.validatedNetworkUrls.delete(current.validatedNetworkUrls.keys().next().value);
+    }
+    if (current.evidenceKind === "url-marker") {
+      current.expiresAt = Date.now() + markerEvidenceTtlMs();
+    }
   }
   function handleRedirectCompleted(details) {
     const requestId = details?.requestId == null ? null : String(details.requestId);
@@ -1673,7 +1745,7 @@
     });
   }
   async function handleRequest(details) {
-    attachPendingRedirectBodyVerifier(details);
+    const attachedRedirectVerifier = attachPendingRedirectBodyVerifier(details);
     if (!registerRequestContext(details)) return void 0;
     if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
       if (isChzzkLiveUrl(details.documentUrl, quality_policy_default)) {
@@ -1709,7 +1781,16 @@
         if (targetQuality) {
           decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
         }
-        if (redirectUrl) rememberRedirectedRequest(details, session, targetQuality, redirectUrl);
+        if (redirectUrl) {
+          rememberRedirectedRequest(details, session, targetState, redirectUrl);
+        } else if (
+          !attachedRedirectVerifier &&
+          targetState?.targetQuality === decision.quality &&
+          urlQualityMarkersMatch(details.url, targetState.targetQuality)
+        ) {
+          const record = rememberRedirectedRequest(details, session, targetState, details.url);
+          if (record) attachRedirectBodyVerifier(record);
+        }
       } catch (error) {
         scheduleRedirectDiagnostics(String(error?.message ?? error));
         console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);

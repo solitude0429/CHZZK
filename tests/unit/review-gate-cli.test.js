@@ -10,7 +10,6 @@ const headSha = "d".repeat(40);
 const baseSha = "b".repeat(40);
 const reviewerLogin = "chatgpt-codex-connector[bot]";
 const operatorLogin = "sole-owner";
-const reviewerApp = { id: 1_144_995, slug: "chatgpt-codex-connector" };
 
 function fakeGhSource() {
   return `#!${process.execPath}
@@ -79,15 +78,6 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
       updated_at: "2026-07-15T10:00:30Z",
       user: { login: "${operatorLogin}", type: "User" },
     },
-    ...(state.interveningReviewRequestActor
-      ? [{
-          body: "@codex review",
-          created_at: "2026-07-15T10:01:00Z",
-          id: 150,
-          updated_at: "2026-07-15T10:01:00Z",
-          user: { login: state.interveningReviewRequestActor, type: "User" },
-        }]
-      : []),
     {
       body: state.prefixedExactHeadCleanFormat
         ? "Untrusted preamble\\n\\n## Review Result\\n\\nNo major issues found in exact head \\\`" +
@@ -99,10 +89,6 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
             state.headSha.slice(0, 10) + "\\\`\\n",
       created_at: "2026-07-15T10:02:00Z",
       id: 200,
-      performed_via_github_app: {
-        id: state.wrongApp ? ${reviewerApp.id + 1} : ${reviewerApp.id},
-        slug: "${reviewerApp.slug}",
-      },
       updated_at: "2026-07-15T10:02:00Z",
       user: { login: "${reviewerLogin}", type: "Bot" },
     },
@@ -119,21 +105,18 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
   }
   pages(comments);
 }
-if (
-  endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100" ||
-  endpoint === "repos/example/repository/issues/comments/150/reactions?per_page=100"
-) pages([]);
-if (
-  endpoint === "repos/example/repository/commits/" + state.headSha.slice(0, 10) ||
-  endpoint === "repos/example/repository/commits/" + state.headSha
-) {
-  if (state.commitResolutionFails) {
-    process.stderr.write("ambiguous commit reference");
-    process.exit(1);
-  }
-  output({ sha: state.headSha });
+if (endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100") {
+  pages([{
+    content: "+1",
+    created_at: state.staleReaction ? "2026-07-15T10:01:00Z" : "2026-07-15T10:03:00Z",
+    id: 400,
+    user: {
+      id: 1,
+      login: state.wrongReactionActor ? "different-reviewer[bot]" : "${reviewerLogin}",
+      type: "Bot",
+    },
+  }]);
 }
-if (endpoint === "apps/${reviewerApp.slug}") output(${JSON.stringify(reviewerApp)});
 process.stderr.write("unexpected fake gh request: " + args.join(" "));
 process.exit(2);
 `;
@@ -183,28 +166,23 @@ function runGate(overrides = {}) {
 }
 
 describe("review-gate GitHub evidence collection", () => {
-  it("resolves the clean marker and verifies the exact GitHub App before passing", () => {
-    for (const overrides of [{}, { exactHeadCleanFormat: true }]) {
-      const run = runGate(overrides);
-      assert.equal(run.result.status, 0, run.result.stderr);
-      assert.match(run.output, /^state=success$/m);
-      assert.match(run.result.stdout, /Verified reviewer-app clean comment/);
-      const marker = overrides.exactHeadCleanFormat ? headSha : headSha.slice(0, 10);
-      assert.equal(
-        run.state.log.some((args) => args.includes(`repos/example/repository/commits/${marker}`)),
-        true,
-      );
-      assert.equal(
-        run.state.log.some((args) => args.includes(`apps/${reviewerApp.slug}`)),
-        true,
-      );
-    }
+  it("collects a reaction only from the exact-head operator request before passing", () => {
+    const run = runGate();
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.output, /^state=success$/m);
+    assert.match(run.result.stdout, /Reviewer \+1 is bound/);
+    assert.equal(
+      run.state.log.some((args) =>
+        args.includes("repos/example/repository/issues/comments/100/reactions?per_page=100"),
+      ),
+      true,
+    );
   });
 
-  it("fails closed on provenance, ref, metadata, same-second comment, or review races", () => {
+  it("fails closed on reaction provenance, timestamps, metadata, comment, or review races", () => {
     for (const overrides of [
-      { wrongApp: true },
-      { commitResolutionFails: true },
+      { wrongReactionActor: true },
+      { staleReaction: true },
       { finalBaseChanges: true },
       { commentsChangeBetweenSnapshots: true },
       { reviewsChangeBetweenSnapshots: true },
@@ -219,21 +197,5 @@ describe("review-gate GitHub evidence collection", () => {
     const run = runGate({ commentsChangeBetweenSnapshots: true });
     assert.notEqual(run.result.status, 0);
     assert.match(run.result.stderr, /review evidence changed while it was collected/i);
-  });
-
-  it("rejects an exact-head clean phrase hidden below an untrusted preamble", () => {
-    const run = runGate({ prefixedExactHeadCleanFormat: true });
-    assert.notEqual(run.result.status, 0);
-    assert.match(run.output, /^state=failure$/m);
-  });
-
-  it("rejects a clean reply after another actor intervenes but allows an operator retrigger", () => {
-    const untrusted = runGate({ interveningReviewRequestActor: "untrusted-trigger" });
-    assert.notEqual(untrusted.result.status, 0);
-    assert.match(untrusted.output, /^state=failure$/m);
-
-    const operator = runGate({ interveningReviewRequestActor: operatorLogin });
-    assert.equal(operator.result.status, 0, operator.result.stderr);
-    assert.match(operator.output, /^state=success$/m);
   });
 });
