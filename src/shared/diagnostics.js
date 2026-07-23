@@ -1,5 +1,6 @@
 import {
   highestQualityCandidate,
+  isHlsPlaylistUrl,
   normalizeQualityCandidates,
   normalizeQualityLabel,
   parseQualityFromUrl,
@@ -94,7 +95,7 @@ function normalizeDecision(value) {
     tabId === undefined ||
     type === undefined ||
     url === undefined ||
-    seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO ||
+    (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) ||
     typeof value.reason !== "string" ||
     value.reason.length === 0 ||
     value.reason.length > MAX_DIAGNOSTIC_REASON_LENGTH
@@ -139,7 +140,11 @@ function normalizeTargetsByTab(value, maxSamples) {
     Object.entries(value)
       .filter(([tabId, quality]) => {
         const parsedTabId = Number(tabId);
-        return String(parsedTabId) === tabId && normalizedTabId(parsedTabId) !== undefined && normalizedQuality(quality);
+        return (
+          String(parsedTabId) === tabId &&
+          normalizedTabId(parsedTabId) !== undefined &&
+          normalizedQuality(quality)
+        );
       })
       .sort(([left], [right]) => Number(left) - Number(right))
       .slice(-maxSamples)
@@ -200,13 +205,11 @@ export function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
 }
 
 function capList(list, maxItems) {
-  if (list.length > maxItems) {
-    list.splice(0, list.length - maxItems);
-  }
+  if (list.length > maxItems) list.splice(0, list.length - maxItems);
 }
 
 export function recordDiagnosticUrl(diagnostics, url, { context = {}, now = new Date() } = {}) {
-  if (!diagnostics || typeof url !== "string" || !/\.m3u8(?:[?#]|$)/i.test(url)) return false;
+  if (!diagnostics || typeof url !== "string" || !isHlsPlaylistUrl(url)) return false;
 
   const quality = parseQualityFromUrl(url);
   if (!quality) return false;
@@ -276,17 +279,16 @@ export function createDiagnosticsSnapshot(diagnostics) {
 }
 
 export function analyzeDiagnostics(snapshot, { qualityCandidates = [] } = {}) {
-  const qualities = Object.keys(snapshot?.qualities ?? {});
-  const observedQualities = qualities.sort((a, b) => (qualityNumber(a) ?? 0) - (qualityNumber(b) ?? 0));
+  const observedQualities = Object.keys(snapshot?.qualities ?? {}).sort(
+    (left, right) => (qualityNumber(left) ?? 0) - (qualityNumber(right) ?? 0),
+  );
   const highestObservedQuality =
     observedQualities
       .map((quality) => ({ label: quality, value: qualityNumber(quality) }))
       .filter((entry) => entry.value != null)
-      .sort((a, b) => b.value - a.value)[0]?.label ?? null;
+      .sort((left, right) => right.value - left.value)[0]?.label ?? null;
 
-  const configuredCandidates = normalizeQualityCandidates(qualityCandidates, {
-    include: highestObservedQuality ? [] : [],
-  });
+  const configuredCandidates = normalizeQualityCandidates(qualityCandidates);
   const highestConfiguredQuality = highestQualityCandidate(configuredCandidates);
   const highestObservedNumber = qualityNumber(highestObservedQuality);
   const highestConfiguredNumber = qualityNumber(highestConfiguredQuality);
