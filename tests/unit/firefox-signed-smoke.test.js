@@ -211,6 +211,18 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
     assert.match(functionalE2e, /functionalOnly:\s*true/);
   });
 
+  it("drives the user-visible about:addons update path and checks every completion state", () => {
+    const signedSmoke = readFileSync(join(repoRoot, "scripts/lib/firefox-signed-smoke.js"), "utf8");
+    assert.match(signedSmoke, /url:\s*"about:addons"/);
+    assert.match(signedSmoke, /action="check-for-updates"/);
+    assert.match(signedSmoke, /action="update-check"/);
+    assert.match(signedSmoke, /action="install-update"/);
+    assert.match(signedSmoke, /getAttribute\("state"\)/);
+    assert.match(signedSmoke, /manual-updates-found/);
+    assert.match(signedSmoke, /none-found/);
+    assert.doesNotMatch(signedSmoke, /addon\.findUpdates/);
+  });
+
   it("names the Node artifact check as structural and leaves authenticity to Firefox", async () => {
     const releaseArtifacts = await import("../../scripts/lib/release-artifacts.js");
     const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));

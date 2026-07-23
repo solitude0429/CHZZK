@@ -70,7 +70,7 @@ CHZZK_SIGNED_SMOKE_MODE="install" \
 npm run test:firefox-signed-smoke
 ```
 
-Update mode first performs the same direct final-XPI install in one disposable profile. In a second disposable profile it permanently installs an older AMO-signed XPI, invokes `AddonManager.findUpdates`, and requires a permanent, active, Mozilla-signed installation at the final version:
+Update mode first performs the same direct final-XPI install in one disposable profile. In a second disposable profile it permanently installs an older AMO-signed XPI, disables automatic updates, opens that extension's `about:addons` details, clicks its visible update-check control, proves Firefox keeps the old version while exposing the pending `install-update` control, then clicks that control and requires a permanent, active, Mozilla-signed installation at the final version. A third disposable profile keeps the default update policy, clicks the global add-on-manager update control, requires the visible `installed` state, and checks once more for the visible `none-found` state:
 
 ```bash
 FIREFOX_BINARY="/path/to/stock/firefox" \
@@ -82,7 +82,7 @@ CHZZK_SIGNED_SMOKE_MODE="update" \
 npm run test:firefox-signed-smoke
 ```
 
-Update mode deliberately uses the older XPI's canonical production `update_url`; run it only after the versioned final XPI and `updates.json` are deployed. Missing binaries, metadata, or required signed artifacts are hard failures, never skips. Fake or cryptographically tampered metadata that can satisfy the structural ZIP bounds is rejected by Firefox installation/signed-state enforcement rather than by home-grown cryptography.
+Update mode deliberately uses the older XPI's canonical production `update_url`; run it only after the versioned final XPI and `updates.json` are deployed. The test clicks both the per-extension `[action="update-check"]`/`[action="install-update"]` controls and the global `[action="check-for-updates"]` control in stock Firefox rather than calling `AddonManager.findUpdates` directly. Missing binaries, metadata, or required signed artifacts are hard failures, never skips. Fake or cryptographically tampered metadata that can satisfy the structural ZIP bounds is rejected by Firefox installation/signed-state enforcement rather than by home-grown cryptography.
 
 ## Manual Firefox smoke test
 

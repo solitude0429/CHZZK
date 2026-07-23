@@ -222,6 +222,10 @@ class WebDriver {
     return this.command("POST", "/execute/async", { args, script });
   }
 
+  async execute(script, args = []) {
+    return this.command("POST", "/execute/sync", { args, script });
+  }
+
   async close() {
     if (!this.sessionId) return;
     try {
@@ -271,36 +275,161 @@ async function installAndInspect(driver, xpiPath, expected) {
   return assertTrustedPermanentAddon({ ...expected, ...result });
 }
 
-async function triggerAddonUpdate(driver, addOnId) {
+async function setAddonAutomaticUpdates(driver, addOnId, enabled) {
   await driver.setContext("chrome");
-  return driver.executeAsync(
+  return driver.execute(
     `const addonId = arguments[0];
-const done = arguments[arguments.length - 1];
+const enabled = arguments[1];
 const { AddonManager } = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
-let finished = false;
-const finish = (value) => { if (!finished) { finished = true; done(value); } };
-setTimeout(() => finish({ status: "timeout" }), 60000);
-AddonManager.getAddonByID(addonId).then((addon) => {
-  if (!addon) return finish({ status: "missing" });
-  addon.findUpdates({
-    onNoUpdateAvailable() { finish({ current: addon.version, status: "no-update" }); },
-    onUpdateAvailable(_addon, install) {
-      install.addListener({
-        onDownloadFailed(_install) { finish({ error: String(_install.error), status: "download-failed" }); },
-        onInstallEnded(_install, installedAddon) {
-          finish({ status: "installed", version: installedAddon.version });
-        },
-        onInstallFailed(_install) { finish({ error: String(_install.error), status: "install-failed" }); },
-      });
-      install.install();
+return AddonManager.getAddonByID(addonId).then((addon) => {
+  if (!addon) return { status: "missing" };
+  addon.applyBackgroundUpdates = enabled
+    ? AddonManager.AUTOUPDATE_DEFAULT
+    : AddonManager.AUTOUPDATE_DISABLE;
+  return {
+    applyBackgroundUpdates: addon.applyBackgroundUpdates,
+    status: enabled ? "default" : "disabled",
+  };
+});`,
+    [addOnId, enabled],
+  );
+}
+
+async function triggerAddonUpdateThroughManagerUi(driver) {
+  await driver.setContext("content");
+  await driver.command("POST", "/url", { url: "about:addons" });
+  await poll(async () =>
+    driver.execute(
+      `return document.readyState === "complete" &&
+  Boolean(document.querySelector('addon-page-options [action="check-for-updates"]'));`,
+    ),
+  );
+  const clicked = await driver.execute(
+    `const option = document.querySelector(
+  'addon-page-options [action="check-for-updates"]'
+);
+if (!option || option.disabled) return false;
+option.click();
+return true;`,
+  );
+  if (clicked !== true) throw new Error("Firefox add-on manager update control is unavailable");
+  const message = await poll(
+    async () => {
+      const state = await driver.execute(
+        `const message = document.getElementById("updates-message");
+return message ? {
+  hidden: message.hidden,
+  state: message.getAttribute("state"),
+} : null;`,
+      );
+      return state?.hidden === false && state.state && state.state !== "updating" ? state : null;
     },
-    onUpdateFinished(_addon, error) {
-      if (error) finish({ error: String(error), status: "update-failed" });
-    },
-  }, AddonManager.UPDATE_WHEN_USER_REQUESTED);
-}, (error) => finish({ error: String(error), status: "lookup-failed" }));`,
+    { timeoutMs: 60_000 },
+  );
+  const statuses = {
+    installed: "installed",
+    "manual-updates-found": "manual-update",
+    "none-found": "no-update",
+  };
+  return {
+    status: statuses[message.state] ?? "unexpected",
+    uiState: message.state,
+  };
+}
+
+async function discoverManualAddonUpdateThroughDetailsUi(driver, addOnId) {
+  await driver.setContext("content");
+  await driver.command("POST", "/url", { url: "about:addons" });
+  const listLoaded = await driver.execute(
+    `return window.promiseInitialized
+  .then(() => window.loadView("list/extension"))
+  .then(() => true);`,
+  );
+  if (listLoaded !== true) throw new Error("Firefox extension list did not load");
+  let opened;
+  try {
+    opened = await poll(async () =>
+      driver.execute(
+        `const addonId = arguments[0];
+const card = [...document.querySelectorAll("addon-card")].find(
+  (candidate) => candidate.addon?.id === addonId
+);
+const link = card?.querySelector(".addon-name-link");
+if (!link) return false;
+link.click();
+return true;`,
+        [addOnId],
+      ),
+    );
+  } catch (error) {
+    throw new Error(`Firefox add-on detail navigation failed: ${error.message}`);
+  }
+  if (opened !== true) throw new Error("Firefox add-on detail page is unavailable");
+  try {
+    await poll(async () =>
+      driver.execute(
+        `const addonId = arguments[0];
+const card = [...document.querySelectorAll("addon-card")].find(
+  (candidate) => candidate.addon?.id === addonId && candidate.expanded
+);
+const option = card?.querySelector('[action="update-check"]');
+return Boolean(option && !option.hidden && !option.disabled);`,
+        [addOnId],
+      ),
+    );
+  } catch (error) {
+    throw new Error(`Firefox per-add-on update control did not appear: ${error.message}`);
+  }
+  const clicked = await driver.execute(
+    `const addonId = arguments[0];
+const card = [...document.querySelectorAll("addon-card")].find(
+  (candidate) => candidate.addon?.id === addonId && candidate.expanded
+);
+const option = card?.querySelector('[action="update-check"]');
+if (!option || option.hidden || option.disabled) return false;
+option.click();
+return true;`,
     [addOnId],
   );
+  if (clicked !== true) throw new Error("Firefox per-add-on update control is unavailable");
+  try {
+    return await poll(async () => {
+      const available = await driver.execute(
+        `const addonId = arguments[0];
+const card = [...document.querySelectorAll("addon-card")].find(
+  (candidate) => candidate.addon?.id === addonId && candidate.expanded
+);
+const install = card?.querySelector('addon-options [action="install-update"]');
+return {
+  installAvailable: Boolean(card?.updateInstall),
+  installControlVisible: Boolean(install && !install.hidden && !install.disabled),
+};`,
+        [addOnId],
+      );
+      return available?.installAvailable && available.installControlVisible
+        ? { status: "manual-update", uiState: "install-update" }
+        : null;
+    });
+  } catch (error) {
+    throw new Error(`Firefox pending update control did not appear: ${error.message}`);
+  }
+}
+
+async function installManualAddonUpdateThroughDetailsUi(driver, addOnId) {
+  await driver.setContext("content");
+  const clicked = await driver.execute(
+    `const addonId = arguments[0];
+const card = [...document.querySelectorAll("addon-card")].find(
+  (candidate) => candidate.addon?.id === addonId && candidate.expanded
+);
+const option = card?.querySelector('addon-options [action="install-update"]');
+if (!option || option.hidden || option.disabled) return false;
+option.click();
+return true;`,
+    [addOnId],
+  );
+  if (clicked !== true) throw new Error("Firefox pending update install control is unavailable");
+  return { status: "clicked", uiState: "install-update" };
 }
 
 async function reservePort() {
@@ -382,13 +511,56 @@ export async function runFirefoxSignedSmoke(rawInput) {
     );
     let update = null;
     if (input.mode === "update") {
-      update = await withDisposableFirefox(firefoxInput, async (driver) => {
+      const manual = await withDisposableFirefox(firefoxInput, async (driver) => {
         const before = await installAndInspect(driver, input.oldSignedXpiPath, {
           ...expectedFinal,
           expectedVersion: input.oldVersion,
         });
-        const updateResult = await triggerAddonUpdate(driver, input.metadata.addOnId);
-        if (updateResult?.status !== "installed" || updateResult.version !== input.metadata.version) {
+        const disabled = await setAddonAutomaticUpdates(driver, input.metadata.addOnId, false);
+        if (disabled?.status !== "disabled") {
+          throw new Error(`Firefox automatic-update opt-out setup failed: ${JSON.stringify(disabled)}`);
+        }
+        const manualResult = await discoverManualAddonUpdateThroughDetailsUi(driver, input.metadata.addOnId);
+        if (manualResult?.status !== "manual-update") {
+          throw new Error(
+            `Firefox per-add-on manual-update discovery failed: ${JSON.stringify(manualResult)}`,
+          );
+        }
+        const pending = await inspectAddon(driver, input.metadata.addOnId);
+        assertTrustedPermanentAddon({
+          ...expectedFinal,
+          ...pending,
+          expectedVersion: input.oldVersion,
+        });
+        const manualInstall = await installManualAddonUpdateThroughDetailsUi(driver, input.metadata.addOnId);
+        if (manualInstall?.status !== "clicked") {
+          throw new Error(
+            `Firefox per-add-on pending update install failed: ${JSON.stringify(manualInstall)}`,
+          );
+        }
+        const inspected = await poll(async () => {
+          const state = await inspectAddon(driver, input.metadata.addOnId);
+          return state?.addon?.version === input.metadata.version ? state : null;
+        });
+        const after = assertTrustedPermanentAddon({ ...expectedFinal, ...inspected });
+        const restored = await setAddonAutomaticUpdates(driver, input.metadata.addOnId, true);
+        if (restored?.status !== "default") {
+          throw new Error(`Firefox automatic-update restore failed: ${JSON.stringify(restored)}`);
+        }
+        return {
+          after: after.version,
+          before: before.version,
+          manualResult,
+          updateResult: { status: "installed", uiState: manualInstall.uiState },
+        };
+      });
+      const automatic = await withDisposableFirefox(firefoxInput, async (driver) => {
+        const before = await installAndInspect(driver, input.oldSignedXpiPath, {
+          ...expectedFinal,
+          expectedVersion: input.oldVersion,
+        });
+        const updateResult = await triggerAddonUpdateThroughManagerUi(driver);
+        if (updateResult?.status !== "installed") {
           throw new Error(
             `Firefox old-to-new signed update failed: ${JSON.stringify({ before: before.version, updateResult })}`,
           );
@@ -398,8 +570,18 @@ export async function runFirefoxSignedSmoke(rawInput) {
           return state?.addon?.version === input.metadata.version ? state : null;
         });
         const after = assertTrustedPermanentAddon({ ...expectedFinal, ...inspected });
-        return { after: after.version, before: before.version, updateResult };
+        const noUpdateResult = await triggerAddonUpdateThroughManagerUi(driver);
+        if (noUpdateResult?.status !== "no-update") {
+          throw new Error(`Firefox current-version update check failed: ${JSON.stringify(noUpdateResult)}`);
+        }
+        return {
+          after: after.version,
+          before: before.version,
+          noUpdateResult,
+          updateResult: { ...updateResult, version: after.version },
+        };
       });
+      update = { ...automatic, manual };
     }
     return {
       addOnId: finalInstall.id,
