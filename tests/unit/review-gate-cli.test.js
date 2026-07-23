@@ -80,10 +80,14 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
       user: { login: "${operatorLogin}", type: "User" },
     },
     {
-      body: state.exactHeadCleanFormat
-        ? "## Review Result\\n\\nNo major issues found in exact head \\\`" + state.headSha + "\\\`.\\n"
-        : "Codex Review: Didn't find any major issues. Nice work!\\n\\n**Reviewed commit:** \\\`" +
-          state.headSha.slice(0, 10) + "\\\`\\n",
+      body: state.prefixedExactHeadCleanFormat
+        ? "Untrusted preamble\\n\\n## Review Result\\n\\nNo major issues found in exact head \\\`" +
+          state.headSha + "\\\`.\\n"
+        : state.exactHeadCleanFormat
+          ? "## Review Result\\n\\nNo major issues found in exact head \\\`" +
+            state.headSha + "\\\`.\\n"
+          : "Codex Review: Didn't find any major issues. Nice work!\\n\\n**Reviewed commit:** \\\`" +
+            state.headSha.slice(0, 10) + "\\\`\\n",
       created_at: "2026-07-15T10:02:00Z",
       id: 200,
       performed_via_github_app: {
@@ -203,5 +207,11 @@ describe("review-gate GitHub evidence collection", () => {
     const run = runGate({ commentsChangeBetweenSnapshots: true });
     assert.notEqual(run.result.status, 0);
     assert.match(run.result.stderr, /review evidence changed while it was collected/i);
+  });
+
+  it("rejects an exact-head clean phrase hidden below an untrusted preamble", () => {
+    const run = runGate({ prefixedExactHeadCleanFormat: true });
+    assert.notEqual(run.result.status, 0);
+    assert.match(run.output, /^state=failure$/m);
   });
 });
