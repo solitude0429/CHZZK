@@ -48,7 +48,7 @@
     "esbuild": "0.28.1",
     "eslint": "8.57.1",
     "jszip": "3.10.1",
-    "prettier": "3.9.4",
+    "prettier": "3.9.6",
     "web-ext": "10.4.0",
     "yaml": "2.9.0"
   }
