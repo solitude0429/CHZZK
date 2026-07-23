@@ -56,7 +56,13 @@ async function poll(action, { intervalMs = 100, timeoutMs = 15000 } = {}) {
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-async function makeExtensionXpi({ outputPath, port, runtimeDir, version }) {
+async function makeExtensionXpi({
+  chzzkPermission = "https://*.chzzk.naver.com/*",
+  outputPath,
+  port,
+  runtimeDir,
+  version,
+}) {
   const productionManifest = JSON.parse(readFileSync(join(repoRoot, "manifest.json"), "utf8"));
   const manifest = {
     ...productionManifest,
@@ -66,7 +72,7 @@ async function makeExtensionXpi({ outputPath, port, runtimeDir, version }) {
       "tabs",
       "webRequest",
       "webRequestBlocking",
-      "https://*.chzzk.naver.com/*",
+      chzzkPermission,
       "https://*.pstatic.net/*",
     ],
     content_scripts: [
@@ -431,7 +437,13 @@ async function main() {
     await buildFixtureRuntime(runtimeDir);
     const oldXpiPath = join(workDir, "chzzk-0.1.3.xpi");
     const updateXpiPath = join(workDir, "chzzk-0.1.4.xpi");
-    await makeExtensionXpi({ outputPath: oldXpiPath, port: state.port, runtimeDir, version: "0.1.3" });
+    await makeExtensionXpi({
+      chzzkPermission: "https://*.chzzk.naver.com/live/*",
+      outputPath: oldXpiPath,
+      port: state.port,
+      runtimeDir,
+      version: "0.1.3",
+    });
     state.updateXpiBytes = await makeExtensionXpi({
       outputPath: updateXpiPath,
       port: state.port,
@@ -508,12 +520,35 @@ async function main() {
       "runtime redirect must preserve the signed query byte-for-byte",
     );
 
+    const updateResult = await triggerAddonUpdate(driver);
+    if (updateResult?.status !== "installed" || updateResult?.version !== "0.1.4") {
+      throw new Error(`Firefox update failed: ${JSON.stringify({ before, updateResult })}`);
+    }
+    const after = await poll(async () => {
+      const addon = await installedAddon(driver);
+      return addon?.version === "0.1.4" ? addon : null;
+    });
+    assert.equal(after.active, true);
+    assert.equal(after.id, addOnId);
+    assert.equal(after.version, "0.1.4");
+    assert.equal(
+      requests.some((request) => request.host === "updates.chzzk.test" && request.path === "/updates.json"),
+      true,
+    );
+    assert.equal(
+      requests.some(
+        (request) => request.host === "updates.chzzk.test" && request.path === state.updateXpiPath,
+      ),
+      true,
+    );
+
     const redirectedCountBeforeMiniPlayer = requests.filter(
       (request) =>
         request.host === "nvelop-livecloud.pstatic.net" &&
         request.path.includes("/1080p/") &&
         request.path.includes("chunklist_1080p_highbitrate.m3u8"),
     ).length;
+    await driver.setContext("content");
     await driver.command("POST", "/url", {
       url: `https://www.chzzk.naver.com:${state.port}/lives?keyword=another-channel`,
     });
@@ -542,32 +577,11 @@ async function main() {
       "Firefox did not expose the /lives-initiated playlist to the extension",
     );
 
-    const updateResult = await triggerAddonUpdate(driver);
-    if (updateResult?.status !== "installed" || updateResult?.version !== "0.1.4") {
-      throw new Error(`Firefox update failed: ${JSON.stringify({ before, updateResult })}`);
-    }
-    const after = await poll(async () => {
-      const addon = await installedAddon(driver);
-      return addon?.version === "0.1.4" ? addon : null;
-    });
-    assert.equal(after.active, true);
-    assert.equal(after.id, addOnId);
-    assert.equal(after.version, "0.1.4");
-    assert.equal(
-      requests.some((request) => request.host === "updates.chzzk.test" && request.path === "/updates.json"),
-      true,
-    );
-    assert.equal(
-      requests.some(
-        (request) => request.host === "updates.chzzk.test" && request.path === state.updateXpiPath,
-      ),
-      true,
-    );
-
     console.log(
       JSON.stringify({
         firefox: basename(firefoxBinary),
         functionalOnly: true,
+        hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,
         miniPlayerPage: "/lives",
