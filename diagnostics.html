@@ -28,6 +28,9 @@
       .warning {
         color: #8a4b00;
       }
+      #status {
+        min-height: 1.4em;
+      }
     </style>
   </head>
   <body>
@@ -45,6 +48,7 @@
     <button id="refresh">새로고침</button>
     <button id="copy">JSON 복사</button>
     <button id="clear">로그 삭제</button>
+    <p id="status" role="status" aria-live="polite"></p>
     <pre id="summary"></pre>
     <textarea id="payload" spellcheck="false"></textarea>
     <script src="diagnostics.js"></script>
