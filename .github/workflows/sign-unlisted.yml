@@ -302,7 +302,7 @@ jobs:
           test "$(sha256sum "release-assets/chzzk-${VERSION}.zip" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.source_sha256 }}"
           test "$(sha256sum "release-assets/chzzk-${VERSION}-release-metadata.json" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.metadata_sha256 }}"
           test "$(sha256sum "release-assets/chzzk-${VERSION}-signed.xpi" | cut -d ' ' -f1)" = "${{ needs.verify-signed.outputs.signed_sha256 }}"
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: release-assets/*
 
