@@ -151,6 +151,17 @@ describe("atomic internal update deployment", () => {
         updates.addons["chzzk@solitude0429.local"].updates[0].update_link,
         "https://chzzk-updates.alpha-apple.dedyn.io/releases/0.1.3/chzzk-0.1.3-signed.xpi",
       );
+      const index = readFileSync(join(targetDir, "index.html"), "utf8");
+      const hrefs = [...index.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
+      assert.deepEqual(hrefs, [
+        "/releases/0.1.3/chzzk-0.1.3-signed.xpi",
+        "/updates.json",
+        "/releases/0.1.3/chzzk-0.1.3-release-metadata.json",
+        "/releases/0.1.3/chzzk-0.1.3.zip",
+      ]);
+      for (const href of hrefs) {
+        assert.equal(existsSync(join(targetDir, href.slice(1))), true, href);
+      }
     } finally {
       release.cleanup();
       rmSync(targetDir, { force: true, recursive: true });

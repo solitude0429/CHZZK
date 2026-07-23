@@ -620,15 +620,16 @@ function recoverInterruptedTransaction({ expectedUid, stateDir, targetDir }) {
 function indexHtml(metadata) {
   const version = metadata.version;
   return Buffer.from(`<!doctype html>
-<html lang="en">
+<html lang="ko">
 <head><meta charset="utf-8"><title>CHZZK ${version}</title></head>
 <body>
 <h1>CHZZK ${version}</h1>
+<p>서명된 XPI를 열면 Firefox에서 새로 설치하거나 현재 설치본을 수동 업데이트할 수 있습니다.</p>
 <ul>
-<li><a href="updates.json">Firefox update manifest</a></li>
-<li><a href="chzzk-${version}-release-metadata.json">Release metadata</a></li>
-<li><a href="chzzk-${version}-signed.xpi">Signed XPI</a></li>
-<li><a href="chzzk-${version}.zip">Unsigned source archive</a></li>
+<li><a href="/releases/${version}/chzzk-${version}-signed.xpi">Firefox에 설치/업데이트</a></li>
+<li><a href="/updates.json">Firefox update manifest</a></li>
+<li><a href="/releases/${version}/chzzk-${version}-release-metadata.json">Release metadata</a></li>
+<li><a href="/releases/${version}/chzzk-${version}.zip">Unsigned source archive</a></li>
 </ul>
 </body>
 </html>

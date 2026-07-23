@@ -40,7 +40,7 @@ https://chzzk-updates.alpha-apple.dedyn.io/updates.json
     └── updates.json
 ```
 
-`updates.json`의 `update_link`는 immutable version directory의 signed XPI를 가리킵니다. `current` symlink 하나를 원자적으로 전환하므로 stable manifest와 versioned XPI가 섞이지 않습니다. 기존 target/releases directory mode는 변경하지 않습니다. `.deploy-state`는 web worker가 읽을 수 없는 mode `0700`이며 process-bound advisory lock과 fsync된 이전 link snapshot을 보관합니다. 활성화 중 일반 오류뿐 아니라 SIGKILL/재부팅으로 프로세스가 사라져도 lock은 자동 해제되고, 다음 실행이 이전 generation을 복구한 뒤 재시도합니다.
+`updates.json`의 `update_link`와 `index.html`의 설치/metadata/source 링크는 immutable version directory를 root-absolute path로 가리킵니다. 배포 테스트는 landing page의 모든 로컬 링크가 실제 배포 파일로 해석되는지 확인하므로, root의 `index.html` symlink를 통해 열어도 같은-directory 상대 링크가 404로 바뀌지 않습니다. `current` symlink 하나를 원자적으로 전환하므로 stable manifest와 versioned XPI가 섞이지 않습니다. 기존 target/releases directory mode는 변경하지 않습니다. `.deploy-state`는 web worker가 읽을 수 없는 mode `0700`이며 process-bound advisory lock과 fsync된 이전 link snapshot을 보관합니다. 활성화 중 일반 오류뿐 아니라 SIGKILL/재부팅으로 프로세스가 사라져도 lock은 자동 해제되고, 다음 실행이 이전 generation을 복구한 뒤 재시도합니다.
 
 ## 버전 규칙
 
@@ -128,8 +128,8 @@ npm run test:firefox-functional-e2e
 
 이 테스트는 격리된 Developer Edition profile에서 실제 `webRequestBlocking` 재생 redirect와 `AddonManager.findUpdates` 기능을 검증할 뿐 authenticity gate가 아닙니다. fixture XPI는 테스트 전용 unsigned artifact이므로 해당 profile에서만 signature/update certificate 검사를 끕니다.
 
-실제 배포 artifact는 `docs/TESTING.md`의 `test:firefox-signed-smoke`를 추가로 통과해야 합니다. install mode는 최종 AMO-signed XPI를 stock Firefox 기본 서명 설정으로 영구 설치합니다. update mode는 배포 후 이전 signed version의 production `update_url`을 통해 최종 version으로 갱신합니다. 필요한 signed XPI가 없으면 명시적으로 실패하며 skip하지 않습니다.
+실제 배포 artifact는 `docs/TESTING.md`의 `test:firefox-signed-smoke`를 추가로 통과해야 합니다. install mode는 최종 AMO-signed XPI를 stock Firefox 기본 서명 설정으로 영구 설치합니다. update mode는 배포 후 이전 signed version의 production `update_url`을 사용하되 내부 API를 직접 호출하지 않습니다. 자동 업데이트가 꺼진 별도 profile에서 해당 확장의 `update-check`가 old version을 유지한 채 `install-update` control을 노출하는지, 그 control로 실제 설치되는지 확인합니다. 기본 자동 업데이트 profile에서는 global check의 `installed`와 이미 최신인 경우의 `none-found`를 확인합니다. 필요한 signed XPI가 없으면 명시적으로 실패하며 skip하지 않습니다.
 
 ## 첫 설치와 사용자 확인
 
-`update_url`이 없는 매우 오래된 설치본은 signed XPI를 한 번 수동 설치해야 합니다. 이후에는 실행 중인 Firefox에서 `about:addons`의 업데이트 확인을 사용합니다. 검증을 위해 profile XPI를 직접 덮어쓰거나 Firefox를 종료하지 않습니다.
+`update_url`이 없는 매우 오래된 설치본은 update host 첫 화면의 `Firefox에 설치/업데이트` 링크에서 signed XPI를 한 번 수동 설치해야 합니다. 이후에는 실행 중인 Firefox에서 `about:addons`의 업데이트 확인을 사용합니다. 자동 업데이트를 꺼 둔 경우 Firefox는 바로 설치하지 않고 사용 가능한 업데이트로 보류하므로, 확장 상세의 자동 업데이트를 `기본값` 또는 `켜기`로 바꾸거나 landing page의 signed XPI를 열어 수동 갱신합니다. 검증을 위해 profile XPI를 직접 덮어쓰거나 Firefox를 종료하지 않습니다.
