@@ -1618,6 +1618,32 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
   });
 
+  it("does not let a stale content-message tab snapshot overwrite newer mini-player state", async () => {
+    const tabId = 515;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const pendingTab = deferred();
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: tabId } });
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    pendingTab.resolve({ id: tabId, url: liveUrl });
+    await waitForDiagnosticsQueue();
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "stale-content-message"),
+        documentUrl: liveUrl,
+      }),
+      undefined,
+      "a delayed live snapshot must not remove the dedicated-host mini-player boundary",
+    );
+  });
+
   it("evicts stale tab trust when explicit request metadata proves a non-CHZZK document", async () => {
     const tabId = 514;
     const { listeners, storage } = await loadBackground({ availableQualities: new Set(["1080p"]) });
@@ -1715,6 +1741,7 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     const { fetches, listeners } = await loadBackground({
       availableQualities: new Set(["1080p"]),
       tabsQueryImplementation: async () => pendingQuery.promise,
+      tabUrlsById: new Map([[tabId, liveUrl]]),
     });
 
     listeners.onInstalled();
@@ -1740,6 +1767,33 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     );
     assert.match(plain(cached).redirectUrl, /chunklist_1080p/);
     assert.equal(fetches.length, fetchCountBeforePrewarm);
+  });
+
+  it("does not let a stale startup-query snapshot overwrite newer mini-player state", async () => {
+    const tabId = 516;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const pendingQuery = deferred();
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsQueryImplementation: async () => pendingQuery.promise,
+      tabUrlsById: new Map([[tabId, miniPlayerUrl]]),
+    });
+
+    listeners.onInstalled();
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    pendingQuery.resolve([{ id: tabId, url: liveUrl }]);
+    await waitForDiagnosticsQueue();
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "stale-startup-query"),
+        documentUrl: liveUrl,
+      }),
+      undefined,
+      "a delayed query result must be revalidated before removing mini-player mode",
+    );
   });
 
   it("prewarms already-open live tabs even when startup diagnostics storage fails", async () => {

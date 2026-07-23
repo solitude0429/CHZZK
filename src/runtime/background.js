@@ -748,6 +748,28 @@ async function prewarmLiveTab(
   if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
 }
 
+async function prewarmCurrentLiveTab(tabId, { migrateVerifiedContextless = false } = {}) {
+  if (
+    !isValidRedirectTabId(tabId) ||
+    miniPlayerTabIds.has(tabId) ||
+    typeof api.tabs?.get !== "function"
+  ) {
+    return;
+  }
+  const transitionToken = currentTabContextToken(tabId);
+  const currentTab = await api.tabs.get(tabId);
+  if (
+    currentTab?.id !== tabId ||
+    tabContextTokenByTab.get(tabId) !== transitionToken ||
+    miniPlayerTabIds.has(tabId) ||
+    !isChzzkLiveUrl(currentTab.url, policy)
+  ) {
+    return;
+  }
+  pendingTrustValidationByTab.delete(tabId);
+  await prewarmLiveTab(tabId, currentTab.url, { migrateVerifiedContextless });
+}
+
 async function clearTabQualityState(tabId) {
   if (!isValidRedirectTabId(tabId)) return;
   if (dropTabQualityState(tabId)) await updateRedirectDiagnostics();
@@ -1286,11 +1308,7 @@ api.webRequest.onCompleted?.addListener(handleRedirectCompleted, WEB_REQUEST_FIL
 api.webRequest.onErrorOccurred?.addListener(handleRedirectError, WEB_REQUEST_FILTER);
 
 async function prewarmMessageTab(tabId) {
-  if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return;
-  const currentTab = await api.tabs.get(tabId);
-  if (currentTab?.id !== tabId || !isChzzkLiveUrl(currentTab.url, policy)) return;
-  pendingTrustValidationByTab.delete(tabId);
-  await prewarmLiveTab(tabId, currentTab.url);
+  await prewarmCurrentLiveTab(tabId);
 }
 
 api.runtime.onMessage?.addListener((message, sender) => {
@@ -1316,7 +1334,7 @@ async function prewarmExistingLiveTabs() {
   const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
   await Promise.all(
     tabs.map((tab) =>
-      prewarmLiveTab(tab?.id, tab?.url, { migrateVerifiedContextless: true }),
+      prewarmCurrentLiveTab(tab?.id, { migrateVerifiedContextless: true }),
     ),
   );
 }

@@ -29,7 +29,7 @@
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. A URL-only live-to-list/search SPA transition migrates a verified dedicated-host target or one whose response verifier actually attached and remains pending/valid into authoritative per-tab mini-player mode; later same-site route changes preserve that state, unresolved candidate probes and unattached/failed verification are discarded, and Firefox's stale original live documentUrl cannot re-adopt the old context or authorize a generic CDN, including during URL-less reload validation. Full document loads, new live-page state, foreign navigation, and tab close invalidate the target. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
-      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup prewarming refreshes diagnostics and migrates reusable verified contextless target/response state into an authoritatively confirmed live context, so delayed lifecycle delivery cannot erase a target established by an earlier playlist request. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
+      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup and content-message prewarming re-read the current tab under an unchanged per-tab transition token before migrating reusable verified contextless target/response state into an authoritatively confirmed live context, so delayed snapshots cannot erase a target established by an earlier playlist request or overwrite newer mini-player/navigation state. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
       "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
       "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports.",
@@ -1523,6 +1523,23 @@
     activeLiveTabIds.add(tabId);
     if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
   }
+  async function prewarmCurrentLiveTab(tabId, { migrateVerifiedContextless = false } = {}) {
+    if (!isValidRedirectTabId(tabId) || miniPlayerTabIds.has(tabId) || typeof api.tabs?.get !== "function") {
+      return;
+    }
+    const transitionToken = currentTabContextToken(tabId);
+    const currentTab = await api.tabs.get(tabId);
+    if (
+      currentTab?.id !== tabId ||
+      tabContextTokenByTab.get(tabId) !== transitionToken ||
+      miniPlayerTabIds.has(tabId) ||
+      !isChzzkLiveUrl(currentTab.url, quality_policy_default)
+    ) {
+      return;
+    }
+    pendingTrustValidationByTab.delete(tabId);
+    await prewarmLiveTab(tabId, currentTab.url, { migrateVerifiedContextless });
+  }
   async function clearTabQualityState(tabId) {
     if (!isValidRedirectTabId(tabId)) return;
     if (dropTabQualityState(tabId)) await updateRedirectDiagnostics();
@@ -2009,11 +2026,7 @@
   api.webRequest.onCompleted?.addListener(handleRedirectCompleted, WEB_REQUEST_FILTER);
   api.webRequest.onErrorOccurred?.addListener(handleRedirectError, WEB_REQUEST_FILTER);
   async function prewarmMessageTab(tabId) {
-    if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return;
-    const currentTab = await api.tabs.get(tabId);
-    if (currentTab?.id !== tabId || !isChzzkLiveUrl(currentTab.url, quality_policy_default)) return;
-    pendingTrustValidationByTab.delete(tabId);
-    await prewarmLiveTab(tabId, currentTab.url);
+    await prewarmCurrentLiveTab(tabId);
   }
   api.runtime.onMessage?.addListener((message, sender) => {
     if (message?.type !== "chzzk.live-page-ready") return void 0;
@@ -2037,7 +2050,7 @@
     if (typeof api.tabs?.query !== "function") return;
     const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
     await Promise.all(
-      tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url, { migrateVerifiedContextless: true })),
+      tabs.map((tab) => prewarmCurrentLiveTab(tab?.id, { migrateVerifiedContextless: true })),
     );
   }
   async function refreshAndPrewarmRuntimeState() {

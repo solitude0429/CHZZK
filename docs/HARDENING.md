@@ -5,7 +5,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 ## Runtime behavior
 
 - A minimal MV2 `site-observer.js` content script runs at `document_start` on CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and prewarms only the CHZZK live tab identity before the first playlist request; the first redirect must not depend solely on content-script timing.
-- Install/startup prewarming never blindly clears in-memory state: a new background context is already empty, and a delayed live-tab query migrates reusable verified contextless targets and their matching response records into the confirmed live context while aborting unresolved or unverified work.
+- Install/startup prewarming never blindly clears in-memory state: a new background context is already empty, and each delayed live-tab query result is re-read through `tabs.get()` under the same per-tab transition token before reusable verified contextless targets and matching response records may migrate into the confirmed live context. A newer mini-player/navigation transition, unresolved work, or unverified work makes the snapshot ineligible.
 - Trusted HLS master playlists start non-blocking background scoring when available, supersede an older numeric probe only in the same tab, live context, and playlist family, and cache the best target quality by resolution, frame rate, then bitrate.
 - Only case-complete `.m3u8` URL patterns enter the blocking `webRequest` listener; media segments bypass it entirely. Trusted numeric HLS playlist requests share one 50 ms request-level `blockingProbeBudgetMs` deadline across tab-trust validation and candidate resolution, while an already-cached target returns a synchronous redirect without a Promise or timer turn. Target state, resolved state, and in-flight work are independently keyed by tab, live context, and a secret-free playlist family; query, fragment, quality markers, and recognized signed path-tail segments are excluded from that family key, and the key is never persisted in diagnostics.
 - Candidate probe redirects fail closed because Firefox does not expose redirect hops to manual Fetch handling. A response must have an exact first meaningful `#EXTM3U` line, must not declare an obvious HTML/JSON content type, and is capped in UTF-8 bytes. A returned master must contain a trusted variant whose metadata and URI both prove that candidate.
@@ -21,7 +21,7 @@ This document summarizes the extension hardening invariants for the MV2 required
 
 - `site-observer.js` is scoped to `https://chzzk.naver.com/live/*` and only sends `chzzk.live-page-ready`.
 - The content script does not query or mutate the CHZZK page DOM.
-- Firefox may omit message sender URL fields, so the background treats them as non-authoritative and queries the current tab URL before accepting prewarm. A delayed message from a document that has navigated away cannot restore tab trust.
+- Firefox may omit or retain stale message sender URL fields, so the background treats them as non-authoritative and queries the current tab URL under a per-tab transition token before accepting prewarm. A delayed `tabs.get()` result from a document that entered mini-player mode or navigated away cannot restore live-tab trust.
 
 ## Permissions and data
 
