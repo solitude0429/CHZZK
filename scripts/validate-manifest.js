@@ -40,8 +40,14 @@ assert.ok(!manifest.permissions.includes("scripting"), "scripting permission mus
 assert.equal(manifest.host_permissions, undefined, "MV2 build must not expose revocable host_permissions");
 assert.deepEqual(
   manifest.content_scripts,
-  [{ js: ["site-observer.js"], matches: ["https://*.chzzk.naver.com/live/*"], run_at: "document_start" }],
-  "MV2 content script must be required install-time CHZZK live access for first-request prewarm only",
+  [
+    {
+      js: ["site-observer.js"],
+      matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
+      run_at: "document_start",
+    },
+  ],
+  "MV2 content script must cover exact and nested CHZZK live pages for first-request prewarm only",
 );
 assert.equal(
   manifest.optional_permissions,
@@ -106,5 +112,7 @@ assert.deepEqual(policy.trustedRequestDomains, [
 assert.equal(policy.resourceTypes.includes("other"), true);
 assert.equal(policy.probeMaxBytes, 256000);
 assert.equal(policy.maxPendingDiagnosticsMutations, 50);
+assert.equal(policy.maxTrackedSessions, 256);
+assert.equal(policy.masterEvidenceTtlMs, 60000);
 
 console.log("manifest and MV2 required-permission CHZZK redirect policy are valid");
