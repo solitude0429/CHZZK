@@ -4,6 +4,7 @@ import { appendFileSync } from "node:fs";
 
 import {
   changedFilePaths,
+  cleanReviewCommitMarker,
   evaluateReviewCompletion,
   hasExactHeadReviewerApproval,
   isPendingReviewGateError,
@@ -12,6 +13,7 @@ import {
 
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
+const GITHUB_APP_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 const API_HEADERS = ["-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"];
 
 function gh(args) {
@@ -106,29 +108,65 @@ function containsFullSha(body, headSha) {
   );
 }
 
-function listReviewRequestComments(repository, pullNumber, headSha, releaseOperatorLogin) {
+function reviewerAppIdentity(automatedReviewLogin) {
+  const login = String(automatedReviewLogin ?? "").toLowerCase();
+  if (!login.endsWith("[bot]")) return null;
+  const slug = login.slice(0, -"[bot]".length);
+  if (!GITHUB_APP_SLUG_RE.test(slug)) {
+    throw new Error("Automated reviewer GitHub App slug is missing or malformed");
+  }
+  const app = getJson(`apps/${encodeURIComponent(slug)}`, "Automated reviewer GitHub App lookup");
+  if (app?.slug !== slug || !Number.isSafeInteger(app.id) || app.id < 1) {
+    throw new Error("Automated reviewer GitHub App identity is missing or malformed");
+  }
+  return { id: app.id, slug: app.slug };
+}
+
+function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLogin, automatedReviewLogin) {
   const comments = paginatedArrays(
     `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
     "Pull request comment listing",
   );
   const operatorLogin = String(releaseOperatorLogin ?? "").toLowerCase();
-  const requests = comments.filter(
-    (comment) =>
-      String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
-      containsFullSha(comment?.body, headSha),
-  );
-  return requests.map((comment) => {
-    if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
-      throw new Error("Review-request comment identity is missing or malformed");
+  const reviewerLogin = String(automatedReviewLogin ?? "").toLowerCase();
+  let latestIssueCommentId = 0;
+  for (const comment of comments) {
+    if (!Number.isSafeInteger(comment?.id) || comment.id < 1) {
+      throw new Error("Pull request comment identity is missing or malformed");
     }
-    return {
+    latestIssueCommentId = Math.max(latestIssueCommentId, comment.id);
+  }
+  const requests = comments
+    .filter(
+      (comment) =>
+        String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
+        containsFullSha(comment?.body, headSha),
+    )
+    .map((comment) => ({
       ...comment,
       reactions: paginatedArrays(
         `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
         "Review-request comment reaction listing",
       ),
-    };
-  });
+    }));
+  const cleanReviewComments = [];
+  for (const comment of comments) {
+    if (String(comment?.user?.login ?? "").toLowerCase() !== reviewerLogin) continue;
+    const marker = cleanReviewCommitMarker(comment.body);
+    if (marker === null || !headSha.startsWith(marker)) continue;
+    const commit = getJson(`repos/${repository}/commits/${marker}`, "Clean-review commit resolution");
+    const resolvedCommitSha = String(commit?.sha ?? "").toLowerCase();
+    if (!FULL_GIT_SHA_RE.test(resolvedCommitSha)) {
+      throw new Error("Clean-review commit resolution is missing or malformed");
+    }
+    cleanReviewComments.push({ ...comment, resolved_commit_sha: resolvedCommitSha });
+  }
+  return {
+    automatedReviewApp: cleanReviewComments.length > 0 ? reviewerAppIdentity(automatedReviewLogin) : null,
+    cleanReviewComments,
+    latestIssueCommentId,
+    reviewRequestComments: requests,
+  };
 }
 
 function integerEnvironment(name, { defaultValue, maximum, minimum }) {
@@ -192,8 +230,12 @@ async function main() {
   let lastError;
   do {
     try {
-      const pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
+      let pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
       currentHeadSha = String(pullRequest?.head?.sha ?? "").toLowerCase();
+      const currentBaseSha = String(pullRequest?.base?.sha ?? "").toLowerCase();
+      if (!FULL_GIT_SHA_RE.test(currentBaseSha)) {
+        throw new Error("Pull request base SHA is missing or malformed");
+      }
       const files = changedFilePaths(
         paginatedArrays(
           `repos/${repository}/pulls/${pullNumber}/files?per_page=100`,
@@ -207,6 +249,9 @@ async function main() {
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
       let reviews = [];
       let reviewThreads = [];
+      let automatedReviewApp;
+      let cleanReviewComments;
+      let latestIssueCommentId;
       let reviewRequestComments;
       if (required) {
         reviews = paginatedArrays(
@@ -220,19 +265,35 @@ async function main() {
           reviews,
         });
         if (!exactApproval) {
-          reviewRequestComments = listReviewRequestComments(
-            repository,
-            pullNumber,
-            currentHeadSha,
-            process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
+          ({ automatedReviewApp, cleanReviewComments, latestIssueCommentId, reviewRequestComments } =
+            listCommentEvidence(
+              repository,
+              pullNumber,
+              currentHeadSha,
+              process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
+              process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
+            ));
+          const finalPullRequest = getJson(
+            `repos/${repository}/pulls/${pullNumber}`,
+            "Final pull request lookup",
           );
+          if (
+            String(finalPullRequest?.head?.sha ?? "").toLowerCase() !== currentHeadSha ||
+            String(finalPullRequest?.base?.sha ?? "").toLowerCase() !== currentBaseSha
+          ) {
+            throw new Error("Pull request changed while review evidence was collected");
+          }
+          pullRequest = finalPullRequest;
         }
       }
       const result = evaluateReviewCompletion({
+        automatedReviewApp,
         automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
+        cleanReviewComments,
         expectedHeadSha,
         files,
         forceReview,
+        latestIssueCommentId,
         labels,
         pullRequest,
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,

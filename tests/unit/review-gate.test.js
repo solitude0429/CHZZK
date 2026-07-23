@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   changedFilePaths,
+  cleanReviewCommitMarker,
   evaluateReviewCompletion,
   requiresAutomatedSecurityReview,
 } from "../../scripts/lib/review-gate.js";
@@ -10,6 +11,7 @@ import {
 const headSha = "d".repeat(40);
 const staleSha = "e".repeat(40);
 const reviewerLogin = "chatgpt-codex-connector[bot]";
+const reviewerApp = { id: 1_144_995, slug: "chatgpt-codex-connector" };
 const operatorLogin = "sole-owner";
 const headTimestamp = "2026-07-15T10:00:00Z";
 
@@ -34,8 +36,9 @@ function plusOne(overrides = {}) {
 
 function reviewRequest(overrides = {}) {
   return {
-    body: `Codex review request for ${headSha}`,
+    body: `@codex review ${headSha}`,
     created_at: "2026-07-15T10:00:30Z",
+    id: 100,
     reactions: [plusOne()],
     updated_at: "2026-07-15T10:00:30Z",
     user: { login: operatorLogin },
@@ -43,12 +46,31 @@ function reviewRequest(overrides = {}) {
   };
 }
 
+function cleanReviewComment(overrides = {}) {
+  return {
+    body:
+      "Codex Review: Didn't find any major issues. Nice work!\n\n" +
+      `**Reviewed commit:** \`${headSha.slice(0, 10)}\`\n\n` +
+      "<details><summary>About Codex in GitHub</summary></details>",
+    created_at: "2026-07-15T10:02:00Z",
+    id: 200,
+    performed_via_github_app: reviewerApp,
+    resolved_commit_sha: headSha,
+    updated_at: "2026-07-15T10:02:00Z",
+    user: { login: reviewerLogin, type: "Bot" },
+    ...overrides,
+  };
+}
+
 function sensitiveEvaluation(overrides = {}) {
   return {
+    automatedReviewApp: null,
     automatedReviewLogin: reviewerLogin,
+    cleanReviewComments: [],
     expectedHeadSha: headSha,
     files: ["scripts/lib/release-artifacts.js"],
     issueReactions: [],
+    latestIssueCommentId: 0,
     labels: [],
     pullRequest: {
       draft: false,
@@ -66,6 +88,18 @@ function sensitiveEvaluation(overrides = {}) {
 }
 
 describe("exact-head release and security review completion", () => {
+  it("recognizes only the standard clean-review header and reviewed-commit marker", () => {
+    assert.equal(cleanReviewCommitMarker(cleanReviewComment().body), headSha.slice(0, 10));
+    for (const body of [
+      `Didn't find any major issues.\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+      `Codex Review: Found an issue.\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+      `Codex Review: Didn't find any major issues.\n\nReviewed commit: ${headSha.slice(0, 10)}`,
+      `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${headSha.slice(0, 9)}\``,
+    ]) {
+      assert.equal(cleanReviewCommitMarker(body), null, body);
+    }
+  });
+
   it("classifies broad security/release paths plus explicit labels or force input", () => {
     for (const path of [
       ".github/workflows/sign-unlisted.yml",
@@ -262,6 +296,115 @@ describe("exact-head release and security review completion", () => {
           }),
         ),
       /no exact-head approval|exact-head operator request/i,
+    );
+  });
+
+  it("accepts an unedited latest Codex App clean comment bound to an earlier full-SHA request", () => {
+    assert.deepEqual(
+      evaluateReviewCompletion(
+        sensitiveEvaluation({
+          automatedReviewApp: reviewerApp,
+          cleanReviewComments: [cleanReviewComment()],
+          latestIssueCommentId: 200,
+          pullRequest: {
+            draft: false,
+            head: { sha: headSha },
+            number: 42,
+            state: "open",
+            updated_at: "2026-07-15T10:02:00Z",
+          },
+          reviewRequestComments: [reviewRequest()],
+          reviews: [],
+        }),
+      ),
+      {
+        description:
+          "Verified reviewer-app clean comment is bound to the exact PR head; no unresolved threads",
+        headSha,
+        required: true,
+        state: "success",
+      },
+    );
+  });
+
+  it("rejects clean comments without exact app, commit, ordering, and activity bindings", () => {
+    const base = {
+      automatedReviewApp: reviewerApp,
+      cleanReviewComments: [cleanReviewComment()],
+      latestIssueCommentId: 200,
+      pullRequest: {
+        draft: false,
+        head: { sha: headSha },
+        number: 42,
+        state: "open",
+        updated_at: "2026-07-15T10:02:00Z",
+      },
+      reviewRequestComments: [reviewRequest()],
+      reviews: [],
+    };
+    const cases = [
+      {
+        cleanReviewComments: [
+          cleanReviewComment({ performed_via_github_app: { ...reviewerApp, id: reviewerApp.id + 1 } }),
+        ],
+      },
+      {
+        cleanReviewComments: [
+          cleanReviewComment({
+            performed_via_github_app: { ...reviewerApp, slug: "different-app" },
+          }),
+        ],
+      },
+      { cleanReviewComments: [cleanReviewComment({ resolved_commit_sha: staleSha })] },
+      { cleanReviewComments: [cleanReviewComment({ updated_at: "2026-07-15T10:02:01Z" })] },
+      { cleanReviewComments: [cleanReviewComment({ user: { login: reviewerLogin, type: "User" } })] },
+      { latestIssueCommentId: 201 },
+      {
+        pullRequest: {
+          ...base.pullRequest,
+          updated_at: "2026-07-15T10:02:01Z",
+        },
+      },
+      { reviewRequestComments: [reviewRequest({ body: `Review ${staleSha}` })] },
+      { reviewRequestComments: [reviewRequest({ body: `Unrelated note for ${headSha}` })] },
+      { reviewRequestComments: [reviewRequest({ id: 201 })] },
+      {
+        reviewRequestComments: [
+          reviewRequest({
+            created_at: "2026-07-15T10:02:00Z",
+            updated_at: "2026-07-15T10:02:00Z",
+          }),
+        ],
+      },
+    ];
+    for (const override of cases) {
+      assert.throws(
+        () => evaluateReviewCompletion(sensitiveEvaluation({ ...base, ...override })),
+        /no exact-head|missing|malformed|actor type/i,
+      );
+    }
+  });
+
+  it("requires a clean comment to postdate any exact-head findings review", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            automatedReviewApp: reviewerApp,
+            cleanReviewComments: [cleanReviewComment()],
+            latestIssueCommentId: 200,
+            pullRequest: {
+              draft: false,
+              head: { sha: headSha },
+              number: 42,
+              state: "open",
+              updated_at: "2026-07-15T10:02:00Z",
+            },
+            reviewRequestComments: [reviewRequest()],
+            reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:02:00Z" })],
+          }),
+        ),
+      /no exact-head|verified exact-head clean comment/i,
     );
   });
 
