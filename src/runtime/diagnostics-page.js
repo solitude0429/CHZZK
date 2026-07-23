@@ -5,7 +5,17 @@ const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
 const summary = document.querySelector("#summary");
 const payload = document.querySelector("#payload");
+const status = document.querySelector("#status");
+const refreshButton = document.querySelector("#refresh");
+const copyButton = document.querySelector("#copy");
+const clearButton = document.querySelector("#clear");
 const NORMALIZATION_OPTIONS = { maxSamples: policy.maxDiagnosticsSamples };
+
+function setStatus(message, { error = false } = {}) {
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.state = error ? "error" : "ok";
+}
 
 async function loadDiagnostics() {
   const stored = await api.storage.local.get(STORAGE_KEY);
@@ -14,14 +24,14 @@ async function loadDiagnostics() {
 
 function renderQualitySummary(diagnostics) {
   return Object.entries(diagnostics.qualities ?? {})
-    .sort(([a], [b]) => Number.parseInt(a, 10) - Number.parseInt(b, 10))
+    .sort(([left], [right]) => Number.parseInt(left, 10) - Number.parseInt(right, 10))
     .map(([quality, count]) => `${quality}: ${count}`)
     .join("\n");
 }
 
 function renderTargetSummary(runtimeRedirects) {
   const targets = Object.entries(runtimeRedirects.targetsByTab ?? {})
-    .sort(([a], [b]) => Number(a) - Number(b))
+    .sort(([left], [right]) => Number(left) - Number(right))
     .map(([tabId, target]) => `${tabId}:${target}`);
   return targets.join(", ") || "none";
 }
@@ -52,15 +62,37 @@ async function refresh() {
   render(await loadDiagnostics());
 }
 
-document.querySelector("#refresh").addEventListener("click", refresh);
-document.querySelector("#copy").addEventListener("click", async () => {
-  await navigator.clipboard.writeText(payload.value);
-});
-document.querySelector("#clear").addEventListener("click", async () => {
-  await api.storage.local.remove(STORAGE_KEY);
-  await refresh();
-});
+async function runAction(action, successMessage) {
+  try {
+    await action();
+    setStatus(successMessage);
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    setStatus(message, { error: true });
+    summary.textContent = `오류: ${message}`;
+  }
+}
+
+refreshButton?.addEventListener("click", () =>
+  runAction(refresh, "진단 정보를 새로고침했습니다."),
+);
+copyButton?.addEventListener("click", () =>
+  runAction(async () => navigator.clipboard.writeText(payload.value), "JSON을 복사했습니다."),
+);
+clearButton?.addEventListener("click", () =>
+  runAction(async () => {
+    if (typeof api.runtime?.sendMessage === "function") {
+      const response = await api.runtime.sendMessage({ type: "chzzk.clear-diagnostics" });
+      if (response?.ok !== true) throw new Error("진단 로그 삭제를 확인하지 못했습니다.");
+    } else {
+      await api.storage.local.remove(STORAGE_KEY);
+    }
+    await refresh();
+  }, "진단 로그를 삭제했습니다."),
+);
 
 refresh().catch((error) => {
-  summary.textContent = String(error?.stack ?? error);
+  const message = String(error?.stack ?? error);
+  summary.textContent = message;
+  setStatus(message, { error: true });
 });
