@@ -66,7 +66,7 @@ async function makeExtensionXpi({ outputPath, port, runtimeDir, version }) {
       "tabs",
       "webRequest",
       "webRequestBlocking",
-      "https://*.chzzk.naver.com/live/*",
+      "https://*.chzzk.naver.com/*",
       "https://*.pstatic.net/*",
     ],
     content_scripts: [
@@ -185,7 +185,10 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       response.setHeader("access-control-allow-origin", "*");
       response.setHeader("cache-control", "no-store");
 
-      if (host === "www.chzzk.naver.com" && requestUrl.pathname === "/live/test") {
+      if (
+        host === "www.chzzk.naver.com" &&
+        (requestUrl.pathname === "/live/test" || requestUrl.pathname === "/lives")
+      ) {
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK E2E</title>
 <div id="result">pending</div>
@@ -505,6 +508,40 @@ async function main() {
       "runtime redirect must preserve the signed query byte-for-byte",
     );
 
+    const redirectedCountBeforeMiniPlayer = requests.filter(
+      (request) =>
+        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.path.includes("/1080p/") &&
+        request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+    ).length;
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/lives?keyword=another-channel`,
+    });
+    const miniPlayerResult = await poll(
+      async () => {
+        const text = await driver.execute(
+          "return document.getElementById('result') && document.getElementById('result').textContent;",
+        );
+        return text && text !== "pending" ? text : null;
+      },
+      { intervalMs: 100, timeoutMs: 15000 },
+    );
+    assert.match(
+      miniPlayerResult,
+      /^200:#EXTM3U\n# fixture-quality=1080p/m,
+      "same-origin list/search page did not retain redirected mini-player quality",
+    );
+    assert.equal(
+      requests.filter(
+        (request) =>
+          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.path.includes("/1080p/") &&
+          request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+      ).length > redirectedCountBeforeMiniPlayer,
+      true,
+      "Firefox did not expose the /lives-initiated playlist to the extension",
+    );
+
     const updateResult = await triggerAddonUpdate(driver);
     if (updateResult?.status !== "installed" || updateResult?.version !== "0.1.4") {
       throw new Error(`Firefox update failed: ${JSON.stringify({ before, updateResult })}`);
@@ -533,6 +570,7 @@ async function main() {
         functionalOnly: true,
         installedAfter: after.version,
         installedBefore: before.version,
+        miniPlayerPage: "/lives",
         playbackQuality: "1080p",
         queryPreserved: true,
         updatePath: "AddonManager.findUpdates",

@@ -121,14 +121,26 @@ function trustedInitiatorUrl(value, policy) {
   );
 }
 
+function metadataIncludesPageLocation(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "";
+  } catch {
+    return false;
+  }
+}
+
 function requestContextEvidence(details, policy) {
+  let ambiguousChzzkOrigin = false;
   let hasMetadata = false;
+  let hasLivePageEvidence = false;
   let requiresDedicatedHls = false;
   let trusted = false;
 
   if (hasExplicitMetadataValue(details?.documentUrl)) {
     hasMetadata = true;
     if (isChzzkLiveUrl(details.documentUrl, policy)) {
+      hasLivePageEvidence = true;
       trusted = true;
     } else if (trustedInitiatorUrl(details.documentUrl, policy)) {
       // CHZZK keeps live playback in a small player while the same tab visits
@@ -145,6 +157,13 @@ function requestContextEvidence(details, policy) {
     if (!trustedInitiatorUrl(details.originUrl, policy)) {
       return { hasMetadata, trusted: false, veto: true };
     }
+    if (isChzzkLiveUrl(details.originUrl, policy)) {
+      hasLivePageEvidence = true;
+    } else if (metadataIncludesPageLocation(details.originUrl)) {
+      requiresDedicatedHls = true;
+    } else {
+      ambiguousChzzkOrigin = true;
+    }
     trusted = true;
   }
 
@@ -153,10 +172,29 @@ function requestContextEvidence(details, policy) {
     if (!trustedInitiatorUrl(details.initiator, policy)) {
       return { hasMetadata, trusted: false, veto: true };
     }
+    if (isChzzkLiveUrl(details.initiator, policy)) {
+      hasLivePageEvidence = true;
+    } else if (metadataIncludesPageLocation(details.initiator)) {
+      requiresDedicatedHls = true;
+    } else {
+      ambiguousChzzkOrigin = true;
+    }
     trusted = true;
   }
 
-  return { hasMetadata, requiresDedicatedHls, trusted, veto: false };
+  return {
+    genericHlsRequiresLiveTab: ambiguousChzzkOrigin && !hasLivePageEvidence && !requiresDedicatedHls,
+    hasMetadata,
+    requiresDedicatedHls,
+    trusted,
+    veto: false,
+  };
+}
+
+function contextRequiresDedicatedHls(evidence, tabId, trustedLiveTabIds) {
+  return (
+    evidence.requiresDedicatedHls || (evidence.genericHlsRequiresLiveTab && !trustedLiveTabIds?.has?.(tabId))
+  );
 }
 
 export function hasContradictoryChzzkMetadata(details, policy) {
@@ -172,7 +210,9 @@ export function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = nul
   if (!details || !isValidRedirectTabId(details.tabId)) return false;
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
-  if (evidence.requiresDedicatedHls) return isDedicatedChzzkHlsUrl(details.url, policy);
+  if (contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)) {
+    return isDedicatedChzzkHlsUrl(details.url, policy);
+  }
   if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
   if (evidence.hasMetadata) return false;
   if (trustedLiveTabIds?.has?.(details.tabId)) return true;
@@ -188,7 +228,9 @@ export function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTab
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
   if (evidence.trusted) {
-    return !evidence.requiresDedicatedHls || isDedicatedChzzkHlsPlaylistUrl(details.url, policy);
+    return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)
+      ? isDedicatedChzzkHlsPlaylistUrl(details.url, policy)
+      : true;
   }
   if (evidence.hasMetadata) return false;
   return Boolean(trustedLiveTabIds?.has?.(details.tabId));
@@ -251,11 +293,7 @@ export function shouldRedirectRequest(details, policy, options = {}) {
 
 export function configuredRequiredOrigins(policy) {
   return trustedRequestDomains(policy)
-    .map((domain) =>
-      trustedInitiatorDomains(policy).includes(domain)
-        ? `https://*.${domain}/live/*`
-        : `https://*.${domain}/*`,
-    )
+    .map((domain) => `https://*.${domain}/*`)
     .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
 }
 

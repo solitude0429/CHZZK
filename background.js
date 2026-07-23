@@ -19,16 +19,16 @@
     probeTimeoutMs: 1500,
     redirectFailureBackoffMs: 1e4,
     notes: [
-      "Firefox MV2 declares CHZZK and trusted HLS CDN origins as required permissions so core site access is granted at install time instead of exposed as optional MV3 site toggles.",
+      "Firefox MV2 declares the CHZZK origin and trusted HLS CDN origins as required permissions so webRequest can observe dedicated livecloud playlists initiated by the site's same-origin small-player pages instead of exposing core access as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
       "The persistent background page uses blocking webRequest, but an unresolved candidate search can delay a request only for blockingProbeBudgetMs before failing open while one shared per-tab/live-context/playlist-family resolution continues in the background.",
       "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
       "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
-      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: successful redirected playlist completions renew it, while redirect failures invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
+      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: usable redirected playlist completions renew it, while HTTP 204/205, 4xx/5xx, and request errors invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. Metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
+      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
       "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
       "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
@@ -720,13 +720,24 @@
       hostname && trustedInitiatorDomains(policy).some((domain) => domainMatches(hostname, domain)),
     );
   }
+  function metadataIncludesPageLocation(value) {
+    try {
+      const parsed = new URL(value);
+      return parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "";
+    } catch {
+      return false;
+    }
+  }
   function requestContextEvidence(details, policy) {
+    let ambiguousChzzkOrigin = false;
     let hasMetadata = false;
+    let hasLivePageEvidence = false;
     let requiresDedicatedHls = false;
     let trusted = false;
     if (hasExplicitMetadataValue(details?.documentUrl)) {
       hasMetadata = true;
       if (isChzzkLiveUrl(details.documentUrl, policy)) {
+        hasLivePageEvidence = true;
         trusted = true;
       } else if (trustedInitiatorUrl(details.documentUrl, policy)) {
         requiresDedicatedHls = true;
@@ -740,6 +751,13 @@
       if (!trustedInitiatorUrl(details.originUrl, policy)) {
         return { hasMetadata, trusted: false, veto: true };
       }
+      if (isChzzkLiveUrl(details.originUrl, policy)) {
+        hasLivePageEvidence = true;
+      } else if (metadataIncludesPageLocation(details.originUrl)) {
+        requiresDedicatedHls = true;
+      } else {
+        ambiguousChzzkOrigin = true;
+      }
       trusted = true;
     }
     if (hasExplicitMetadataValue(details?.initiator)) {
@@ -747,9 +765,28 @@
       if (!trustedInitiatorUrl(details.initiator, policy)) {
         return { hasMetadata, trusted: false, veto: true };
       }
+      if (isChzzkLiveUrl(details.initiator, policy)) {
+        hasLivePageEvidence = true;
+      } else if (metadataIncludesPageLocation(details.initiator)) {
+        requiresDedicatedHls = true;
+      } else {
+        ambiguousChzzkOrigin = true;
+      }
       trusted = true;
     }
-    return { hasMetadata, requiresDedicatedHls, trusted, veto: false };
+    return {
+      genericHlsRequiresLiveTab: ambiguousChzzkOrigin && !hasLivePageEvidence && !requiresDedicatedHls,
+      hasMetadata,
+      requiresDedicatedHls,
+      trusted,
+      veto: false,
+    };
+  }
+  function contextRequiresDedicatedHls(evidence, tabId, trustedLiveTabIds) {
+    return (
+      evidence.requiresDedicatedHls ||
+      (evidence.genericHlsRequiresLiveTab && !trustedLiveTabIds?.has?.(tabId))
+    );
   }
   function hasContradictoryChzzkMetadata(details, policy) {
     return requestContextEvidence(details, policy).veto;
@@ -762,7 +799,9 @@
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
     const evidence = requestContextEvidence(details, policy);
     if (evidence.veto) return false;
-    if (evidence.requiresDedicatedHls) return isDedicatedChzzkHlsUrl(details.url, policy);
+    if (contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)) {
+      return isDedicatedChzzkHlsUrl(details.url, policy);
+    }
     if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
     if (evidence.hasMetadata) return false;
     if (trustedLiveTabIds?.has?.(details.tabId)) return true;
@@ -778,7 +817,9 @@
     const evidence = requestContextEvidence(details, policy);
     if (evidence.veto) return false;
     if (evidence.trusted) {
-      return !evidence.requiresDedicatedHls || isDedicatedChzzkHlsPlaylistUrl(details.url, policy);
+      return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)
+        ? isDedicatedChzzkHlsPlaylistUrl(details.url, policy)
+        : true;
     }
     if (evidence.hasMetadata) return false;
     return Boolean(trustedLiveTabIds?.has?.(details.tabId));
@@ -832,11 +873,7 @@
   }
   function configuredRequiredOrigins(policy) {
     return trustedRequestDomains(policy)
-      .map((domain) =>
-        trustedInitiatorDomains(policy).includes(domain)
-          ? `https://*.${domain}/live/*`
-          : `https://*.${domain}/*`,
-      )
+      .map((domain) => `https://*.${domain}/*`)
       .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
   }
   function displayPermissionKey(permission) {

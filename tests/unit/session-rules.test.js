@@ -18,7 +18,7 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
   it("derives required install permissions from CHZZK and trusted HLS domains", () => {
     assert.deepEqual(configuredRequiredOrigins(policy), [
       "https://*.akamaized.net/*",
-      "https://*.chzzk.naver.com/live/*",
+      "https://*.chzzk.naver.com/*",
       "https://*.gscdn.net/*",
       "https://*.navercdn.com/*",
       "https://*.pstatic.net/*",
@@ -68,24 +68,34 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       "blank initiator/page context must not trust a generic CDN playlist shape",
     );
     assert.equal(shouldRedirectRequest({ ...eligible, documentUrl: "", initiator: "" }, policy).ok, false);
-    assert.deepEqual(
-      shouldRedirectRequest(
+    const originOnly = {
+      ...eligible,
+      documentUrl: undefined,
+      originUrl: undefined,
+      initiator: "https://chzzk.naver.com",
+    };
+    const originUrlOnly = {
+      ...originOnly,
+      initiator: undefined,
+      originUrl: "https://chzzk.naver.com",
+    };
+    for (const request of [originOnly, originUrlOnly]) {
+      assert.equal(
+        shouldRedirectRequest(request, policy).ok,
+        false,
+        "origin-only CHZZK metadata must not authorize a generic CDN without live-tab evidence",
+      );
+      assert.deepEqual(
+        shouldRedirectRequest(request, policy, { trustedLiveTabIds: new Set([7]) }),
         {
-          ...eligible,
-          documentUrl: undefined,
-          originUrl: undefined,
-          initiator: "https://chzzk.naver.com",
+          ok: true,
+          quality: "720p",
+          reason: "eligible-chzzk-hls-quality",
+          tabId: 7,
         },
-        policy,
-      ),
-      {
-        ok: true,
-        quality: "720p",
-        reason: "eligible-chzzk-hls-quality",
-        tabId: 7,
-      },
-      "CHZZK initiator alone must be enough for the first HLS request when Firefox omits page URLs",
-    );
+        "an authoritatively prewarmed live tab may use a generic trusted CDN",
+      );
+    }
     assert.deepEqual(
       shouldRedirectRequest(
         {
@@ -152,7 +162,41 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       url: "https://example.pstatic.net/live/master.m3u8?Policy=redacted",
     };
 
-    assert.equal(isTrustedMasterPlaylistRequest(master, policy), true);
+    assert.equal(
+      isTrustedMasterPlaylistRequest(master, policy),
+      false,
+      "origin-only CHZZK metadata must not authorize a generic master playlist",
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        {
+          ...master,
+          initiator: undefined,
+          originUrl: "https://chzzk.naver.com",
+        },
+        policy,
+      ),
+      false,
+      "originUrl-only CHZZK metadata must retain the same generic master boundary",
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest(master, policy, {
+        trustedLiveTabIds: new Set([100_001]),
+      }),
+      true,
+      "a prewarmed live tab may authorize a generic master playlist",
+    );
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        {
+          ...master,
+          url: "https://nvelop-livecloud.pstatic.net/chzzk/example/master.m3u8?Policy=redacted",
+        },
+        policy,
+      ),
+      true,
+      "origin-only metadata may still use the dedicated livecloud master fallback",
+    );
     assert.equal(
       isTrustedMasterPlaylistRequest(
         { ...master, url: "https://example.pstatic.net/live/chunklist_720p.m3u8?Policy=redacted" },
@@ -325,6 +369,11 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
       url: "https://edge.pstatic.net/chzzk/example/chunklist_480p.m3u8?Policy=redacted",
     };
     assert.equal(shouldRedirectRequest(genericCdn, policy).ok, false);
+    assert.equal(
+      shouldRedirectRequest(genericCdn, policy, { trustedLiveTabIds: new Set([15]) }).ok,
+      false,
+      "explicit non-live page evidence must override stale prewarmed live-tab trust",
+    );
     assert.equal(
       isTrustedMasterPlaylistRequest(
         {

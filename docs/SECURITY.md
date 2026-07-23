@@ -15,7 +15,7 @@ This extension observes CHZZK live-page HLS playlist requests only to redirect e
 - `site-observer.js` is the only content script; it is scoped to CHZZK live pages (`https://*.chzzk.naver.com/live/*`), sends only a live-page-ready prewarm message, and does not mutate or query the page DOM. Because Firefox may omit or stale message sender URL fields, the background queries the current tab and accepts prewarm only while its current URL is still a CHZZK live page.
 - No external telemetry/data collector is used by the extension runtime.
 - The Firefox manifest declares no data collection/transmission with `data_collection_permissions.required: ["none"]`.
-- Firefox MV2 required permissions include CHZZK live pages (`https://*.chzzk.naver.com/live/*`) and trusted HLS CDN origins needed by `webRequest`, HLS availability probes, and redirects.
+- Firefox MV2 required permissions include the CHZZK origin (`https://*.chzzk.naver.com/*`) and trusted HLS CDN origins needed by `webRequest`, HLS availability probes, and redirects. Runtime policy still limits same-site non-live playback to the two dedicated livecloud host suffixes, and the content script remains scoped to live pages.
 - No `host_permissions` or optional host permission surface is used for core functionality; the MV2 content script match is required install-time CHZZK live access.
 - Local diagnostics storage mutations are serialized and exact-schema normalized on load/save to avoid local read-modify-write races and corrupted/unbounded persisted state. Invalid counters reset to zero, valid counters saturate at the safe-integer maximum, arrays are tail-trimmed to policy, and unknown fields are dropped.
 - No global static or session DNR ruleset.
