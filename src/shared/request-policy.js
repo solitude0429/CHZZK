@@ -1,8 +1,19 @@
-import { parseQualityFromUrl, qualityNumber, urlQualityMarkersAreSafe } from "./quality.js";
+import {
+  isHlsPlaylistUrl,
+  parseQualityFromUrl,
+  qualityNumber,
+  urlQualityMarkersAreSafe,
+} from "./quality.js";
+
+export { isHlsPlaylistUrl };
 
 const DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
 const DEFAULT_REQUEST_METHODS = ["get"];
 const HLS_PLAYLIST_EXTENSION_CASE_VARIANTS = ["M3U8", "M3u8", "m3U8", "m3u8"];
+const DEDICATED_CHZZK_HLS_HOST_SUFFIXES = [
+  "livecloud.pstatic.net.live.gscdn.net",
+  "nvelop-livecloud.pstatic.net",
+];
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -71,20 +82,13 @@ export function isChzzkLiveUrl(url, policy) {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:") return false;
     if (
-      !trustedInitiatorDomains(policy).some((domain) => domainMatches(parsed.hostname.toLowerCase(), domain))
+      !trustedInitiatorDomains(policy).some((domain) =>
+        domainMatches(parsed.hostname.toLowerCase(), domain),
+      )
     ) {
       return false;
     }
     return parsed.pathname === "/live" || parsed.pathname.startsWith("/live/");
-  } catch {
-    return false;
-  }
-}
-
-export function isHlsPlaylistUrl(value) {
-  if (typeof value !== "string" || value === "") return false;
-  try {
-    return /\.m3u8$/i.test(new URL(value).pathname);
   } catch {
     return false;
   }
@@ -95,8 +99,9 @@ function isNumericHlsPlaylistUrl(url) {
 }
 
 function knownChzzkHlsHost(hostname) {
-  const knownSuffixes = ["livecloud.pstatic.net.live.gscdn.net", "nvelop-livecloud.pstatic.net"];
-  return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+  return DEDICATED_CHZZK_HLS_HOST_SUFFIXES.some(
+    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+  );
 }
 
 function isDedicatedChzzkHlsUrl(url, policy) {
@@ -108,8 +113,7 @@ export function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
 
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== "https:") return false;
-    return knownChzzkHlsHost(parsed.hostname.toLowerCase());
+    return parsed.protocol === "https:" && knownChzzkHlsHost(parsed.hostname.toLowerCase());
   } catch {
     return false;
   }
@@ -144,8 +148,6 @@ function requestContextEvidence(details, policy) {
       hasLivePageEvidence = true;
       trusted = true;
     } else if (isChzzkSiteUrl(details.documentUrl, policy)) {
-      // CHZZK keeps live playback in a small player while the same tab visits
-      // channel lists/search. Limit that continuation to dedicated live hosts.
       requiresDedicatedHls = true;
       trusted = true;
     } else {
@@ -184,7 +186,8 @@ function requestContextEvidence(details, policy) {
   }
 
   return {
-    genericHlsRequiresLiveTab: ambiguousChzzkOrigin && !hasLivePageEvidence && !requiresDedicatedHls,
+    genericHlsRequiresLiveTab:
+      ambiguousChzzkOrigin && !hasLivePageEvidence && !requiresDedicatedHls,
     hasMetadata,
     requiresDedicatedHls,
     trusted,
@@ -222,7 +225,7 @@ export function isTrustedChzzkContext(
   }
   if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
   if (evidence.hasMetadata) return false;
-  if (trustedLiveTabIds?.has?.(details.tabId)) return true;
+  if (trustedLiveTabIds?.has?.(details.tabId)) return isNumericHlsPlaylistUrl(details.url);
   return isDedicatedChzzkHlsUrl(details.url, policy);
 }
 
@@ -235,11 +238,18 @@ export function isTrustedMasterPlaylistRequest(
   if (!isHlsPlaylistUrl(details.url) || parseQualityFromUrl(details.url)) return false;
   if (details.type && !resourceTypes(policy).includes(details.type)) return false;
   const method = String(details.method ?? "GET").toLowerCase();
-  if (!requestMethods(policy).includes(method) || !isTrustedRequestDomain(details.url, policy)) return false;
+  if (!requestMethods(policy).includes(method) || !isTrustedRequestDomain(details.url, policy)) {
+    return false;
+  }
   const evidence = requestContextEvidence(details, policy);
   if (evidence.veto) return false;
   if (evidence.trusted) {
-    return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds, miniPlayerTabIds)
+    return contextRequiresDedicatedHls(
+      evidence,
+      details.tabId,
+      trustedLiveTabIds,
+      miniPlayerTabIds,
+    )
       ? isDedicatedChzzkHlsPlaylistUrl(details.url, policy)
       : true;
   }
@@ -315,7 +325,9 @@ function displayPermissionKey(permission) {
 export function configuredWebRequestUrls(policy) {
   return trustedRequestDomains(policy)
     .flatMap((domain) =>
-      HLS_PLAYLIST_EXTENSION_CASE_VARIANTS.map((extension) => `https://*.${domain}/*.${extension}*`),
+      HLS_PLAYLIST_EXTENSION_CASE_VARIANTS.map(
+        (extension) => `https://*.${domain}/*.${extension}*`,
+      ),
     )
     .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
 }
