@@ -34,8 +34,9 @@ function plusOne(overrides = {}) {
 
 function reviewRequest(overrides = {}) {
   return {
-    body: `Codex review request for ${headSha}`,
+    body: `@codex review ${headSha}`,
     created_at: "2026-07-15T10:00:30Z",
+    id: 100,
     reactions: [plusOne()],
     updated_at: "2026-07-15T10:00:30Z",
     user: { login: operatorLogin },
@@ -256,6 +257,26 @@ describe("exact-head release and security review completion", () => {
                 reactions: [plusOne()],
                 updated_at: "2026-07-15T10:00:30Z",
                 user: { login: operatorLogin },
+              },
+            ],
+            reviews: [],
+          }),
+        ),
+      /no exact-head approval|exact-head operator request/i,
+    );
+  });
+
+  it("does not treat an issue-level clean-review comment as completion evidence", () => {
+    assert.throws(
+      () =>
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            cleanReviewComments: [
+              {
+                body:
+                  "Codex Review: Didn't find any major issues.\n\n" +
+                  `**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+                user: { login: reviewerLogin, type: "Bot" },
               },
             ],
             reviews: [],

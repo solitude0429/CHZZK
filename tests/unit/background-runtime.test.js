@@ -12,6 +12,7 @@ async function loadBackground({
   clockStartMs = Date.now(),
   existingLiveTabs = [],
   fetchImplementation = null,
+  filterResponseDataAvailable = true,
   maxInternalTimerMs = null,
   responsesByUrl = new Map(),
   storageSetImplementation = null,
@@ -22,6 +23,7 @@ async function loadBackground({
   const storage = {};
   const fetches = [];
   const fetchOptions = [];
+  const responseFilters = new Map();
   const tabQueries = [];
   let clockMs = clockStartMs;
   class HarnessDate extends Date {
@@ -144,6 +146,26 @@ async function loadBackground({
       },
     },
     webRequest: {
+      filterResponseData: filterResponseDataAvailable
+        ? function filterResponseData(requestId) {
+            const writes = [];
+            const filter = {
+              closed: false,
+              ondata: null,
+              onerror: null,
+              onstop: null,
+              write(data) {
+                writes.push(new Uint8Array(data).slice());
+              },
+              close() {
+                filter.closed = true;
+              },
+              writes,
+            };
+            responseFilters.set(String(requestId), filter);
+            return filter;
+          }
+        : undefined,
       onBeforeRequest: {
         addListener(fn, filter, extraInfoSpec) {
           listeners.onBeforeRequest = fn;
@@ -176,6 +198,7 @@ async function loadBackground({
     fetches,
     fetchOptions,
     listeners,
+    responseFilters,
     storage,
     tabQueries,
   };
@@ -203,6 +226,30 @@ function playlistResponse(url, body = "#EXTM3U\n#EXT-X-VERSION:3\n") {
     text: async () => body,
     url,
   };
+}
+
+function deliverFilteredResponse(responseFilters, requestId, body) {
+  const filter = responseFilters.get(String(requestId));
+  assert.ok(filter, `response filter ${requestId} must exist`);
+  if (body) {
+    filter.ondata({ data: new TextEncoder().encode(body).buffer });
+  }
+  filter.onstop();
+  return new TextDecoder().decode(
+    filter.writes.length === 0
+      ? new Uint8Array()
+      : filter.writes.reduce((combined, chunk) => {
+          const output = new Uint8Array(combined.byteLength + chunk.byteLength);
+          output.set(combined);
+          output.set(chunk, combined.byteLength);
+          return output;
+        }, new Uint8Array()),
+  );
+}
+
+async function observeRedirectTarget(listeners, details, redirectUrl) {
+  const decision = await listeners.onBeforeRequest({ ...details, url: redirectUrl });
+  assert.equal(decision, undefined, "the selected redirect target must not redirect again");
 }
 
 function firstLowQualityRequest(tabId) {
@@ -362,6 +409,402 @@ describe("background runtime quality resolution", () => {
     assert.equal(fetches.length > fetchCountBeforeExpiry, true, "expired evidence must be re-probed");
   });
 
+  it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
+    const tabId = 615;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    await waitForDiagnosticsQueue();
+    const liveRequest = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "full-player",
+    };
+    const fullPlayerRedirect = plain(await listeners.onBeforeRequest(liveRequest));
+    assert.match(fullPlayerRedirect.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, liveRequest, fullPlayerRedirect.redirectUrl);
+    deliverFilteredResponse(
+      responseFilters,
+      "full-player",
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: "full-player",
+      statusCode: 200,
+      url: fullPlayerRedirect.redirectUrl,
+    });
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    await waitForDiagnosticsQueue();
+    const miniPlayerRequest = (requestId) => ({
+      ...firstLowQualityRequest(tabId),
+      documentUrl: miniPlayerUrl,
+      requestId,
+    });
+    const firstMiniPlayerRedirect = plain(
+      await listeners.onBeforeRequest(miniPlayerRequest("mini-player-0")),
+    );
+    assert.match(firstMiniPlayerRedirect.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(
+      listeners,
+      miniPlayerRequest("mini-player-0"),
+      firstMiniPlayerRedirect.redirectUrl,
+    );
+    listeners.onCompleted({
+      requestId: "mini-player-0",
+      statusCode: 200,
+      url: firstMiniPlayerRedirect.redirectUrl,
+    });
+    deliverFilteredResponse(
+      responseFilters,
+      "mini-player-0",
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    const fetchCountAfterMiniPlayerWarmup = fetches.length;
+    advanceClock(9_000);
+
+    for (let index = 1; index < 5; index += 1) {
+      const requestId = `mini-player-${index}`;
+      const request = miniPlayerRequest(requestId);
+      const redirect = plain(await listeners.onBeforeRequest(request));
+      assert.match(redirect.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, request, redirect.redirectUrl);
+      deliverFilteredResponse(
+        responseFilters,
+        requestId,
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+      );
+      listeners.onCompleted({ requestId, statusCode: 200, url: redirect.redirectUrl });
+      advanceClock(9_000);
+    }
+
+    assert.equal(
+      fetches.length,
+      fetchCountAfterMiniPlayerWarmup,
+      "successful low-quality playlist redirects must keep the family target warm",
+    );
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    advanceClock(11_000);
+    const afterIdle = plain(await listeners.onBeforeRequest(miniPlayerRequest("mini-player-after-idle")));
+
+    assert.match(afterIdle.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.length > fetchCountAfterMiniPlayerWarmup,
+      true,
+      "an idle family must still expire and re-probe",
+    );
+  });
+
+  it("renews the family TTL from verified requests already at the selected quality", async () => {
+    const availableQualities = new Set(["1080p"]);
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
+    const family = "selected-quality";
+    const targetRequest = (requestId) => ({
+      ...familyRequest(622, family, requestId),
+      url: familyRequest(622, family).url.replace("480p", "2160p"),
+    });
+    const validPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+
+    for (let index = 0; index < 3; index += 1) {
+      const request = targetRequest(`selected-quality-${index}`);
+      assert.equal(await listeners.onBeforeRequest(request), undefined);
+      deliverFilteredResponse(responseFilters, request.requestId, validPlaylist);
+      listeners.onCompleted({ requestId: request.requestId, statusCode: 200, url: request.url });
+      advanceClock(9_000);
+    }
+
+    const fetchCountAfterVerifiedPlayback = fetches.length;
+    const lowerRequest = familyRequest(622, family, "selected-quality-lower");
+    const warmRedirect = plain(await listeners.onBeforeRequest(lowerRequest));
+    assert.match(warmRedirect.redirectUrl, /chunklist_2160p/);
+    assert.equal(
+      fetches.length,
+      fetchCountAfterVerifiedPlayback,
+      "verified same-target playback must renew the idle TTL without probing",
+    );
+
+    advanceClock(11_000);
+    const afterIdle = plain(
+      await listeners.onBeforeRequest(familyRequest(622, family, "selected-quality-after-idle")),
+    );
+    assert.match(afterIdle.redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length > fetchCountAfterVerifiedPlayback, true);
+  });
+
+  it("does not renew a target from HTTP status before its streamed playlist body is verified", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners } = await loadBackground({ availableQualities });
+    const family = "status-only";
+    const first = plain(await listeners.onBeforeRequest(familyRequest(617, family, "status-only-first")));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(
+      listeners,
+      familyRequest(617, family, "status-only-first"),
+      first.redirectUrl,
+    );
+    listeners.onCompleted({
+      requestId: "status-only-first",
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    const fetchCountBeforeExpiry = fetches.length;
+    advanceClock(11_000);
+    const afterUnverifiedStatus = plain(
+      await listeners.onBeforeRequest(familyRequest(617, family, "status-only-second")),
+    );
+
+    assert.match(afterUnverifiedStatus.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.length > fetchCountBeforeExpiry,
+      true,
+      "a status-only completion must not keep stale marker evidence alive",
+    );
+  });
+
+  it("invalidates a successful status when response-body verification cannot attach", async () => {
+    const family = "filter-unavailable";
+    const requestId = `${family}-first`;
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["2160p", "1080p"]),
+      filterResponseDataAvailable: false,
+    });
+    const request = familyRequest(623, family, requestId);
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, request, first.redirectUrl);
+    listeners.onCompleted({ requestId, statusCode: 200, url: first.redirectUrl });
+
+    const second = plain(await listeners.onBeforeRequest(familyRequest(623, family, `${requestId}-retry`)));
+    assert.match(second.redirectUrl, /chunklist_1080p/);
+  });
+
+  it("passes streamed response bytes through unchanged but invalidates unusable HTTP 200 bodies", async () => {
+    for (const [label, body] of [
+      ["empty", ""],
+      ["html", "<!doctype html><title>gateway error</title>"],
+      ["malformed", "this is not an HLS playlist"],
+    ]) {
+      const family = `invalid-200-${label}`;
+      const requestId = `${family}-first`;
+      const { fetches, listeners, responseFilters } = await loadBackground({
+        availableQualities: new Set(["2160p", "1080p"]),
+      });
+      const first = plain(await listeners.onBeforeRequest(familyRequest(618, family, requestId)));
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, familyRequest(618, family, requestId), first.redirectUrl);
+      const passedThrough = deliverFilteredResponse(responseFilters, requestId, body);
+      assert.equal(passedThrough, body, `${label} response bytes must not be delayed or changed`);
+      listeners.onCompleted({
+        requestId,
+        statusCode: 200,
+        url: first.redirectUrl,
+      });
+
+      const second = plain(await listeners.onBeforeRequest(familyRequest(618, family, `${requestId}-retry`)));
+      assert.match(second.redirectUrl, /chunklist_1080p/);
+      assert.equal(
+        fetches.filter((url) => url.includes(family) && url.includes("2160p")).length,
+        1,
+        `${label} HTTP 200 body must suppress the unusable target`,
+      );
+    }
+  });
+
+  it("keeps a chunk-write failure invalid when body completion precedes HTTP status", async () => {
+    const family = "write-failure";
+    const requestId = `${family}-first`;
+    const { listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["2160p", "1080p"]),
+    });
+    const request = familyRequest(620, family, requestId);
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, request, first.redirectUrl);
+
+    const filter = responseFilters.get(requestId);
+    const validPrefix = new TextEncoder().encode("#EXTM3U\n#EXT-X-TARGETDURATION:4\n").buffer;
+    filter.ondata({ data: validPrefix });
+    filter.write = () => {
+      throw new Error("synthetic stream write failure");
+    };
+    filter.ondata({ data: new TextEncoder().encode("#EXTINF:4,\nsegment.ts\n").buffer });
+    filter.onstop();
+    listeners.onCompleted({
+      requestId,
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    const second = plain(await listeners.onBeforeRequest(familyRequest(620, family, `${requestId}-retry`)));
+    assert.match(second.redirectUrl, /chunklist_1080p/);
+  });
+
+  it("matches redirected network events after stripping a preserved URL fragment", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
+    const family = "fragmented-target";
+    const firstRequest = familyRequest(621, family, `${family}-first`);
+    const first = plain(await listeners.onBeforeRequest(firstRequest));
+    assert.match(first.redirectUrl, /chunklist_2160p\.m3u8\?Policy=synthetic#tail$/);
+    const firstNetworkUrl = first.redirectUrl.split("#", 1)[0];
+    await observeRedirectTarget(listeners, firstRequest, firstNetworkUrl);
+    deliverFilteredResponse(
+      responseFilters,
+      firstRequest.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: firstRequest.requestId,
+      statusCode: 200,
+      url: firstNetworkUrl,
+    });
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    const fetchCountAfterWarmup = fetches.length;
+    advanceClock(9_000);
+    const second = plain(await listeners.onBeforeRequest(familyRequest(621, family, `${family}-second`)));
+    assert.match(second.redirectUrl, /chunklist_2160p/);
+    assert.equal(fetches.length, fetchCountAfterWarmup);
+  });
+
+  it("renews a validated target when Firefox completes an empty 304 cache revalidation", async () => {
+    for (const firstEvent of ["body", "status"]) {
+      const availableQualities = new Set(["2160p"]);
+      const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+        availableQualities,
+      });
+      const family = `cache-304-${firstEvent}`;
+      const firstRequest = familyRequest(619, family, `${family}-first`);
+      const first = plain(await listeners.onBeforeRequest(firstRequest));
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, firstRequest, first.redirectUrl);
+      const complete304 = () =>
+        listeners.onCompleted({
+          requestId: firstRequest.requestId,
+          statusCode: 304,
+          url: first.redirectUrl,
+        });
+      const empty304 = () => deliverFilteredResponse(responseFilters, firstRequest.requestId, "");
+      if (firstEvent === "body") {
+        empty304();
+        complete304();
+      } else {
+        complete304();
+        empty304();
+      }
+
+      availableQualities.clear();
+      availableQualities.add("1080p");
+      const fetchCountAfterWarmup = fetches.length;
+      advanceClock(9_000);
+      const secondRequest = familyRequest(619, family, `${family}-second`);
+      const second = plain(await listeners.onBeforeRequest(secondRequest));
+      assert.match(second.redirectUrl, /chunklist_2160p/);
+      await observeRedirectTarget(listeners, secondRequest, second.redirectUrl);
+      listeners.onCompleted({
+        requestId: secondRequest.requestId,
+        statusCode: 304,
+        url: second.redirectUrl,
+      });
+      deliverFilteredResponse(responseFilters, secondRequest.requestId, "");
+
+      advanceClock(9_000);
+      const third = plain(await listeners.onBeforeRequest(familyRequest(619, family, `${family}-third`)));
+      assert.match(third.redirectUrl, /chunklist_2160p/);
+      assert.equal(
+        fetches.length,
+        fetchCountAfterWarmup,
+        `empty 304 evidence must renew the validated target when ${firstEvent} arrives first`,
+      );
+    }
+  });
+
+  it("rejects an empty 304 until the exact target URL has passed body validation", async () => {
+    const family = "unvalidated-304";
+    const { listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+    });
+    const observedTarget = {
+      ...familyRequest(624, family),
+      url: familyRequest(624, family).url.replace("480p", "2160p"),
+    };
+    assert.equal(await listeners.onBeforeRequest(observedTarget), undefined);
+
+    const lowerRequest = familyRequest(624, family, `${family}-lower`);
+    const redirect = plain(await listeners.onBeforeRequest(lowerRequest));
+    assert.match(redirect.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, lowerRequest, redirect.redirectUrl);
+    listeners.onCompleted({
+      requestId: lowerRequest.requestId,
+      statusCode: 304,
+      url: redirect.redirectUrl,
+    });
+    deliverFilteredResponse(responseFilters, lowerRequest.requestId, "");
+
+    const retry = plain(await listeners.onBeforeRequest(familyRequest(624, family, `${family}-retry`)));
+    assert.match(retry.redirectUrl, /chunklist_1080p/);
+  });
+
+  it("ignores an older failed response after a newer exact-target response succeeds", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
+    const family = "overlapping-target";
+    const olderRequest = familyRequest(625, family, `${family}-older`);
+    const olderRedirect = plain(await listeners.onBeforeRequest(olderRequest));
+    assert.match(olderRedirect.redirectUrl, /chunklist_2160p/);
+
+    const newerRequest = {
+      ...familyRequest(625, family, `${family}-newer`),
+      url: familyRequest(625, family).url.replace("Policy=synthetic", "Policy=rotated"),
+    };
+    const newerRedirect = plain(await listeners.onBeforeRequest(newerRequest));
+    assert.match(newerRedirect.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, olderRequest, olderRedirect.redirectUrl);
+    await observeRedirectTarget(listeners, newerRequest, newerRedirect.redirectUrl);
+
+    deliverFilteredResponse(
+      responseFilters,
+      newerRequest.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: newerRequest.requestId,
+      statusCode: 200,
+      url: newerRedirect.redirectUrl,
+    });
+    deliverFilteredResponse(responseFilters, olderRequest.requestId, "<!doctype html>");
+    listeners.onCompleted({
+      requestId: olderRequest.requestId,
+      statusCode: 200,
+      url: olderRedirect.redirectUrl,
+    });
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    const fetchCountAfterSuccess = fetches.length;
+    advanceClock(9_000);
+    const next = plain(await listeners.onBeforeRequest(familyRequest(625, family, `${family}-next`)));
+    assert.match(next.redirectUrl, /chunklist_2160p/);
+    assert.equal(fetches.length, fetchCountAfterSuccess);
+  });
+
   it("invalidates a redirected family target on exposed 404/error events and downgrades without looping", async () => {
     for (const eventName of ["onCompleted", "onErrorOccurred"]) {
       const { fetches, listeners } = await loadBackground({
@@ -390,6 +833,33 @@ describe("background runtime quality resolution", () => {
         fetches.filter((url) => url.includes(`failure-${eventName}`) && url.includes("2160p")).length,
         1,
         "a recently failed target must not be selected again in a redirect loop",
+      );
+    }
+  });
+
+  it("invalidates bodyless redirected playlist responses instead of renewing the target", async () => {
+    for (const statusCode of [204, 205]) {
+      const family = `bodyless-${statusCode}`;
+      const requestId = `${family}-redirect`;
+      const { fetches, listeners } = await loadBackground({
+        availableQualities: new Set(["2160p", "1080p"]),
+      });
+      const first = plain(await listeners.onBeforeRequest(familyRequest(616, family, requestId)));
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+
+      listeners.onCompleted({
+        requestId,
+        statusCode,
+        tabId: 616,
+        url: first.redirectUrl,
+      });
+      const second = plain(await listeners.onBeforeRequest(familyRequest(616, family, `${requestId}-retry`)));
+
+      assert.match(second.redirectUrl, /chunklist_1080p/);
+      assert.equal(
+        fetches.filter((url) => url.includes(family) && url.includes("2160p")).length,
+        1,
+        `HTTP ${statusCode} must suppress the unusable target instead of renewing it`,
       );
     }
   });

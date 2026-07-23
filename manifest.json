@@ -14,11 +14,11 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "content_security_policy": "script-src 'self'; object-src 'none'; base-uri 'none';",
   "permissions": [
     "https://*.akamaized.net/*",
-    "https://*.chzzk.naver.com/live/*",
+    "https://*.chzzk.naver.com/*",
     "https://*.gscdn.net/*",
     "https://*.navercdn.com/*",
     "https://*.pstatic.net/*",

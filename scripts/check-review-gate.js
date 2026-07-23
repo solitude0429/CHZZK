@@ -54,7 +54,7 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
         pullRequest(number: $number) {
           headRefOid
           reviewThreads(first: 100, after: $after) {
-            nodes { isResolved }
+            nodes { id isResolved }
             pageInfo { endCursor hasNextPage }
           }
         }
@@ -106,29 +106,128 @@ function containsFullSha(body, headSha) {
   );
 }
 
-function listReviewRequestComments(repository, pullNumber, headSha, releaseOperatorLogin) {
+function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLogin) {
   const comments = paginatedArrays(
     `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
     "Pull request comment listing",
   );
   const operatorLogin = String(releaseOperatorLogin ?? "").toLowerCase();
-  const requests = comments.filter(
-    (comment) =>
-      String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
-      containsFullSha(comment?.body, headSha),
-  );
-  return requests.map((comment) => {
-    if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
-      throw new Error("Review-request comment identity is missing or malformed");
+  for (const comment of comments) {
+    if (!Number.isSafeInteger(comment?.id) || comment.id < 1) {
+      throw new Error("Pull request comment identity is missing or malformed");
     }
-    return {
-      ...comment,
-      reactions: paginatedArrays(
-        `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
-        "Review-request comment reaction listing",
-      ),
-    };
+  }
+  const requests = comments
+    .filter(
+      (comment) =>
+        String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
+        containsFullSha(comment?.body, headSha),
+    )
+    .map((comment) => {
+      return {
+        ...comment,
+        reactions: paginatedArrays(
+          `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
+          "Review-request comment reaction listing",
+        ),
+      };
+    });
+  return {
+    commentSnapshot: comments
+      .map((comment) => ({
+        body: comment.body,
+        created_at: comment.created_at,
+        id: comment.id,
+        updated_at: comment.updated_at,
+        user: {
+          id: comment.user?.id,
+          login: comment.user?.login,
+          type: comment.user?.type,
+        },
+      }))
+      .sort((left, right) => left.id - right.id),
+    reviewRequestComments: requests,
+  };
+}
+
+function normalizedReactions(comments) {
+  return comments
+    .map((comment) => ({
+      id: comment.id,
+      reactions: comment.reactions
+        .map((reaction) => ({
+          content: reaction.content,
+          created_at: reaction.created_at,
+          id: reaction.id,
+          user: {
+            id: reaction.user?.id,
+            login: reaction.user?.login,
+            type: reaction.user?.type,
+          },
+        }))
+        .sort((left, right) => left.id - right.id),
+    }))
+    .sort((left, right) => left.id - right.id);
+}
+
+function reviewEvidenceFingerprint(evidence) {
+  return JSON.stringify({
+    commentSnapshot: evidence.commentSnapshot,
+    reactions: normalizedReactions(evidence.reviewRequestComments),
+    reviews: evidence.reviews
+      .map((review) => ({
+        commit_id: review.commit_id,
+        id: review.id,
+        state: review.state,
+        submitted_at: review.submitted_at,
+        user: {
+          id: review.user?.id,
+          login: review.user?.login,
+          type: review.user?.type,
+        },
+      }))
+      .sort((left, right) => left.id - right.id),
+    reviewThreads: evidence.reviewThreads
+      .map((thread) => ({ id: thread.id, isResolved: thread.isResolved }))
+      .sort((left, right) => String(left.id).localeCompare(String(right.id))),
   });
+}
+
+function pullRequestFingerprint(pullRequest) {
+  return JSON.stringify({
+    baseSha: String(pullRequest?.base?.sha ?? "").toLowerCase(),
+    draft: pullRequest?.draft,
+    headSha: String(pullRequest?.head?.sha ?? "").toLowerCase(),
+    labels: Array.isArray(pullRequest?.labels) ? pullRequest.labels.map((label) => label?.name).sort() : null,
+    state: pullRequest?.state,
+    updatedAt: pullRequest?.updated_at,
+  });
+}
+
+function pendingCollectionRace(message) {
+  const error = new Error(message);
+  error.code = "REVIEW_GATE_PENDING";
+  throw error;
+}
+
+function collectReviewEvidence(repository, pullNumber, headSha) {
+  const reviews = paginatedArrays(
+    `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
+    "Pull request review listing",
+  );
+  const reviewThreads = listReviewThreads(repository, pullNumber, headSha);
+  const exactApproval = hasExactHeadReviewerApproval({
+    automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
+    headSha,
+    reviews,
+  });
+  const commentEvidence = exactApproval
+    ? {
+        commentSnapshot: [],
+        reviewRequestComments: [],
+      }
+    : listCommentEvidence(repository, pullNumber, headSha, process.env.CHZZK_RELEASE_OPERATOR_LOGIN);
+  return { ...commentEvidence, reviews, reviewThreads };
 }
 
 function integerEnvironment(name, { defaultValue, maximum, minimum }) {
@@ -192,41 +291,60 @@ async function main() {
   let lastError;
   do {
     try {
-      const pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
+      let pullRequest = getJson(`repos/${repository}/pulls/${pullNumber}`, "Pull request lookup");
       currentHeadSha = String(pullRequest?.head?.sha ?? "").toLowerCase();
+      const currentBaseSha = String(pullRequest?.base?.sha ?? "").toLowerCase();
+      if (!FULL_GIT_SHA_RE.test(currentBaseSha)) {
+        throw new Error("Pull request base SHA is missing or malformed");
+      }
       const files = changedFilePaths(
         paginatedArrays(
           `repos/${repository}/pulls/${pullNumber}/files?per_page=100`,
           "Pull request changed-file listing",
         ),
       );
-      const labels = Array.isArray(pullRequest.labels)
-        ? pullRequest.labels.map((label) => label?.name)
-        : null;
+      let labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
       const forceReview = process.env.CHZZK_FORCE_REVIEW === "true";
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
-      let reviews = [];
-      let reviewThreads = [];
-      let reviewRequestComments;
+      let evidence = {
+        reviewRequestComments: undefined,
+        reviews: [],
+        reviewThreads: [],
+      };
       if (required) {
-        reviews = paginatedArrays(
-          `repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
-          "Pull request review listing",
+        const firstEvidence = collectReviewEvidence(repository, pullNumber, currentHeadSha);
+        const middlePullRequest = getJson(
+          `repos/${repository}/pulls/${pullNumber}`,
+          "Intermediate pull request lookup",
         );
-        reviewThreads = listReviewThreads(repository, pullNumber, currentHeadSha);
-        const exactApproval = hasExactHeadReviewerApproval({
-          automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
-          headSha: currentHeadSha,
-          reviews,
-        });
-        if (!exactApproval) {
-          reviewRequestComments = listReviewRequestComments(
-            repository,
-            pullNumber,
-            currentHeadSha,
-            process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
-          );
+        evidence = collectReviewEvidence(repository, pullNumber, currentHeadSha);
+        const finalPullRequest = getJson(
+          `repos/${repository}/pulls/${pullNumber}`,
+          "Final pull request lookup",
+        );
+        if (
+          String(finalPullRequest?.head?.sha ?? "").toLowerCase() !== currentHeadSha ||
+          String(finalPullRequest?.base?.sha ?? "").toLowerCase() !== currentBaseSha ||
+          pullRequestFingerprint(middlePullRequest) !== pullRequestFingerprint(finalPullRequest) ||
+          reviewEvidenceFingerprint(firstEvidence) !== reviewEvidenceFingerprint(evidence)
+        ) {
+          pendingCollectionRace("Pull request review evidence changed while it was collected");
         }
+        pullRequest = finalPullRequest;
+        labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
+      } else {
+        const finalPullRequest = getJson(
+          `repos/${repository}/pulls/${pullNumber}`,
+          "Final pull request lookup",
+        );
+        if (
+          String(finalPullRequest?.head?.sha ?? "").toLowerCase() !== currentHeadSha ||
+          String(finalPullRequest?.base?.sha ?? "").toLowerCase() !== currentBaseSha
+        ) {
+          pendingCollectionRace("Pull request changed while it was collected");
+        }
+        pullRequest = finalPullRequest;
+        labels = Array.isArray(pullRequest.labels) ? pullRequest.labels.map((label) => label?.name) : null;
       }
       const result = evaluateReviewCompletion({
         automatedReviewLogin: process.env.CHZZK_AUTOMATED_REVIEW_LOGIN,
@@ -236,9 +354,9 @@ async function main() {
         labels,
         pullRequest,
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
-        reviews,
-        reviewRequestComments,
-        reviewThreads,
+        reviews: evidence.reviews,
+        reviewRequestComments: evidence.reviewRequestComments,
+        reviewThreads: evidence.reviewThreads,
       });
       writeOutputs(result);
       console.log(JSON.stringify(result));

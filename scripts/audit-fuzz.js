@@ -741,7 +741,7 @@ function policyUrl(host, quality, secret, { mixed = false, playlist = true, prot
 
 function runRequestPolicyCase(context) {
   const { check, implementation, index, rng, trackInput } = context;
-  const scenario = index % 12;
+  const scenario = index % 14;
   const quality = rng.pick(QUALITY_NUMBERS);
   const tabId = 1 + rng.int(100_000);
   const secret = secretCanary(rng, index);
@@ -876,12 +876,32 @@ function runRequestPolicyCase(context) {
       implementation.shouldRedirectRequest({ ...metadataFree, url: suffixConfusion }, policy).ok === false,
       "dedicated-host suffix confusion passed",
     );
-  } else {
+  } else if (scenario === 11) {
     const mixed = policyUrl(genericTrustedRequestHost(rng), quality, secret, { mixed: true });
     trackInput(mixed);
     const decision = implementation.shouldRedirectRequest(trustedDetails(mixed, tabId), policy);
     check(decision.ok === false, "mixed quality markers passed request policy");
     check(decision.reason === "contradictory-quality-markers", "mixed marker veto reason changed");
+  } else {
+    const host = scenario === 12 ? dedicatedRequestHost(rng) : genericTrustedRequestHost(rng);
+    const miniPlayerUrl = policyUrl(host, quality, secret);
+    const miniPlayer = trustedDetails(miniPlayerUrl, tabId, {
+      documentUrl: "https://chzzk.naver.com/lives?keyword=audit",
+    });
+    const master = {
+      ...miniPlayer,
+      url: `https://${host}/live/master.m3u8?Policy=${secret}`,
+    };
+    trackInput(miniPlayerUrl);
+    trackInput(master.url);
+    check(
+      implementation.shouldRedirectRequest(miniPlayer, policy).ok === (scenario === 12),
+      "same-site mini-player host boundary changed",
+    );
+    check(
+      implementation.isTrustedMasterPlaylistRequest(master, policy) === (scenario === 12),
+      "same-site mini-player master boundary changed",
+    );
   }
 }
 

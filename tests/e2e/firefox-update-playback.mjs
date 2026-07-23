@@ -21,6 +21,7 @@ const testPolicy = {
   directRewriteMaxQuality: "highest-supported",
   knownChzzkHlsPathMarkers: ["/chzzk/"],
   knownChzzkHlsRequestDomains: ["pstatic.net"],
+  markerEvidenceTtlMs: 1000,
   probeMaxBytes: 256000,
   probeResolutionBudgetMs: 3000,
   probeTimeoutMs: 1000,
@@ -56,7 +57,13 @@ async function poll(action, { intervalMs = 100, timeoutMs = 15000 } = {}) {
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-async function makeExtensionXpi({ outputPath, port, runtimeDir, version }) {
+async function makeExtensionXpi({
+  chzzkPermission = "https://*.chzzk.naver.com/*",
+  outputPath,
+  port,
+  runtimeDir,
+  version,
+}) {
   const productionManifest = JSON.parse(readFileSync(join(repoRoot, "manifest.json"), "utf8"));
   const manifest = {
     ...productionManifest,
@@ -66,7 +73,7 @@ async function makeExtensionXpi({ outputPath, port, runtimeDir, version }) {
       "tabs",
       "webRequest",
       "webRequestBlocking",
-      "https://*.chzzk.naver.com/live/*",
+      chzzkPermission,
       "https://*.pstatic.net/*",
     ],
     content_scripts: [
@@ -181,11 +188,21 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     (request, response) => {
       const host = String(request.headers.host ?? "").split(":")[0];
       const requestUrl = new URL(request.url ?? "/", `https://${host}`);
-      requests.push({ host, method: request.method, path: requestUrl.pathname, search: requestUrl.search });
+      const requestRecord = {
+        cacheRevalidation: false,
+        host,
+        method: request.method,
+        path: requestUrl.pathname,
+        search: requestUrl.search,
+      };
+      requests.push(requestRecord);
       response.setHeader("access-control-allow-origin", "*");
       response.setHeader("cache-control", "no-store");
 
-      if (host === "www.chzzk.naver.com" && requestUrl.pathname === "/live/test") {
+      if (
+        host === "www.chzzk.naver.com" &&
+        (requestUrl.pathname === "/live/test" || requestUrl.pathname === "/lives")
+      ) {
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK E2E</title>
 <div id="result">pending</div>
@@ -194,10 +211,15 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   try {
     const mediaUrl =
       "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F";
-    await fetch(mediaUrl);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const response = await fetch(mediaUrl);
-    document.getElementById("result").textContent = response.status + ":" + (await response.text());
+    let finalBody = "";
+    let finalStatus = 0;
+    for (let index = 0; index < 4; index += 1) {
+      const response = await fetch(mediaUrl);
+      finalStatus = response.status;
+      finalBody = await response.text();
+      if (index < 3) await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    document.getElementById("result").textContent = finalStatus + ":" + finalBody;
   } catch (error) {
     document.getElementById("result").textContent = "error:" + error.name + ":" + error.message;
   }
@@ -211,6 +233,15 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i,
         )?.[1];
         if (quality === "1080p" || quality === "720p" || quality === "480p") {
+          const etag = `"fixture-${quality}"`;
+          response.setHeader("cache-control", "no-cache");
+          response.setHeader("etag", etag);
+          if (request.headers["if-none-match"] === etag) {
+            requestRecord.cacheRevalidation = true;
+            response.statusCode = 304;
+            response.end();
+            return;
+          }
           response.statusCode = 200;
           response.setHeader("content-type", "application/vnd.apple.mpegurl");
           response.end(`#EXTM3U\n# fixture-quality=${quality}\n`);
@@ -428,7 +459,13 @@ async function main() {
     await buildFixtureRuntime(runtimeDir);
     const oldXpiPath = join(workDir, "chzzk-0.1.3.xpi");
     const updateXpiPath = join(workDir, "chzzk-0.1.4.xpi");
-    await makeExtensionXpi({ outputPath: oldXpiPath, port: state.port, runtimeDir, version: "0.1.3" });
+    await makeExtensionXpi({
+      chzzkPermission: "https://*.chzzk.naver.com/live/*",
+      outputPath: oldXpiPath,
+      port: state.port,
+      runtimeDir,
+      version: "0.1.3",
+    });
     state.updateXpiBytes = await makeExtensionXpi({
       outputPath: updateXpiPath,
       port: state.port,
@@ -527,12 +564,74 @@ async function main() {
       true,
     );
 
+    const redirectedCountBeforeMiniPlayer = requests.filter(
+      (request) =>
+        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.path.includes("/1080p/") &&
+        request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+    ).length;
+    const requestCountBeforeMiniPlayer = requests.length;
+    await driver.setContext("content");
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/lives?keyword=another-channel`,
+    });
+    const miniPlayerResult = await poll(
+      async () => {
+        const text = await driver.execute(
+          "return document.getElementById('result') && document.getElementById('result').textContent;",
+        );
+        return text && text !== "pending" ? text : null;
+      },
+      { intervalMs: 100, timeoutMs: 15000 },
+    );
+    assert.match(
+      miniPlayerResult,
+      /^200:#EXTM3U\n# fixture-quality=1080p/m,
+      "same-origin list/search page did not retain redirected mini-player quality",
+    );
+    assert.equal(
+      requests.filter(
+        (request) =>
+          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.path.includes("/1080p/") &&
+          request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+      ).length > redirectedCountBeforeMiniPlayer,
+      true,
+      "Firefox did not expose the /lives-initiated playlist to the extension",
+    );
+    const miniPlayerRequests = requests.slice(requestCountBeforeMiniPlayer);
+    for (const unavailableQuality of ["2160p", "1440p"]) {
+      assert.equal(
+        miniPlayerRequests.filter(
+          (request) =>
+            request.host === "nvelop-livecloud.pstatic.net" &&
+            request.path.includes(`/${unavailableQuality}/`),
+        ).length,
+        1,
+        `mini-player re-probed ${unavailableQuality} after a streamed HLS body should have renewed the target`,
+      );
+    }
+    assert.equal(
+      miniPlayerRequests.some(
+        (request) =>
+          request.cacheRevalidation &&
+          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.path.includes("/1080p/"),
+      ),
+      true,
+      "Firefox did not exercise the 304 cached-playlist revalidation path",
+    );
+
     console.log(
       JSON.stringify({
+        cacheRevalidation: "304",
         firefox: basename(firefoxBinary),
         functionalOnly: true,
+        hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,
+        miniPlayerCycles: 4,
+        miniPlayerPage: "/lives",
         playbackQuality: "1080p",
         queryPreserved: true,
         updatePath: "AddonManager.findUpdates",

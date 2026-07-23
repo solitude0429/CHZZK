@@ -47,7 +47,7 @@ describe("audit fuzz harness", () => {
       playlist_evidence: 10,
       playlist_families: 8,
       quality_markers: 8,
-      request_policy: 12,
+      request_policy: 14,
       url_rewrites: 8,
     });
     const first = runAuditFuzz({ categoryCounts: countsForUnitTest, seed: AUDIT_FUZZ_SEED });
@@ -55,7 +55,7 @@ describe("audit fuzz harness", () => {
 
     assert.deepEqual(first, second);
     assert.equal(first.seed, "0x5a17c0de");
-    assert.equal(first.caseCount, 60);
+    assert.equal(first.caseCount, 62);
     assert.deepEqual(first.categories, countsForUnitTest);
     assert.equal(first.assertionCount > first.caseCount, true);
     assert.equal(first.maxInputCharacters <= AUDIT_FUZZ_LIMITS.maxInputCharacters, true);
