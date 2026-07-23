@@ -62,6 +62,13 @@ function cleanReviewComment(overrides = {}) {
   };
 }
 
+function exactHeadCleanReviewBody(sha = headSha) {
+  return (
+    `## Review Result\n\nNo major issues found in exact head \`${sha}\`.\n\n` +
+    "- Verified exact-head implementation and tests."
+  );
+}
+
 function sensitiveEvaluation(overrides = {}) {
   return {
     automatedReviewApp: null,
@@ -88,13 +95,17 @@ function sensitiveEvaluation(overrides = {}) {
 }
 
 describe("exact-head release and security review completion", () => {
-  it("recognizes only the standard clean-review header and reviewed-commit marker", () => {
+  it("recognizes only the two observed exact-head clean-review formats", () => {
     assert.equal(cleanReviewCommitMarker(cleanReviewComment().body), headSha.slice(0, 10));
+    assert.equal(cleanReviewCommitMarker(exactHeadCleanReviewBody()), headSha);
     for (const body of [
       `Didn't find any major issues.\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
       `Codex Review: Found an issue.\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
       `Codex Review: Didn't find any major issues.\n\nReviewed commit: ${headSha.slice(0, 10)}`,
       `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${headSha.slice(0, 9)}\``,
+      `Review Result\n\nNo major issues found in exact head \`${headSha}\`.`,
+      `## Review Result\n\nNo major issues found in head \`${headSha}\`.`,
+      `## Review Result\n\nNo major issues found in exact head \`${headSha.slice(0, 39)}\`.`,
     ]) {
       assert.equal(cleanReviewCommitMarker(body), null, body);
     }
@@ -300,31 +311,33 @@ describe("exact-head release and security review completion", () => {
   });
 
   it("accepts an unedited latest Codex App clean comment bound to an earlier full-SHA request", () => {
-    assert.deepEqual(
-      evaluateReviewCompletion(
-        sensitiveEvaluation({
-          automatedReviewApp: reviewerApp,
-          cleanReviewComments: [cleanReviewComment()],
-          latestIssueCommentId: 200,
-          pullRequest: {
-            draft: false,
-            head: { sha: headSha },
-            number: 42,
-            state: "open",
-            updated_at: "2026-07-15T10:02:00Z",
-          },
-          reviewRequestComments: [reviewRequest()],
-          reviews: [],
-        }),
-      ),
-      {
-        description:
-          "Verified reviewer-app clean comment is bound to the exact PR head; no unresolved threads",
-        headSha,
-        required: true,
-        state: "success",
-      },
-    );
+    for (const body of [cleanReviewComment().body, exactHeadCleanReviewBody()]) {
+      assert.deepEqual(
+        evaluateReviewCompletion(
+          sensitiveEvaluation({
+            automatedReviewApp: reviewerApp,
+            cleanReviewComments: [cleanReviewComment({ body })],
+            latestIssueCommentId: 200,
+            pullRequest: {
+              draft: false,
+              head: { sha: headSha },
+              number: 42,
+              state: "open",
+              updated_at: "2026-07-15T10:02:00Z",
+            },
+            reviewRequestComments: [reviewRequest()],
+            reviews: [],
+          }),
+        ),
+        {
+          description:
+            "Verified reviewer-app clean comment is bound to the exact PR head; no unresolved threads",
+          headSha,
+          required: true,
+          state: "success",
+        },
+      );
+    }
   });
 
   it("rejects clean comments without exact app, commit, ordering, and activity bindings", () => {

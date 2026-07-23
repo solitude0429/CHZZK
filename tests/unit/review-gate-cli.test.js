@@ -80,8 +80,10 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
       user: { login: "${operatorLogin}", type: "User" },
     },
     {
-      body: "Codex Review: Didn't find any major issues. Nice work!\\n\\n**Reviewed commit:** \\\`" +
-        state.headSha.slice(0, 10) + "\\\`\\n",
+      body: state.exactHeadCleanFormat
+        ? "## Review Result\\n\\nNo major issues found in exact head \\\`" + state.headSha + "\\\`.\\n"
+        : "Codex Review: Didn't find any major issues. Nice work!\\n\\n**Reviewed commit:** \\\`" +
+          state.headSha.slice(0, 10) + "\\\`\\n",
       created_at: "2026-07-15T10:02:00Z",
       id: 200,
       performed_via_github_app: {
@@ -105,7 +107,10 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
   pages(comments);
 }
 if (endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100") pages([]);
-if (endpoint === "repos/example/repository/commits/" + state.headSha.slice(0, 10)) {
+if (
+  endpoint === "repos/example/repository/commits/" + state.headSha.slice(0, 10) ||
+  endpoint === "repos/example/repository/commits/" + state.headSha
+) {
   if (state.commitResolutionFails) {
     process.stderr.write("ambiguous commit reference");
     process.exit(1);
@@ -163,18 +168,21 @@ function runGate(overrides = {}) {
 
 describe("review-gate GitHub evidence collection", () => {
   it("resolves the clean marker and verifies the exact GitHub App before passing", () => {
-    const run = runGate();
-    assert.equal(run.result.status, 0, run.result.stderr);
-    assert.match(run.output, /^state=success$/m);
-    assert.match(run.result.stdout, /Verified reviewer-app clean comment/);
-    assert.equal(
-      run.state.log.some((args) => args.includes(`repos/example/repository/commits/${headSha.slice(0, 10)}`)),
-      true,
-    );
-    assert.equal(
-      run.state.log.some((args) => args.includes(`apps/${reviewerApp.slug}`)),
-      true,
-    );
+    for (const overrides of [{}, { exactHeadCleanFormat: true }]) {
+      const run = runGate(overrides);
+      assert.equal(run.result.status, 0, run.result.stderr);
+      assert.match(run.output, /^state=success$/m);
+      assert.match(run.result.stdout, /Verified reviewer-app clean comment/);
+      const marker = overrides.exactHeadCleanFormat ? headSha : headSha.slice(0, 10);
+      assert.equal(
+        run.state.log.some((args) => args.includes(`repos/example/repository/commits/${marker}`)),
+        true,
+      );
+      assert.equal(
+        run.state.log.some((args) => args.includes(`apps/${reviewerApp.slug}`)),
+        true,
+      );
+    }
   });
 
   it("fails closed on provenance, ref, metadata, same-second comment, or review races", () => {

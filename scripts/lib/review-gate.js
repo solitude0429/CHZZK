@@ -3,8 +3,10 @@ const ABBREVIATED_GIT_SHA_RE = /^[a-f0-9]{10,40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/;
 const GITHUB_APP_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-const CLEAN_REVIEW_RE =
+const STANDARD_CLEAN_REVIEW_RE =
   /^Codex Review: Didn't find any major issues\.[^\r\n]*\r?\n\r?\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`(?:\r?\n|$)/;
+const EXACT_HEAD_CLEAN_REVIEW_RE =
+  /^## Review Result\r?\n\r?\nNo major issues found in exact head `([a-f0-9]{40})`\.(?:\r?\n|$)/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
@@ -208,7 +210,7 @@ function isCodexReviewRequest(body, headSha) {
 
 export function cleanReviewCommitMarker(body) {
   if (typeof body !== "string") return null;
-  const match = CLEAN_REVIEW_RE.exec(body);
+  const match = STANDARD_CLEAN_REVIEW_RE.exec(body) ?? EXACT_HEAD_CLEAN_REVIEW_RE.exec(body);
   return match?.[1] ?? null;
 }
 
