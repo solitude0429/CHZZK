@@ -28,8 +28,8 @@
       "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation; status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. A URL-only live-to-list/search SPA transition migrates a verified dedicated-host target and matching in-flight response verification into authoritative per-tab mini-player mode; later same-site route changes preserve that state, unresolved candidate probes are aborted, and Firefox's stale original live documentUrl cannot re-adopt the old context or authorize a generic CDN. Full document loads, new live-page state, foreign navigation, and tab close invalidate mini-player mode. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
-      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup prewarming refreshes diagnostics without clearing in-memory state, so delayed lifecycle delivery cannot erase a target established by an earlier playlist request. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
+      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. A URL-only live-to-list/search SPA transition migrates a verified dedicated-host target or one whose response verifier actually attached and remains pending/valid into authoritative per-tab mini-player mode; later same-site route changes preserve that state, unresolved candidate probes and unattached/failed verification are discarded, and Firefox's stale original live documentUrl cannot re-adopt the old context or authorize a generic CDN, including during URL-less reload validation. Full document loads, new live-page state, foreign navigation, and tab close invalidate the target. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
+      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup prewarming refreshes diagnostics and migrates reusable verified contextless target/response state into an authoritatively confirmed live context, so delayed lifecycle delivery cannot erase a target established by an earlier playlist request. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
       "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
       "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports.",
@@ -1397,23 +1397,25 @@
         !record.settled &&
         record.key === state.key &&
         record.targetEpoch === state.targetEpoch &&
-        record.targetQuality === state.targetQuality
+        record.targetQuality === state.targetQuality &&
+        record.responseVerifierAttached === true &&
+        !record.bodyVerificationFailed &&
+        (record.bodyEvidence === "pending" || record.bodyEvidence === "valid")
       ) {
         return true;
       }
     }
     return false;
   }
-  function targetCanContinueInMiniPlayer(state, now) {
+  function targetCanMigrateAcrossContext(state, now) {
     if (!state?.dedicatedHls || !state.resolved) return false;
     if (state.expiresAt != null && state.expiresAt <= now) return false;
-    if (state.contextKey === "trusted-request") return true;
     return (
       (state.validatedNetworkUrls instanceof Map && state.validatedNetworkUrls.size > 0) ||
       targetHasInFlightResponseVerification(state)
     );
   }
-  function migrateTabQualityStateToMiniPlayer(tabId) {
+  function migrateTabQualityState(tabId, destinationContextKey, { sourceContextKey = null } = {}) {
     const now = Date.now();
     const tabTargets = [...activeTargetsBySession.entries()].filter(([, state]) => state.tabId === tabId);
     const targetGroups = /* @__PURE__ */ new Map();
@@ -1428,9 +1430,14 @@
     }
     for (const [oldKey, state] of tabTargets) {
       activeTargetsBySession.delete(oldKey);
-      if (!targetCanContinueInMiniPlayer(state, now)) continue;
-      const key = JSON.stringify([tabId, "trusted-request", state.familyKey]);
-      const target = { ...state, contextKey: "trusted-request", key };
+      if (
+        (sourceContextKey && state.contextKey !== sourceContextKey) ||
+        !targetCanMigrateAcrossContext(state, now)
+      ) {
+        continue;
+      }
+      const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+      const target = { ...state, contextKey: destinationContextKey, key };
       const group = targetGroups.get(key) ?? [];
       group.push({ oldKey, target });
       targetGroups.set(key, group);
@@ -1454,6 +1461,12 @@
     }
     tabContextTokenByTab.set(tabId, {});
     return tabTargets.length > 0;
+  }
+  function migrateTabQualityStateToMiniPlayer(tabId) {
+    return migrateTabQualityState(tabId, "trusted-request");
+  }
+  function migrateVerifiedContextlessStateToLiveContext(tabId, liveContext) {
+    return migrateTabQualityState(tabId, liveContext, { sourceContextKey: "trusted-request" });
   }
   function registerRequestContext(details) {
     const tabId = details?.tabId;
@@ -1483,7 +1496,7 @@
     }
     return true;
   }
-  async function prewarmLiveTab(tabId, url = null) {
+  async function prewarmLiveTab(tabId, url = null, { migrateVerifiedContextless = false } = {}) {
     if (!isValidRedirectTabId(tabId)) return;
     miniPlayerTabIds.delete(tabId);
     currentTabContextToken(tabId);
@@ -1500,7 +1513,11 @@
     const contextChanged = Boolean(
       nextContext && ((previousContext && previousContext !== nextContext) || hasUnboundState),
     );
-    const hadTarget = contextChanged ? dropTabQualityState(tabId) : false;
+    const hadTarget = contextChanged
+      ? migrateVerifiedContextless && !previousContext && hasUnboundState
+        ? migrateVerifiedContextlessStateToLiveContext(tabId, nextContext)
+        : dropTabQualityState(tabId)
+      : false;
     if (nextContext) liveContextByTab.set(tabId, nextContext);
     const previousSize = activeLiveTabIds.size;
     activeLiveTabIds.add(tabId);
@@ -1618,6 +1635,7 @@
     }
     record.bodyEvidence = "pending";
     record.bodyVerificationFailed = false;
+    record.responseVerifierAttached = false;
     const decoder = new TextDecoder();
     const textChunks = [];
     const maxBytes = probeMaxBytes();
@@ -1669,6 +1687,7 @@
       record.bodyEvidence = "invalid";
       settleRedirectedRequest(record);
     };
+    record.responseVerifierAttached = true;
     return true;
   }
   function attachPendingRedirectBodyVerifier(details) {
@@ -1706,6 +1725,7 @@
       redirectNetworkUrl,
       redirectUrl: responseUrl,
       requestId,
+      responseVerifierAttached: false,
       sequence: nextRedirectVerificationSequence(),
       settled: false,
       statusCode: null,
@@ -1946,7 +1966,10 @@
     const attachedRedirectVerifier = attachPendingRedirectBodyVerifier(details);
     if (!registerRequestContext(details)) return void 0;
     if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
-      if (isChzzkLiveUrl(details.documentUrl, quality_policy_default)) {
+      if (
+        !miniPlayerTabIds.has(details.tabId) &&
+        isChzzkLiveUrl(details.documentUrl, quality_policy_default)
+      ) {
         pendingTrustValidationByTab.delete(details.tabId);
       }
       return handleTrustedPlaylistRequest(details, attachedRedirectVerifier);
@@ -2013,7 +2036,9 @@
   async function prewarmExistingLiveTabs() {
     if (typeof api.tabs?.query !== "function") return;
     const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
-    await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
+    await Promise.all(
+      tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url, { migrateVerifiedContextless: true })),
+    );
   }
   async function refreshAndPrewarmRuntimeState() {
     let prewarmError = null;
@@ -2031,7 +2056,6 @@
   }
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     if (changeInfo?.status === "loading") {
-      miniPlayerTabIds.delete(tabId);
       if (!changeInfo?.url) {
         clearTabQualityState(tabId).catch((error) =>
           console.warn("[CHZZK] failed to clear tab quality state for document load", error),
@@ -2041,6 +2065,7 @@
         );
         return;
       }
+      miniPlayerTabIds.delete(tabId);
       pendingTrustValidationByTab.delete(tabId);
       if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
         clearTabQualityState(tabId).catch((error) =>

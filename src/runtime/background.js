@@ -602,7 +602,10 @@ function targetHasInFlightResponseVerification(state) {
       !record.settled &&
       record.key === state.key &&
       record.targetEpoch === state.targetEpoch &&
-      record.targetQuality === state.targetQuality
+      record.targetQuality === state.targetQuality &&
+      record.responseVerifierAttached === true &&
+      !record.bodyVerificationFailed &&
+      (record.bodyEvidence === "pending" || record.bodyEvidence === "valid")
     ) {
       return true;
     }
@@ -610,17 +613,16 @@ function targetHasInFlightResponseVerification(state) {
   return false;
 }
 
-function targetCanContinueInMiniPlayer(state, now) {
+function targetCanMigrateAcrossContext(state, now) {
   if (!state?.dedicatedHls || !state.resolved) return false;
   if (state.expiresAt != null && state.expiresAt <= now) return false;
-  if (state.contextKey === "trusted-request") return true;
   return (
     (state.validatedNetworkUrls instanceof Map && state.validatedNetworkUrls.size > 0) ||
     targetHasInFlightResponseVerification(state)
   );
 }
 
-function migrateTabQualityStateToMiniPlayer(tabId) {
+function migrateTabQualityState(tabId, destinationContextKey, { sourceContextKey = null } = {}) {
   const now = Date.now();
   const tabTargets = [...activeTargetsBySession.entries()].filter(
     ([, state]) => state.tabId === tabId,
@@ -638,9 +640,14 @@ function migrateTabQualityStateToMiniPlayer(tabId) {
   }
   for (const [oldKey, state] of tabTargets) {
     activeTargetsBySession.delete(oldKey);
-    if (!targetCanContinueInMiniPlayer(state, now)) continue;
-    const key = JSON.stringify([tabId, "trusted-request", state.familyKey]);
-    const target = { ...state, contextKey: "trusted-request", key };
+    if (
+      (sourceContextKey && state.contextKey !== sourceContextKey) ||
+      !targetCanMigrateAcrossContext(state, now)
+    ) {
+      continue;
+    }
+    const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+    const target = { ...state, contextKey: destinationContextKey, key };
     const group = targetGroups.get(key) ?? [];
     group.push({ oldKey, target });
     targetGroups.set(key, group);
@@ -666,6 +673,14 @@ function migrateTabQualityStateToMiniPlayer(tabId) {
   }
   tabContextTokenByTab.set(tabId, {});
   return tabTargets.length > 0;
+}
+
+function migrateTabQualityStateToMiniPlayer(tabId) {
+  return migrateTabQualityState(tabId, "trusted-request");
+}
+
+function migrateVerifiedContextlessStateToLiveContext(tabId, liveContext) {
+  return migrateTabQualityState(tabId, liveContext, { sourceContextKey: "trusted-request" });
 }
 
 function registerRequestContext(details) {
@@ -701,7 +716,11 @@ function registerRequestContext(details) {
   return true;
 }
 
-async function prewarmLiveTab(tabId, url = null) {
+async function prewarmLiveTab(
+  tabId,
+  url = null,
+  { migrateVerifiedContextless = false } = {},
+) {
   if (!isValidRedirectTabId(tabId)) return;
   miniPlayerTabIds.delete(tabId);
   currentTabContextToken(tabId);
@@ -718,7 +737,11 @@ async function prewarmLiveTab(tabId, url = null) {
   const contextChanged = Boolean(
     nextContext && ((previousContext && previousContext !== nextContext) || hasUnboundState),
   );
-  const hadTarget = contextChanged ? dropTabQualityState(tabId) : false;
+  const hadTarget = contextChanged
+    ? migrateVerifiedContextless && !previousContext && hasUnboundState
+      ? migrateVerifiedContextlessStateToLiveContext(tabId, nextContext)
+      : dropTabQualityState(tabId)
+    : false;
   if (nextContext) liveContextByTab.set(tabId, nextContext);
   const previousSize = activeLiveTabIds.size;
   activeLiveTabIds.add(tabId);
@@ -850,6 +873,7 @@ function attachRedirectBodyVerifier(record) {
 
   record.bodyEvidence = "pending";
   record.bodyVerificationFailed = false;
+  record.responseVerifierAttached = false;
   const decoder = new TextDecoder();
   const textChunks = [];
   const maxBytes = probeMaxBytes();
@@ -903,6 +927,7 @@ function attachRedirectBodyVerifier(record) {
     record.bodyEvidence = "invalid";
     settleRedirectedRequest(record);
   };
+  record.responseVerifierAttached = true;
   return true;
 }
 
@@ -947,6 +972,7 @@ function rememberRedirectedRequest(details, session, targetState, responseUrl) {
     redirectNetworkUrl,
     redirectUrl: responseUrl,
     requestId,
+    responseVerifierAttached: false,
     sequence: nextRedirectVerificationSequence(),
     settled: false,
     statusCode: null,
@@ -1211,7 +1237,7 @@ function handleRequest(details) {
   const attachedRedirectVerifier = attachPendingRedirectBodyVerifier(details);
   if (!registerRequestContext(details)) return undefined;
   if (hasTrustedChzzkMetadata(details, policy)) {
-    if (isChzzkLiveUrl(details.documentUrl, policy)) {
+    if (!miniPlayerTabIds.has(details.tabId) && isChzzkLiveUrl(details.documentUrl, policy)) {
       pendingTrustValidationByTab.delete(details.tabId);
     }
     return handleTrustedPlaylistRequest(details, attachedRedirectVerifier);
@@ -1288,7 +1314,11 @@ function liveTabQueryUrls() {
 async function prewarmExistingLiveTabs() {
   if (typeof api.tabs?.query !== "function") return;
   const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
-  await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
+  await Promise.all(
+    tabs.map((tab) =>
+      prewarmLiveTab(tab?.id, tab?.url, { migrateVerifiedContextless: true }),
+    ),
+  );
 }
 
 async function refreshAndPrewarmRuntimeState() {
@@ -1311,7 +1341,6 @@ async function refreshAndPrewarmRuntimeState() {
 
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (changeInfo?.status === "loading") {
-    miniPlayerTabIds.delete(tabId);
     if (!changeInfo?.url) {
       clearTabQualityState(tabId).catch((error) =>
         console.warn("[CHZZK] failed to clear tab quality state for document load", error),
@@ -1321,6 +1350,7 @@ api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
       );
       return;
     }
+    miniPlayerTabIds.delete(tabId);
     pendingTrustValidationByTab.delete(tabId);
     if (isChzzkLiveUrl(changeInfo.url, policy)) {
       clearTabQualityState(tabId).catch((error) =>
