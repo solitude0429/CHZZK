@@ -7,6 +7,7 @@ import {
   cleanReviewCommitMarker,
   evaluateReviewCompletion,
   hasExactHeadReviewerApproval,
+  isCodexReviewCommand,
   isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "./lib/review-gate.js";
@@ -139,16 +140,24 @@ function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLog
   const requests = comments
     .filter(
       (comment) =>
-        String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
-        containsFullSha(comment?.body, headSha),
+        (String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
+          containsFullSha(comment?.body, headSha)) ||
+        isCodexReviewCommand(comment?.body),
     )
-    .map((comment) => ({
-      ...comment,
-      reactions: paginatedArrays(
-        `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
-        "Review-request comment reaction listing",
-      ),
-    }));
+    .map((comment) => {
+      const receivesReactionEvidence =
+        String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
+        containsFullSha(comment?.body, headSha);
+      return {
+        ...comment,
+        reactions: receivesReactionEvidence
+          ? paginatedArrays(
+              `repos/${repository}/issues/comments/${comment.id}/reactions?per_page=100`,
+              "Review-request comment reaction listing",
+            )
+          : [],
+      };
+    });
   const cleanReviewComments = [];
   for (const comment of comments) {
     if (String(comment?.user?.login ?? "").toLowerCase() !== reviewerLogin) continue;

@@ -79,6 +79,15 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
       updated_at: "2026-07-15T10:00:30Z",
       user: { login: "${operatorLogin}", type: "User" },
     },
+    ...(state.interveningReviewRequestActor
+      ? [{
+          body: "@codex review",
+          created_at: "2026-07-15T10:01:00Z",
+          id: 150,
+          updated_at: "2026-07-15T10:01:00Z",
+          user: { login: state.interveningReviewRequestActor, type: "User" },
+        }]
+      : []),
     {
       body: state.prefixedExactHeadCleanFormat
         ? "Untrusted preamble\\n\\n## Review Result\\n\\nNo major issues found in exact head \\\`" +
@@ -110,7 +119,10 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
   }
   pages(comments);
 }
-if (endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100") pages([]);
+if (
+  endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100" ||
+  endpoint === "repos/example/repository/issues/comments/150/reactions?per_page=100"
+) pages([]);
 if (
   endpoint === "repos/example/repository/commits/" + state.headSha.slice(0, 10) ||
   endpoint === "repos/example/repository/commits/" + state.headSha
@@ -213,5 +225,15 @@ describe("review-gate GitHub evidence collection", () => {
     const run = runGate({ prefixedExactHeadCleanFormat: true });
     assert.notEqual(run.result.status, 0);
     assert.match(run.output, /^state=failure$/m);
+  });
+
+  it("rejects a clean reply after another actor intervenes but allows an operator retrigger", () => {
+    const untrusted = runGate({ interveningReviewRequestActor: "untrusted-trigger" });
+    assert.notEqual(untrusted.result.status, 0);
+    assert.match(untrusted.output, /^state=failure$/m);
+
+    const operator = runGate({ interveningReviewRequestActor: operatorLogin });
+    assert.equal(operator.result.status, 0, operator.result.stderr);
+    assert.match(operator.output, /^state=success$/m);
   });
 });

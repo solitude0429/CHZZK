@@ -564,6 +564,66 @@ describe("background runtime quality resolution", () => {
     }
   });
 
+  it("keeps a chunk-write failure invalid when body completion precedes HTTP status", async () => {
+    const family = "write-failure";
+    const requestId = `${family}-first`;
+    const { listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["2160p", "1080p"]),
+    });
+    const request = familyRequest(620, family, requestId);
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, request, first.redirectUrl);
+
+    const filter = responseFilters.get(requestId);
+    const validPrefix = new TextEncoder().encode("#EXTM3U\n#EXT-X-TARGETDURATION:4\n").buffer;
+    filter.ondata({ data: validPrefix });
+    filter.write = () => {
+      throw new Error("synthetic stream write failure");
+    };
+    filter.ondata({ data: new TextEncoder().encode("#EXTINF:4,\nsegment.ts\n").buffer });
+    filter.onstop();
+    listeners.onCompleted({
+      requestId,
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    const second = plain(await listeners.onBeforeRequest(familyRequest(620, family, `${requestId}-retry`)));
+    assert.match(second.redirectUrl, /chunklist_1080p/);
+  });
+
+  it("matches redirected network events after stripping a preserved URL fragment", async () => {
+    const availableQualities = new Set(["2160p"]);
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
+    const family = "fragmented-target";
+    const firstRequest = familyRequest(621, family, `${family}-first`);
+    const first = plain(await listeners.onBeforeRequest(firstRequest));
+    assert.match(first.redirectUrl, /chunklist_2160p\.m3u8\?Policy=synthetic#tail$/);
+    const firstNetworkUrl = first.redirectUrl.split("#", 1)[0];
+    await observeRedirectTarget(listeners, firstRequest, firstNetworkUrl);
+    deliverFilteredResponse(
+      responseFilters,
+      firstRequest.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: firstRequest.requestId,
+      statusCode: 200,
+      url: firstNetworkUrl,
+    });
+
+    availableQualities.clear();
+    availableQualities.add("1080p");
+    const fetchCountAfterWarmup = fetches.length;
+    advanceClock(9_000);
+    const second = plain(await listeners.onBeforeRequest(familyRequest(621, family, `${family}-second`)));
+    assert.match(second.redirectUrl, /chunklist_2160p/);
+    assert.equal(fetches.length, fetchCountAfterWarmup);
+  });
+
   it("renews a validated target when Firefox completes an empty 304 cache revalidation", async () => {
     for (const firstEvent of ["body", "status"]) {
       const availableQualities = new Set(["2160p"]);

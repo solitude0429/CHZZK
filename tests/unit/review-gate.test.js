@@ -325,7 +325,16 @@ describe("exact-head release and security review completion", () => {
               state: "open",
               updated_at: "2026-07-15T10:02:00Z",
             },
-            reviewRequestComments: [reviewRequest()],
+            reviewRequestComments: [
+              reviewRequest(),
+              reviewRequest({
+                body: "@codex review",
+                created_at: "2026-07-15T10:01:00Z",
+                id: 150,
+                reactions: [],
+                updated_at: "2026-07-15T10:01:00Z",
+              }),
+            ],
             reviews: [],
           }),
         ),
@@ -384,6 +393,13 @@ describe("exact-head release and security review completion", () => {
       {
         reviewRequestComments: [
           reviewRequest({
+            updated_at: "2026-07-15T10:01:00Z",
+          }),
+        ],
+      },
+      {
+        reviewRequestComments: [
+          reviewRequest({
             created_at: "2026-07-15T10:02:00Z",
             updated_at: "2026-07-15T10:02:00Z",
           }),
@@ -394,6 +410,48 @@ describe("exact-head release and security review completion", () => {
       assert.throws(
         () => evaluateReviewCompletion(sensitiveEvaluation({ ...base, ...override })),
         /no exact-head|missing|malformed|actor type/i,
+      );
+    }
+  });
+
+  it("rejects a clean reply triggered after an intervening review request from another actor", () => {
+    for (const interveningRequest of [
+      reviewRequest({
+        body: "@codex review",
+        created_at: "2026-07-15T10:01:00Z",
+        id: 150,
+        reactions: [],
+        updated_at: "2026-07-15T10:01:00Z",
+        user: { login: "untrusted-trigger" },
+      }),
+      reviewRequest({
+        body: "@codex review",
+        created_at: "2026-07-15T09:59:00Z",
+        id: 50,
+        reactions: [],
+        updated_at: "2026-07-15T10:01:00Z",
+        user: { login: "untrusted-trigger" },
+      }),
+    ]) {
+      assert.throws(
+        () =>
+          evaluateReviewCompletion(
+            sensitiveEvaluation({
+              automatedReviewApp: reviewerApp,
+              cleanReviewComments: [cleanReviewComment()],
+              latestIssueCommentId: 200,
+              pullRequest: {
+                draft: false,
+                head: { sha: headSha },
+                number: 42,
+                state: "open",
+                updated_at: "2026-07-15T10:02:00Z",
+              },
+              reviewRequestComments: [reviewRequest(), interveningRequest],
+              reviews: [],
+            }),
+          ),
+        /no exact-head|verified exact-head clean comment/i,
       );
     }
   });

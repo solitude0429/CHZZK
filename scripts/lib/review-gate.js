@@ -200,12 +200,12 @@ function fullShaAppearsInComment(body, headSha) {
   return !/[a-f0-9]/.test(before) && !/[a-f0-9]/.test(after);
 }
 
+export function isCodexReviewCommand(body) {
+  return typeof body === "string" && /^\s*@codex\s+review(?:\s|$)/i.test(body);
+}
+
 function isCodexReviewRequest(body, headSha) {
-  return (
-    typeof body === "string" &&
-    /^\s*@codex\s+review(?:\s|$)/i.test(body) &&
-    fullShaAppearsInComment(body, headSha)
-  );
+  return isCodexReviewCommand(body) && fullShaAppearsInComment(body, headSha);
 }
 
 export function cleanReviewCommitMarker(body) {
@@ -340,11 +340,41 @@ function hasBoundCleanReviewComment({
       if (requestUpdatedTimestamp < requestCreatedTimestamp) {
         throw new Error("Review-request comment timestamps are malformed");
       }
+      if (requestUpdatedTimestamp !== requestCreatedTimestamp) continue;
       if (
         requestId < commentId &&
         requestUpdatedTimestamp < createdTimestamp &&
         requestCreatedTimestamp < createdTimestamp
       ) {
+        const hasInterveningForeignRequest = reviewRequestComments.some((intervening) => {
+          if (!isCodexReviewCommand(intervening?.body)) return false;
+          const interveningId = positiveInteger(
+            intervening.id,
+            "Intervening review-request comment identity",
+          );
+          const interveningAuthor = normalizeLogin(
+            intervening?.user?.login,
+            "Intervening review-request comment author identity",
+          );
+          if (interveningAuthor === operatorLogin || interveningId >= commentId) return false;
+          const interveningCreatedTimestamp = timestampMilliseconds(
+            intervening.created_at,
+            "Intervening review-request comment creation timestamp",
+          );
+          const interveningUpdatedTimestamp = timestampMilliseconds(
+            intervening.updated_at,
+            "Intervening review-request comment update timestamp",
+          );
+          if (interveningUpdatedTimestamp < interveningCreatedTimestamp) {
+            throw new Error("Intervening review-request comment timestamps are malformed");
+          }
+          const followsOperatorRequest =
+            interveningId > requestId || interveningUpdatedTimestamp > requestUpdatedTimestamp;
+          const precedesCleanReply =
+            interveningCreatedTimestamp < createdTimestamp && interveningUpdatedTimestamp < createdTimestamp;
+          return followsOperatorRequest && precedesCleanReply;
+        });
+        if (hasInterveningForeignRequest) continue;
         return true;
       }
     }

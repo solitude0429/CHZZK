@@ -25,7 +25,7 @@
       "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
       "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
-      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately and renewal requires both a successful 2xx completion and a bounded streamed body that proves usable HLS evidence, except that an exact-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation; status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
+      "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation; status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
@@ -1075,6 +1075,11 @@
     const qualities = parseQualitiesFromUrl(url);
     return qualities.length > 0 && qualities.every((quality) => quality === expectedQuality);
   }
+  function networkRequestUrl(url) {
+    if (typeof url !== "string" || !url) return null;
+    const fragmentIndex = url.indexOf("#");
+    return fragmentIndex < 0 ? url : url.slice(0, fragmentIndex);
+  }
   async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
     const evidence = await fetchPlaylistEvidence(url, { signal });
     return playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality);
@@ -1515,6 +1520,7 @@
       return;
     }
     record.bodyEvidence = "pending";
+    record.bodyVerificationFailed = false;
     const chunks = [];
     let totalBytes = 0;
     let oversized = false;
@@ -1531,6 +1537,7 @@
           }
         }
       } catch {
+        record.bodyVerificationFailed = true;
         record.bodyEvidence = "invalid";
         settleRedirectedRequest(record);
       }
@@ -1538,7 +1545,7 @@
     filter.onstop = () => {
       try {
         filter.close();
-        if (oversized) {
+        if (record.bodyVerificationFailed || oversized) {
           record.bodyEvidence = "invalid";
         } else if (totalBytes === 0) {
           record.bodyEvidence = "empty";
@@ -1551,7 +1558,7 @@
           }
           const text = new TextDecoder().decode(body);
           record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
-            { finalUrl: record.redirectUrl, text },
+            { finalUrl: record.redirectNetworkUrl, text },
             record.targetQuality,
           )
             ? "valid"
@@ -1563,6 +1570,7 @@
       settleRedirectedRequest(record);
     };
     filter.onerror = () => {
+      record.bodyVerificationFailed = true;
       record.bodyEvidence = "invalid";
       settleRedirectedRequest(record);
     };
@@ -1575,7 +1583,7 @@
       !record ||
       record.settled ||
       record.bodyEvidence !== "unavailable" ||
-      details.url !== record.redirectUrl
+      networkRequestUrl(details.url) !== record.redirectNetworkUrl
     ) {
       return;
     }
@@ -1584,14 +1592,17 @@
   function rememberRedirectedRequest(details, session, targetQuality, redirectUrl) {
     if (details?.requestId == null || !session || !targetQuality || !redirectUrl) return;
     const requestId = String(details.requestId);
-    if (requestId === "" || requestId.length > 128) return;
+    const redirectNetworkUrl = networkRequestUrl(redirectUrl);
+    if (requestId === "" || requestId.length > 128 || !redirectNetworkUrl) return;
     const replacedRecord = redirectedRequestsById.get(requestId);
     if (replacedRecord) replacedRecord.settled = true;
     redirectedRequestsById.delete(requestId);
     const record = {
       ...session,
       bodyEvidence: "unavailable",
+      bodyVerificationFailed: false,
       networkFailed: false,
+      redirectNetworkUrl,
       redirectUrl,
       requestId,
       settled: false,
@@ -1642,7 +1653,7 @@
     if (!record) return;
     const statusCode = Number(details.statusCode);
     record.statusCode = statusCode;
-    if (typeof details.url !== "string" || details.url !== record.redirectUrl) {
+    if (networkRequestUrl(details.url) !== record.redirectNetworkUrl) {
       record.bodyEvidence = "invalid";
     }
     settleRedirectedRequest(record);

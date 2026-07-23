@@ -245,6 +245,12 @@ function urlQualityMarkersMatch(url, expectedQuality) {
   return qualities.length > 0 && qualities.every((quality) => quality === expectedQuality);
 }
 
+function networkRequestUrl(url) {
+  if (typeof url !== "string" || !url) return null;
+  const fragmentIndex = url.indexOf("#");
+  return fragmentIndex < 0 ? url : url.slice(0, fragmentIndex);
+}
+
 async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
   const evidence = await fetchPlaylistEvidence(url, { signal });
   return playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality);
@@ -736,6 +742,7 @@ function attachRedirectBodyVerifier(record) {
   }
 
   record.bodyEvidence = "pending";
+  record.bodyVerificationFailed = false;
   const chunks = [];
   let totalBytes = 0;
   let oversized = false;
@@ -754,6 +761,7 @@ function attachRedirectBodyVerifier(record) {
         }
       }
     } catch {
+      record.bodyVerificationFailed = true;
       record.bodyEvidence = "invalid";
       settleRedirectedRequest(record);
     }
@@ -761,7 +769,7 @@ function attachRedirectBodyVerifier(record) {
   filter.onstop = () => {
     try {
       filter.close();
-      if (oversized) {
+      if (record.bodyVerificationFailed || oversized) {
         record.bodyEvidence = "invalid";
       } else if (totalBytes === 0) {
         record.bodyEvidence = "empty";
@@ -774,7 +782,7 @@ function attachRedirectBodyVerifier(record) {
         }
         const text = new TextDecoder().decode(body);
         record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
-          { finalUrl: record.redirectUrl, text },
+          { finalUrl: record.redirectNetworkUrl, text },
           record.targetQuality,
         )
           ? "valid"
@@ -786,6 +794,7 @@ function attachRedirectBodyVerifier(record) {
     settleRedirectedRequest(record);
   };
   filter.onerror = () => {
+    record.bodyVerificationFailed = true;
     record.bodyEvidence = "invalid";
     settleRedirectedRequest(record);
   };
@@ -799,7 +808,7 @@ function attachPendingRedirectBodyVerifier(details) {
     !record ||
     record.settled ||
     record.bodyEvidence !== "unavailable" ||
-    details.url !== record.redirectUrl
+    networkRequestUrl(details.url) !== record.redirectNetworkUrl
   ) {
     return;
   }
@@ -809,14 +818,17 @@ function attachPendingRedirectBodyVerifier(details) {
 function rememberRedirectedRequest(details, session, targetQuality, redirectUrl) {
   if (details?.requestId == null || !session || !targetQuality || !redirectUrl) return;
   const requestId = String(details.requestId);
-  if (requestId === "" || requestId.length > 128) return;
+  const redirectNetworkUrl = networkRequestUrl(redirectUrl);
+  if (requestId === "" || requestId.length > 128 || !redirectNetworkUrl) return;
   const replacedRecord = redirectedRequestsById.get(requestId);
   if (replacedRecord) replacedRecord.settled = true;
   redirectedRequestsById.delete(requestId);
   const record = {
     ...session,
     bodyEvidence: "unavailable",
+    bodyVerificationFailed: false,
     networkFailed: false,
+    redirectNetworkUrl,
     redirectUrl,
     requestId,
     settled: false,
@@ -870,7 +882,7 @@ function handleRedirectCompleted(details) {
   if (!record) return;
   const statusCode = Number(details.statusCode);
   record.statusCode = statusCode;
-  if (typeof details.url !== "string" || details.url !== record.redirectUrl) {
+  if (networkRequestUrl(details.url) !== record.redirectNetworkUrl) {
     record.bodyEvidence = "invalid";
   }
   settleRedirectedRequest(record);
