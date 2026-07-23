@@ -499,6 +499,16 @@ function invalidateSessionResolution(sessionKey) {
   resolutionBySession.delete(sessionKey);
 }
 
+function sessionFromResolutionState(state) {
+  return {
+    contextKey: state.contextKey,
+    dedicatedHls: state.dedicatedHls,
+    familyKey: state.familyKey,
+    key: state.key,
+    tabId: state.tabId,
+  };
+}
+
 function startSessionResolution(details, resolver, resolverKind) {
   const session = playlistSession(details);
   if (!session) return Promise.resolve(null);
@@ -518,12 +528,16 @@ function startSessionResolution(details, resolver, resolverKind) {
     .then(() =>
       resolver({
         signal: controller.signal,
-        skipTargetQualities: failedTargetsForSession(session),
+        skipTargetQualities: failedTargetsForSession(sessionFromResolutionState(state)),
       }),
     )
     .then(async (resolution) => {
       if (!resolution?.targetQuality || !resolutionIsCurrent(state)) return null;
-      const stored = await setSessionTarget(session, resolution, token);
+      const stored = await setSessionTarget(
+        sessionFromResolutionState(state),
+        resolution,
+        state.token,
+      );
       return stored ? resolution.targetQuality : null;
     })
     .catch((error) => {
@@ -532,7 +546,7 @@ function startSessionResolution(details, resolver, resolverKind) {
     })
     .finally(() => {
       clearTimeout(resolutionTimeout);
-      if (resolutionBySession.get(session.key) === state) resolutionBySession.delete(session.key);
+      if (resolutionBySession.get(state.key) === state) resolutionBySession.delete(state.key);
     });
   resolutionBySession.set(session.key, state);
   return state.promise;
@@ -622,18 +636,50 @@ function targetCanMigrateAcrossContext(state, now) {
   );
 }
 
-function migrateTabQualityState(tabId, destinationContextKey, { sourceContextKey = null } = {}) {
+function migrateTabQualityState(
+  tabId,
+  destinationContextKey,
+  { migratePendingResolutions = false, sourceContextKey = null } = {},
+) {
   const now = Date.now();
+  const transitionToken = {};
+  const tabResolutions = [...resolutionBySession.entries()].filter(
+    ([, state]) => state.tabId === tabId,
+  );
   const tabTargets = [...activeTargetsBySession.entries()].filter(
     ([, state]) => state.tabId === tabId,
   );
+  const resolutionGroups = new Map();
   const targetGroups = new Map();
   const preservedTargetByOldKey = new Map();
 
-  for (const [key, state] of resolutionBySession) {
-    if (state.tabId !== tabId) continue;
-    state.controller.abort();
-    resolutionBySession.delete(key);
+  for (const [oldKey, state] of tabResolutions) {
+    resolutionBySession.delete(oldKey);
+    if (
+      !migratePendingResolutions ||
+      !state.dedicatedHls ||
+      state.controller.signal.aborted ||
+      (sourceContextKey && state.contextKey !== sourceContextKey)
+    ) {
+      state.controller.abort();
+      continue;
+    }
+    const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+    const group = resolutionGroups.get(key) ?? [];
+    group.push({ key, state });
+    resolutionGroups.set(key, group);
+  }
+  for (const group of resolutionGroups.values()) {
+    // Never guess between multiple source contexts for one destination family.
+    if (group.length !== 1) {
+      for (const { state } of group) state.controller.abort();
+      continue;
+    }
+    const [{ key, state }] = group;
+    state.contextKey = destinationContextKey;
+    state.key = key;
+    state.token = transitionToken;
+    resolutionBySession.set(key, state);
   }
   for (const [key, state] of failedTargetsBySession) {
     if (state.tabId === tabId) failedTargetsBySession.delete(key);
@@ -671,12 +717,15 @@ function migrateTabQualityState(tabId, destinationContextKey, { sourceContextKey
     record.settled = true;
     redirectedRequestsById.delete(requestId);
   }
-  tabContextTokenByTab.set(tabId, {});
+  tabContextTokenByTab.set(tabId, transitionToken);
   return tabTargets.length > 0;
 }
 
 function migrateTabQualityStateToMiniPlayer(tabId) {
-  return migrateTabQualityState(tabId, "trusted-request");
+  return migrateTabQualityState(tabId, "trusted-request", {
+    migratePendingResolutions: true,
+    sourceContextKey: liveContextByTab.get(tabId) ?? "trusted-request",
+  });
 }
 
 function migrateVerifiedContextlessStateToLiveContext(tabId, liveContext) {
@@ -1308,7 +1357,7 @@ api.webRequest.onCompleted?.addListener(handleRedirectCompleted, WEB_REQUEST_FIL
 api.webRequest.onErrorOccurred?.addListener(handleRedirectError, WEB_REQUEST_FILTER);
 
 async function prewarmMessageTab(tabId) {
-  await prewarmCurrentLiveTab(tabId);
+  await prewarmCurrentLiveTab(tabId, { migrateVerifiedContextless: true });
 }
 
 api.runtime.onMessage?.addListener((message, sender) => {

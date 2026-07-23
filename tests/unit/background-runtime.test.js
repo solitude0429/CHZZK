@@ -915,32 +915,168 @@ describe("background runtime quality resolution", () => {
     );
   });
 
-  it("aborts unresolved mini-player probes across same-site SPA route changes", async () => {
+  it("continues an unresolved dedicated probe across a live-to-mini-player transition", async () => {
     const pendingProbe = deferred();
     const tabId = 627;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=channel-b";
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async (url) => {
+        if (url.includes("1440p")) return pendingProbe.promise;
+        if (url.includes("1080p")) return playlistResponse(url);
+        return {
+          headers: { get: () => null },
+          ok: false,
+          status: 404,
+          text: async () => "not found",
+          url,
+        };
+      },
+    });
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "pending-live-probe",
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
+    assert.deepEqual(
+      fetches.map((url) => url.match(/chunklist_(\d+p)/)?.[1]),
+      ["2160p", "1440p"],
+      "the blocking deadline must expire while the original candidate scan remains in flight",
+    );
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    pendingProbe.resolve({
+      headers: { get: () => null },
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+      url: fetches[1],
+    });
+    await waitForDiagnosticsQueue();
+
+    const nextDecision = listeners.onBeforeRequest({
+      ...request,
+      // Firefox can retain the live document URL after the same-document
+      // transition even though tabs.onUpdated reported the mini-player route.
+      requestId: "pending-mini-player-probe",
+    });
+    assert.equal(
+      typeof nextDecision?.then,
+      "undefined",
+      "the completed live probe must already be cached for the mini-player request",
+    );
+    assert.match(plain(nextDecision).redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length, 3, "the live-to-mini transition must not restart the candidate scan");
+  });
+
+  it("continues one unresolved dedicated probe across repeated mini-player SPA routes", async () => {
+    const pendingProbe = deferred();
+    const tabId = 641;
     const firstRoute = "https://chzzk.naver.com/lives?keyword=channel-a";
     const nextRoute = "https://chzzk.naver.com/lives?keyword=channel-b";
-    const { fetches, listeners, storage } = await loadBackground({
-      fetchImplementation: async () => pendingProbe.promise,
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async (url) =>
+        fetches.length === 1 ? pendingProbe.promise : playlistResponse(url),
     });
     const request = {
       ...firstLowQualityRequest(tabId),
       documentUrl: firstRoute,
-      requestId: "pending-spa-probe",
+      requestId: "pending-first-mini-route",
     };
 
-    const firstDecision = listeners.onBeforeRequest(request);
-    await waitForDiagnosticsQueue(10);
+    listeners.onUpdated(tabId, { url: firstRoute });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
     assert.equal(fetches.length, 1);
+
     listeners.onUpdated(tabId, { url: nextRoute });
     pendingProbe.resolve(playlistResponse(fetches[0]));
-    assert.equal(await firstDecision, undefined);
     await waitForDiagnosticsQueue();
-    assert.deepEqual(
-      plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab),
-      {},
-      "an unresolved probe from the old SPA route must not install a target afterward",
+
+    const nextDecision = listeners.onBeforeRequest({
+      ...request,
+      documentUrl: nextRoute,
+      requestId: "pending-next-mini-route",
+    });
+    assert.equal(typeof nextDecision?.then, "undefined");
+    assert.match(plain(nextDecision).redirectUrl, /chunklist_2160p/);
+    assert.equal(fetches.length, 1, "a second mini-player route must share the original scan");
+  });
+
+  it("still aborts an unresolved generic-CDN probe at the mini-player boundary", async () => {
+    const pendingProbe = deferred();
+    const tabId = 642;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=channel-b";
+    const { fetchOptions, fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async () => pendingProbe.promise,
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "pending-generic", "pending-generic-live"),
+        documentUrl: liveUrl,
+      }),
+      undefined,
     );
+    assert.equal(fetches.length, 1);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      fetchOptions[0].signal.aborted,
+      true,
+      "only dedicated CHZZK livecloud work may cross into mini-player mode",
+    );
+    pendingProbe.resolve(playlistResponse(fetches[0]));
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+  });
+
+  it("aborts unresolved dedicated probes on full document loads and foreign navigation", async () => {
+    const transitions = [
+      {
+        changeInfo: {
+          status: "loading",
+          url: "https://chzzk.naver.com/lives?keyword=full-load",
+        },
+        label: "full document load",
+      },
+      {
+        changeInfo: { url: "https://unrelated.example/watch" },
+        label: "foreign navigation",
+      },
+    ];
+
+    for (const [index, { changeInfo, label }] of transitions.entries()) {
+      const pendingProbe = deferred();
+      const tabId = 643 + index;
+      const liveUrl = "https://chzzk.naver.com/live/example-channel";
+      const { fetchOptions, fetches, listeners, storage } = await loadBackground({
+        fetchImplementation: async () => pendingProbe.promise,
+      });
+
+      listeners.onUpdated(tabId, { url: liveUrl });
+      assert.equal(
+        await listeners.onBeforeRequest({
+          ...firstLowQualityRequest(tabId),
+          documentUrl: liveUrl,
+          requestId: `pending-dedicated-${index}`,
+        }),
+        undefined,
+      );
+      listeners.onUpdated(tabId, changeInfo);
+      assert.equal(fetchOptions[0].signal.aborted, true, `${label} must abort the old scan`);
+      pendingProbe.resolve(playlistResponse(fetches[0]));
+      await waitForDiagnosticsQueue();
+      assert.deepEqual(
+        plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab),
+        {},
+        `${label} must prevent a late target from being restored`,
+      );
+    }
   });
 
   it("invalidates mini-player targets on full same-site document loads", async () => {
@@ -1642,6 +1778,56 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
       undefined,
       "a delayed live snapshot must not remove the dedicated-host mini-player boundary",
     );
+  });
+
+  it("migrates verified contextless state established during content-message tab validation", async () => {
+    const tabId = 517;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const pendingTab = deferred();
+    const { fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+      requestId: "message-contextless-first",
+    };
+
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: tabId } });
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_1080p/);
+    await observeRedirectTarget(listeners, request, first.redirectUrl);
+    deliverFilteredResponse(
+      responseFilters,
+      request.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: request.requestId,
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+    const fetchCountBeforeValidation = fetches.length;
+
+    pendingTab.resolve({ id: tabId, url: liveUrl });
+    await waitForDiagnosticsQueue();
+    const cached = listeners.onBeforeRequest({
+      ...request,
+      documentUrl: liveUrl,
+      initiator: "https://chzzk.naver.com",
+      requestId: "message-contextless-cached",
+    });
+
+    assert.equal(
+      typeof cached?.then,
+      "undefined",
+      "message prewarm must migrate verified contextless state instead of probing again",
+    );
+    assert.match(plain(cached).redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length, fetchCountBeforeValidation);
   });
 
   it("evicts stale tab trust when explicit request metadata proves a non-CHZZK document", async () => {
