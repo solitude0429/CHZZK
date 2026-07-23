@@ -217,7 +217,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       const response = await fetch(mediaUrl);
       finalStatus = response.status;
       finalBody = await response.text();
-      if (location.pathname === "/lives" && index < 3) {
+      if (location.pathname === "/live/test" && index === 0) {
+        history.pushState({}, "", "/lives?keyword=another-channel-live-to-mini");
+      } else if (location.pathname === "/lives" && index < 3) {
         history.pushState({}, "", "/lives?keyword=another-channel-" + (index + 1));
       }
       if (index < 3) await new Promise((resolve) => setTimeout(resolve, 700));
@@ -508,6 +510,7 @@ async function main() {
     assert.equal(before?.version, "0.1.3");
     assert.match(before?.baseUrl ?? "", /^moz-extension:\/\//);
 
+    const requestCountBeforePlayback = requests.length;
     await driver.setContext("content");
     await driver.command("POST", "/url", { url: `https://www.chzzk.naver.com:${state.port}/live/test` });
     const playbackResult = await poll(
@@ -544,6 +547,18 @@ async function main() {
       "?Policy=synthetic&next=%2F480p%2F",
       "runtime redirect must preserve the signed query byte-for-byte",
     );
+    const liveToMiniRequests = requests.slice(requestCountBeforePlayback);
+    for (const unavailableQuality of ["2160p", "1440p"]) {
+      assert.equal(
+        liveToMiniRequests.filter(
+          (request) =>
+            request.host === "nvelop-livecloud.pstatic.net" &&
+            request.path.includes(`/${unavailableQuality}/`),
+        ).length,
+        1,
+        `live-to-mini transition re-probed ${unavailableQuality} after the target was verified`,
+      );
+    }
 
     const updateResult = await triggerAddonUpdate(driver);
     if (updateResult?.status !== "installed" || updateResult?.version !== "0.1.4") {
@@ -633,6 +648,7 @@ async function main() {
         hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,
+        liveToMiniTransition: "pushState",
         miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
         miniPlayerRouteChanges: 3,

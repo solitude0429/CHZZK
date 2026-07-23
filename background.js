@@ -21,17 +21,17 @@
     notes: [
       "Firefox MV2 declares the CHZZK origin and trusted HLS CDN origins as required permissions so webRequest can observe dedicated livecloud playlists initiated by the site's same-origin small-player pages instead of exposing core access as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
-      "The persistent background page uses blocking webRequest, but tab-trust validation and unresolved candidate search share one request-level blockingProbeBudgetMs deadline before failing open while one shared per-tab/live-context/playlist-family resolution continues in the background.",
+      "The persistent background page limits blocking webRequest URL filters to case-complete .m3u8 path patterns so media segments bypass extension code; cached playlist redirects return synchronously, while tab-trust validation and unresolved candidate search share one request-level blockingProbeBudgetMs deadline before failing open as one shared per-tab/live-context/playlist-family resolution continues in the background.",
       "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
-      "Numeric quality replacement changes safe pathname markers only, preserves the observed 360p-directory/chunklist_480p legacy shape, rejects other marker contradictions, and preserves signed query strings and fragments byte-for-byte.",
+      "Numeric quality replacement and response renewal use one safe pathname-marker grammar: they preserve the observed 360p-directory/chunklist_480p legacy shape, reject other marker contradictions, and preserve signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
       "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation; status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
-      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. URL-only same-site list/search SPA route changes preserve only verified contextless dedicated-host targets and in-flight response verification; unresolved candidate probes are aborted, while full document loads, live-page state, and all foreign-navigation state are invalidated. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
-      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
+      "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. A URL-only live-to-list/search or later mini-player SPA transition re-keys a verified dedicated-host target, one whose response verifier actually attached and remains pending/valid, or the single unambiguous still-running dedicated-host candidate scan per playlist family under the new context token; unattached/failed verification, generic-CDN work, aborted work, and conflicting source contexts are discarded. Firefox's stale original live documentUrl cannot re-adopt the old context or authorize a generic CDN, including during URL-less reload validation. Full document loads, new live-page state, foreign navigation, and tab close invalidate the target and pending work. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
+      "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup and content-message prewarming re-read the current tab under an unchanged per-tab transition token before migrating reusable verified contextless target/response state into an authoritatively confirmed live context, so delayed snapshots cannot erase a target established by an earlier playlist request or overwrite newer mini-player/navigation state. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
       "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
-      "Same-URL reload clears quality state separately from authoritatively validated tab trust; navigation and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target.",
+      "Same-URL reload clears quality state separately from authoritatively validated tab trust; full document loads, new live contexts, foreign navigation, and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target, while bounded same-document mini-player transitions may re-key only eligible dedicated-host work under a fresh token.",
       "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports.",
     ],
   };
@@ -617,6 +617,7 @@
   // src/shared/request-policy.js
   var DEFAULT_RESOURCE_TYPES = ["media", "other", "xmlhttprequest"];
   var DEFAULT_REQUEST_METHODS = ["get"];
+  var HLS_PLAYLIST_EXTENSION_CASE_VARIANTS = ["M3U8", "M3u8", "m3U8", "m3u8"];
   function asArray(value) {
     return Array.isArray(value) ? value : [];
   }
@@ -782,8 +783,9 @@
       veto: false,
     };
   }
-  function contextRequiresDedicatedHls(evidence, tabId, trustedLiveTabIds) {
+  function contextRequiresDedicatedHls(evidence, tabId, trustedLiveTabIds, miniPlayerTabIds2) {
     return (
+      miniPlayerTabIds2?.has?.(tabId) ||
       evidence.requiresDedicatedHls ||
       (evidence.genericHlsRequiresLiveTab && !trustedLiveTabIds?.has?.(tabId))
     );
@@ -795,11 +797,15 @@
     const evidence = requestContextEvidence(details, policy);
     return evidence.trusted && !evidence.veto;
   }
-  function isTrustedChzzkContext(details, policy, { trustedLiveTabIds = null } = {}) {
+  function isTrustedChzzkContext(
+    details,
+    policy,
+    { miniPlayerTabIds: miniPlayerTabIds2 = null, trustedLiveTabIds = null } = {},
+  ) {
     if (!details || !isValidRedirectTabId(details.tabId)) return false;
     const evidence = requestContextEvidence(details, policy);
     if (evidence.veto) return false;
-    if (contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)) {
+    if (contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds, miniPlayerTabIds2)) {
       return isDedicatedChzzkHlsUrl(details.url, policy);
     }
     if (evidence.trusted) return isNumericHlsPlaylistUrl(details.url);
@@ -807,7 +813,11 @@
     if (trustedLiveTabIds?.has?.(details.tabId)) return true;
     return isDedicatedChzzkHlsUrl(details.url, policy);
   }
-  function isTrustedMasterPlaylistRequest(details, policy, { trustedLiveTabIds = null } = {}) {
+  function isTrustedMasterPlaylistRequest(
+    details,
+    policy,
+    { miniPlayerTabIds: miniPlayerTabIds2 = null, trustedLiveTabIds = null } = {},
+  ) {
     if (!details || !isValidRedirectTabId(details.tabId) || !isHttpsUrl(details.url)) return false;
     if (!isHlsPlaylistUrl(details.url) || parseQualityFromUrl(details.url)) return false;
     if (details.type && !resourceTypes(policy).includes(details.type)) return false;
@@ -817,7 +827,7 @@
     const evidence = requestContextEvidence(details, policy);
     if (evidence.veto) return false;
     if (evidence.trusted) {
-      return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds)
+      return contextRequiresDedicatedHls(evidence, details.tabId, trustedLiveTabIds, miniPlayerTabIds2)
         ? isDedicatedChzzkHlsPlaylistUrl(details.url, policy)
         : true;
     }
@@ -871,16 +881,15 @@
     }
     return { ok: true, quality, reason: "eligible-chzzk-hls-quality", tabId };
   }
-  function configuredRequiredOrigins(policy) {
-    return trustedRequestDomains(policy)
-      .map((domain) => `https://*.${domain}/*`)
-      .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
-  }
   function displayPermissionKey(permission) {
     return permission.replace(/^https:\/\/\*\./, "").replace(/^https:\/\//, "");
   }
   function configuredWebRequestUrls(policy) {
-    return configuredRequiredOrigins(policy);
+    return trustedRequestDomains(policy)
+      .flatMap((domain) =>
+        HLS_PLAYLIST_EXTENSION_CASE_VARIANTS.map((extension) => `https://*.${domain}/*.${extension}*`),
+      )
+      .sort((left, right) => displayPermissionKey(left).localeCompare(displayPermissionKey(right), "en"));
   }
   function configuredResourceTypes(policy) {
     return resourceTypes(policy);
@@ -894,6 +903,7 @@
   var activeTargetsBySession = /* @__PURE__ */ new Map();
   var failedTargetsBySession = /* @__PURE__ */ new Map();
   var liveContextByTab = /* @__PURE__ */ new Map();
+  var miniPlayerTabIds = /* @__PURE__ */ new Set();
   var pendingTrustValidationByTab = /* @__PURE__ */ new Map();
   var redirectedRequestsById = /* @__PURE__ */ new Map();
   var resolutionBySession = /* @__PURE__ */ new Map();
@@ -1097,7 +1107,9 @@
   }
   function urlQualityMarkersMatch(url, expectedQuality) {
     const qualities = parseQualitiesFromUrl(url);
-    return qualities.length > 0 && qualities.every((quality) => quality === expectedQuality);
+    return (
+      qualities.length > 0 && urlQualityMarkersAreSafe(url) && parseQualityFromUrl(url) === expectedQuality
+    );
   }
   function networkRequestUrl(url) {
     if (typeof url !== "string" || !url) return null;
@@ -1204,6 +1216,7 @@
     return tabContextTokenByTab.get(tabId);
   }
   function resolutionContextKey(details) {
+    if (miniPlayerTabIds.has(details.tabId)) return "trusted-request";
     return (
       liveContextByTab.get(details.tabId) ??
       liveContextKey(details.documentUrl) ??
@@ -1218,6 +1231,7 @@
     const tabId = details.tabId;
     return {
       contextKey,
+      dedicatedHls: isDedicatedChzzkHlsPlaylistUrl(details.url, quality_policy_default),
       familyKey,
       key: JSON.stringify([tabId, contextKey, familyKey]),
       tabId,
@@ -1287,6 +1301,15 @@
     activeResolution?.controller.abort();
     resolutionBySession.delete(sessionKey);
   }
+  function sessionFromResolutionState(state) {
+    return {
+      contextKey: state.contextKey,
+      dedicatedHls: state.dedicatedHls,
+      familyKey: state.familyKey,
+      key: state.key,
+      tabId: state.tabId,
+    };
+  }
   function startSessionResolution(details, resolver, resolverKind) {
     const session = playlistSession(details);
     if (!session) return Promise.resolve(null);
@@ -1305,12 +1328,12 @@
       .then(() =>
         resolver({
           signal: controller.signal,
-          skipTargetQualities: failedTargetsForSession(session),
+          skipTargetQualities: failedTargetsForSession(sessionFromResolutionState(state)),
         }),
       )
       .then(async (resolution) => {
         if (!resolution?.targetQuality || !resolutionIsCurrent(state)) return null;
-        const stored = await setSessionTarget(session, resolution, token);
+        const stored = await setSessionTarget(sessionFromResolutionState(state), resolution, state.token);
         return stored ? resolution.targetQuality : null;
       })
       .catch((error) => {
@@ -1319,7 +1342,7 @@
       })
       .finally(() => {
         clearTimeout(resolutionTimeout);
-        if (resolutionBySession.get(session.key) === state) resolutionBySession.delete(session.key);
+        if (resolutionBySession.get(state.key) === state) resolutionBySession.delete(state.key);
       });
     resolutionBySession.set(session.key, state);
     return state.promise;
@@ -1349,9 +1372,7 @@
       [...resolutionBySession.values()].some((state) => state.tabId === tabId)
     );
   }
-  function dropTabQualityState(tabId, { dropToken = false, preserveVerifiedTrustedRequest = false } = {}) {
-    const shouldPreserveVerified = (state) =>
-      preserveVerifiedTrustedRequest && state.contextKey === "trusted-request";
+  function dropTabQualityState(tabId, { dropToken = false } = {}) {
     let hadTarget = false;
     for (const [key, state] of resolutionBySession) {
       if (state.tabId !== tabId) continue;
@@ -1359,7 +1380,7 @@
       resolutionBySession.delete(key);
     }
     for (const [key, state] of activeTargetsBySession) {
-      if (state.tabId !== tabId || shouldPreserveVerified(state)) continue;
+      if (state.tabId !== tabId) continue;
       hadTarget = true;
       activeTargetsBySession.delete(key);
     }
@@ -1367,7 +1388,7 @@
       if (state.tabId === tabId) failedTargetsBySession.delete(key);
     }
     for (const [requestId, state] of redirectedRequestsById) {
-      if (state.tabId === tabId && !shouldPreserveVerified(state)) {
+      if (state.tabId === tabId) {
         state.settled = true;
         redirectedRequestsById.delete(requestId);
       }
@@ -1379,6 +1400,115 @@
     }
     return hadTarget;
   }
+  function targetHasInFlightResponseVerification(state) {
+    for (const record of redirectedRequestsById.values()) {
+      if (
+        !record.settled &&
+        record.key === state.key &&
+        record.targetEpoch === state.targetEpoch &&
+        record.targetQuality === state.targetQuality &&
+        record.responseVerifierAttached === true &&
+        !record.bodyVerificationFailed &&
+        (record.bodyEvidence === "pending" || record.bodyEvidence === "valid")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+  function targetCanMigrateAcrossContext(state, now) {
+    if (!state?.dedicatedHls || !state.resolved) return false;
+    if (state.expiresAt != null && state.expiresAt <= now) return false;
+    return (
+      (state.validatedNetworkUrls instanceof Map && state.validatedNetworkUrls.size > 0) ||
+      targetHasInFlightResponseVerification(state)
+    );
+  }
+  function migrateTabQualityState(
+    tabId,
+    destinationContextKey,
+    { migratePendingResolutions = false, sourceContextKey = null } = {},
+  ) {
+    const now = Date.now();
+    const transitionToken = {};
+    const tabResolutions = [...resolutionBySession.entries()].filter(([, state]) => state.tabId === tabId);
+    const tabTargets = [...activeTargetsBySession.entries()].filter(([, state]) => state.tabId === tabId);
+    const resolutionGroups = /* @__PURE__ */ new Map();
+    const targetGroups = /* @__PURE__ */ new Map();
+    const preservedTargetByOldKey = /* @__PURE__ */ new Map();
+    for (const [oldKey, state] of tabResolutions) {
+      resolutionBySession.delete(oldKey);
+      if (
+        !migratePendingResolutions ||
+        !state.dedicatedHls ||
+        state.controller.signal.aborted ||
+        (sourceContextKey && state.contextKey !== sourceContextKey)
+      ) {
+        state.controller.abort();
+        continue;
+      }
+      const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+      const group = resolutionGroups.get(key) ?? [];
+      group.push({ key, state });
+      resolutionGroups.set(key, group);
+    }
+    for (const group of resolutionGroups.values()) {
+      if (group.length !== 1) {
+        for (const { state: state2 } of group) state2.controller.abort();
+        continue;
+      }
+      const [{ key, state }] = group;
+      state.contextKey = destinationContextKey;
+      state.key = key;
+      state.token = transitionToken;
+      resolutionBySession.set(key, state);
+    }
+    for (const [key, state] of failedTargetsBySession) {
+      if (state.tabId === tabId) failedTargetsBySession.delete(key);
+    }
+    for (const [oldKey, state] of tabTargets) {
+      activeTargetsBySession.delete(oldKey);
+      if (
+        (sourceContextKey && state.contextKey !== sourceContextKey) ||
+        !targetCanMigrateAcrossContext(state, now)
+      ) {
+        continue;
+      }
+      const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+      const target = { ...state, contextKey: destinationContextKey, key };
+      const group = targetGroups.get(key) ?? [];
+      group.push({ oldKey, target });
+      targetGroups.set(key, group);
+    }
+    for (const group of targetGroups.values()) {
+      if (group.length !== 1) continue;
+      const [{ oldKey, target }] = group;
+      activeTargetsBySession.set(target.key, target);
+      preservedTargetByOldKey.set(oldKey, target);
+    }
+    for (const [requestId, record] of redirectedRequestsById) {
+      if (record.tabId !== tabId) continue;
+      const target = preservedTargetByOldKey.get(record.key);
+      if (target?.targetEpoch === record.targetEpoch && target.targetQuality === record.targetQuality) {
+        record.contextKey = target.contextKey;
+        record.key = target.key;
+        continue;
+      }
+      record.settled = true;
+      redirectedRequestsById.delete(requestId);
+    }
+    tabContextTokenByTab.set(tabId, transitionToken);
+    return tabTargets.length > 0;
+  }
+  function migrateTabQualityStateToMiniPlayer(tabId) {
+    return migrateTabQualityState(tabId, "trusted-request", {
+      migratePendingResolutions: true,
+      sourceContextKey: liveContextByTab.get(tabId) ?? "trusted-request",
+    });
+  }
+  function migrateVerifiedContextlessStateToLiveContext(tabId, liveContext) {
+    return migrateTabQualityState(tabId, liveContext, { sourceContextKey: "trusted-request" });
+  }
   function registerRequestContext(details) {
     const tabId = details?.tabId;
     if (!isValidRedirectTabId(tabId)) return false;
@@ -1388,7 +1518,7 @@
       );
       return false;
     }
-    const requestContext = requestLiveContext(details);
+    const requestContext = miniPlayerTabIds.has(tabId) ? null : requestLiveContext(details);
     if (!requestContext) return true;
     const knownContext = liveContextByTab.get(tabId);
     if (knownContext && knownContext !== requestContext) {
@@ -1407,8 +1537,9 @@
     }
     return true;
   }
-  async function prewarmLiveTab(tabId, url = null) {
+  async function prewarmLiveTab(tabId, url = null, { migrateVerifiedContextless = false } = {}) {
     if (!isValidRedirectTabId(tabId)) return;
+    miniPlayerTabIds.delete(tabId);
     currentTabContextToken(tabId);
     const nextContext = liveContextKey(url);
     const previousContext = liveContextByTab.get(tabId);
@@ -1423,11 +1554,32 @@
     const contextChanged = Boolean(
       nextContext && ((previousContext && previousContext !== nextContext) || hasUnboundState),
     );
-    const hadTarget = contextChanged ? dropTabQualityState(tabId) : false;
+    const hadTarget = contextChanged
+      ? migrateVerifiedContextless && !previousContext && hasUnboundState
+        ? migrateVerifiedContextlessStateToLiveContext(tabId, nextContext)
+        : dropTabQualityState(tabId)
+      : false;
     if (nextContext) liveContextByTab.set(tabId, nextContext);
     const previousSize = activeLiveTabIds.size;
     activeLiveTabIds.add(tabId);
     if (hadTarget || activeLiveTabIds.size !== previousSize) await updateRedirectDiagnostics();
+  }
+  async function prewarmCurrentLiveTab(tabId, { migrateVerifiedContextless = false } = {}) {
+    if (!isValidRedirectTabId(tabId) || miniPlayerTabIds.has(tabId) || typeof api.tabs?.get !== "function") {
+      return;
+    }
+    const transitionToken = currentTabContextToken(tabId);
+    const currentTab = await api.tabs.get(tabId);
+    if (
+      currentTab?.id !== tabId ||
+      tabContextTokenByTab.get(tabId) !== transitionToken ||
+      miniPlayerTabIds.has(tabId) ||
+      !isChzzkLiveUrl(currentTab.url, quality_policy_default)
+    ) {
+      return;
+    }
+    pendingTrustValidationByTab.delete(tabId);
+    await prewarmLiveTab(tabId, currentTab.url, { migrateVerifiedContextless });
   }
   async function clearTabQualityState(tabId) {
     if (!isValidRedirectTabId(tabId)) return;
@@ -1439,27 +1591,18 @@
     const hadTarget = dropTabQualityState(tabId, { dropToken: true });
     const hadLiveTab = activeLiveTabIds.delete(tabId);
     const hadContext = liveContextByTab.delete(tabId);
-    if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
+    const hadMiniPlayer = miniPlayerTabIds.delete(tabId);
+    if (hadTarget || hadLiveTab || hadContext || hadMiniPlayer) await updateRedirectDiagnostics();
   }
   async function preserveSameSiteMiniPlayerState(tabId) {
     if (!isValidRedirectTabId(tabId)) return;
     pendingTrustValidationByTab.delete(tabId);
-    const hadTarget = dropTabQualityState(tabId, { preserveVerifiedTrustedRequest: true });
+    const hadTarget = migrateTabQualityStateToMiniPlayer(tabId);
     const hadLiveTab = activeLiveTabIds.delete(tabId);
     const hadContext = liveContextByTab.delete(tabId);
-    if (hadTarget || hadLiveTab || hadContext) await updateRedirectDiagnostics();
-  }
-  async function clearRuntimeRedirectState() {
-    for (const state of resolutionBySession.values()) state.controller.abort();
-    activeLiveTabIds.clear();
-    activeTargetsBySession.clear();
-    failedTargetsBySession.clear();
-    liveContextByTab.clear();
-    pendingTrustValidationByTab.clear();
-    redirectedRequestsById.clear();
-    resolutionBySession.clear();
-    tabContextTokenByTab.clear();
-    await updateRedirectDiagnostics();
+    const addedMiniPlayer = !miniPlayerTabIds.has(tabId);
+    miniPlayerTabIds.add(tabId);
+    if (hadTarget || hadLiveTab || hadContext || addedMiniPlayer) await updateRedirectDiagnostics();
   }
   function startReloadTrustValidation(tabId) {
     if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return null;
@@ -1492,11 +1635,6 @@
         }
       });
     return validation.promise;
-  }
-  async function awaitPendingTrustValidation(tabId, budget) {
-    const validation = pendingTrustValidationByTab.get(tabId);
-    if (!validation?.promise) return true;
-    return (await waitWithinBlockingRequestBudget(validation.promise, budget)) === true;
   }
   function settleRedirectedRequest(record) {
     if (record.settled) return;
@@ -1555,7 +1693,10 @@
     }
     record.bodyEvidence = "pending";
     record.bodyVerificationFailed = false;
-    const chunks = [];
+    record.responseVerifierAttached = false;
+    const decoder = new TextDecoder();
+    const textChunks = [];
+    const maxBytes = probeMaxBytes();
     let totalBytes = 0;
     let oversized = false;
     filter.ondata = (event) => {
@@ -1564,10 +1705,11 @@
         const bytes = new Uint8Array(event.data);
         if (!oversized) {
           totalBytes += bytes.byteLength;
-          if (totalBytes <= probeMaxBytes()) chunks.push(bytes.slice());
-          else {
+          if (totalBytes <= maxBytes) {
+            textChunks.push(decoder.decode(bytes, { stream: true }));
+          } else {
             oversized = true;
-            chunks.length = 0;
+            textChunks.length = 0;
           }
         }
       } catch {
@@ -1584,13 +1726,8 @@
         } else if (totalBytes === 0) {
           record.bodyEvidence = "empty";
         } else {
-          const body = new Uint8Array(totalBytes);
-          let offset = 0;
-          for (const chunk of chunks) {
-            body.set(chunk, offset);
-            offset += chunk.byteLength;
-          }
-          const text = new TextDecoder().decode(body);
+          textChunks.push(decoder.decode());
+          const text = textChunks.join("");
           record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
             { finalUrl: record.redirectNetworkUrl, text },
             record.targetQuality,
@@ -1608,6 +1745,7 @@
       record.bodyEvidence = "invalid";
       settleRedirectedRequest(record);
     };
+    record.responseVerifierAttached = true;
     return true;
   }
   function attachPendingRedirectBodyVerifier(details) {
@@ -1645,6 +1783,7 @@
       redirectNetworkUrl,
       redirectUrl: responseUrl,
       requestId,
+      responseVerifierAttached: false,
       sequence: nextRedirectVerificationSequence(),
       settled: false,
       statusCode: null,
@@ -1756,102 +1895,179 @@
       recordDecision(current, decision, details);
     });
   }
-  async function handleRequest(details) {
-    const blockingBudget = createBlockingRequestBudget();
-    try {
-      return await handleRequestWithinBlockingBudget(details, blockingBudget);
-    } finally {
-      blockingBudget.clear();
-    }
+  function scheduleRequestDiagnostics(details, decision, shouldRecord) {
+    if (!shouldRecord) return;
+    recordRequestDiagnostics(details, decision).catch((error) =>
+      console.warn("[CHZZK] diagnostics recording failed", error),
+    );
   }
-  async function handleRequestWithinBlockingBudget(details, blockingBudget) {
-    const attachedRedirectVerifier = attachPendingRedirectBodyVerifier(details);
-    if (!registerRequestContext(details)) return void 0;
-    if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
-      if (isChzzkLiveUrl(details.documentUrl, quality_policy_default)) {
-        pendingTrustValidationByTab.delete(details.tabId);
-      }
-    } else if (!(await awaitPendingTrustValidation(details?.tabId, blockingBudget))) {
+  function finalizeEligibleRequest(
+    details,
+    decision,
+    shouldRecord,
+    attachedRedirectVerifier,
+    session,
+    targetState,
+  ) {
+    const targetQuality = targetState?.targetQuality ?? null;
+    let redirectUrl = null;
+    if (targetQuality) {
+      redirectUrl = buildHighestQualityRedirectUrl(details.url, {
+        minRedirectQuality: quality_policy_default.minRedirectQuality,
+        targetQuality,
+      });
+      decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
+    }
+    if (redirectUrl) {
+      rememberRedirectedRequest(details, session, targetState, redirectUrl);
+    } else if (
+      !attachedRedirectVerifier &&
+      targetState?.targetQuality === decision.quality &&
+      urlQualityMarkersMatch(details.url, targetState.targetQuality)
+    ) {
+      const record = rememberRedirectedRequest(details, session, targetState, details.url);
+      if (record) attachRedirectBodyVerifier(record);
+    }
+    scheduleRequestDiagnostics(details, decision, shouldRecord);
+    return redirectUrl ? { redirectUrl } : void 0;
+  }
+  function resolveTargetForRequest(
+    details,
+    decision,
+    shouldRecord,
+    attachedRedirectVerifier,
+    session,
+    inheritedBudget,
+  ) {
+    const blockingBudget = inheritedBudget ?? createBlockingRequestBudget();
+    const ownsBudget = inheritedBudget == null;
+    let resolution;
+    try {
+      resolution = startHighestTargetResolution(details, decision);
+    } catch (error) {
+      if (ownsBudget) blockingBudget.clear();
+      scheduleRedirectDiagnostics(String(error?.message ?? error));
+      console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+      scheduleRequestDiagnostics(details, decision, shouldRecord);
       return void 0;
     }
-    const redirectOptions = { trustedLiveTabIds: activeLiveTabIds };
+    const result = waitForBlockingResolution(resolution, blockingBudget)
+      .then(() => {
+        const targetState = session ? activeTargetForSession(session) : null;
+        return finalizeEligibleRequest(
+          details,
+          decision,
+          shouldRecord,
+          attachedRedirectVerifier,
+          session,
+          targetState,
+        );
+      })
+      .catch((error) => {
+        scheduleRedirectDiagnostics(String(error?.message ?? error));
+        console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+        scheduleRequestDiagnostics(details, decision, shouldRecord);
+        return void 0;
+      });
+    return ownsBudget ? result.finally(() => blockingBudget.clear()) : result;
+  }
+  function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inheritedBudget = null) {
+    const redirectOptions = { miniPlayerTabIds, trustedLiveTabIds: activeLiveTabIds };
     const shouldRecord = shouldRecordDiagnostics(details, quality_policy_default, redirectOptions);
-    let decision = shouldRedirectRequest(details, quality_policy_default, redirectOptions);
-    let redirectUrl = null;
+    const decision = shouldRedirectRequest(details, quality_policy_default, redirectOptions);
     if (decision.ok) {
       try {
         const session = playlistSession(details);
-        let targetState = session ? activeTargetForSession(session) : null;
-        let targetQuality = targetState?.targetQuality ?? null;
-        if (!targetQuality) {
-          targetQuality = await waitForBlockingResolution(
-            startHighestTargetResolution(details, decision),
-            blockingBudget,
+        const targetState = session ? activeTargetForSession(session) : null;
+        if (!targetState?.targetQuality) {
+          return resolveTargetForRequest(
+            details,
+            decision,
+            shouldRecord,
+            attachedRedirectVerifier,
+            session,
+            inheritedBudget,
           );
-          targetState = session ? activeTargetForSession(session) : null;
-        } else if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
+        }
+        if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
           startHighestTargetResolution(details, decision).catch((error) => {
             reportRedirectError(error).catch(() => {});
             console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
           });
         }
-        if (!redirectUrl && targetQuality) {
-          redirectUrl = buildHighestQualityRedirectUrl(details.url, {
-            minRedirectQuality: quality_policy_default.minRedirectQuality,
-            targetQuality,
-          });
-        }
-        if (targetQuality) {
-          decision = { ...decision, redirectedCurrentRequest: Boolean(redirectUrl), targetQuality };
-        }
-        if (redirectUrl) {
-          rememberRedirectedRequest(details, session, targetState, redirectUrl);
-        } else if (
-          !attachedRedirectVerifier &&
-          targetState?.targetQuality === decision.quality &&
-          urlQualityMarkersMatch(details.url, targetState.targetQuality)
-        ) {
-          const record = rememberRedirectedRequest(details, session, targetState, details.url);
-          if (record) attachRedirectBodyVerifier(record);
-        }
+        return finalizeEligibleRequest(
+          details,
+          decision,
+          shouldRecord,
+          attachedRedirectVerifier,
+          session,
+          targetState,
+        );
       } catch (error) {
         scheduleRedirectDiagnostics(String(error?.message ?? error));
         console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+        scheduleRequestDiagnostics(details, decision, shouldRecord);
+        return void 0;
       }
-    } else if (isTrustedMasterPlaylistRequest(details, quality_policy_default, redirectOptions)) {
+    }
+    if (isTrustedMasterPlaylistRequest(details, quality_policy_default, redirectOptions)) {
       startMasterTargetResolution(details).catch((error) => {
         reportRedirectError(error).catch(() => {});
         console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
       });
     }
-    if (shouldRecord) {
-      recordRequestDiagnostics(details, decision).catch((error) =>
-        console.warn("[CHZZK] diagnostics recording failed", error),
-      );
+    scheduleRequestDiagnostics(details, decision, shouldRecord);
+    return void 0;
+  }
+  function handleRequest(details) {
+    if (!isHlsPlaylistUrl(details?.url)) return void 0;
+    const attachedRedirectVerifier = attachPendingRedirectBodyVerifier(details);
+    if (!registerRequestContext(details)) return void 0;
+    if (hasTrustedChzzkMetadata(details, quality_policy_default)) {
+      if (
+        !miniPlayerTabIds.has(details.tabId) &&
+        isChzzkLiveUrl(details.documentUrl, quality_policy_default)
+      ) {
+        pendingTrustValidationByTab.delete(details.tabId);
+      }
+      return handleTrustedPlaylistRequest(details, attachedRedirectVerifier);
     }
-    return redirectUrl ? { redirectUrl } : void 0;
+    const validation = pendingTrustValidationByTab.get(details?.tabId);
+    if (!validation?.promise) {
+      return handleTrustedPlaylistRequest(details, attachedRedirectVerifier);
+    }
+    const blockingBudget = createBlockingRequestBudget();
+    return waitWithinBlockingRequestBudget(validation.promise, blockingBudget)
+      .then((trusted) =>
+        trusted === true
+          ? handleTrustedPlaylistRequest(details, attachedRedirectVerifier, blockingBudget)
+          : void 0,
+      )
+      .finally(() => blockingBudget.clear());
+  }
+  function handleRequestSafely(details) {
+    try {
+      const result = handleRequest(details);
+      return typeof result?.then === "function"
+        ? result.catch((error) => {
+            console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+            return void 0;
+          })
+        : result;
+    } catch (error) {
+      console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+      return void 0;
+    }
   }
   var WEB_REQUEST_FILTER = {
     urls: WEB_REQUEST_URLS,
     types: configuredResourceTypes(quality_policy_default),
   };
-  api.webRequest.onBeforeRequest.addListener(
-    (details) =>
-      handleRequest(details).catch((error) => {
-        console.warn("[CHZZK] diagnostics/redirect handling failed", error);
-        return void 0;
-      }),
-    WEB_REQUEST_FILTER,
-    ["blocking"],
-  );
+  api.webRequest.onBeforeRequest.addListener(handleRequestSafely, WEB_REQUEST_FILTER, ["blocking"]);
   api.webRequest.onCompleted?.addListener(handleRedirectCompleted, WEB_REQUEST_FILTER);
   api.webRequest.onErrorOccurred?.addListener(handleRedirectError, WEB_REQUEST_FILTER);
   async function prewarmMessageTab(tabId) {
-    if (!isValidRedirectTabId(tabId) || typeof api.tabs?.get !== "function") return;
-    const currentTab = await api.tabs.get(tabId);
-    if (currentTab?.id !== tabId || !isChzzkLiveUrl(currentTab.url, quality_policy_default)) return;
-    pendingTrustValidationByTab.delete(tabId);
-    await prewarmLiveTab(tabId, currentTab.url);
+    await prewarmCurrentLiveTab(tabId, { migrateVerifiedContextless: true });
   }
   api.runtime.onMessage?.addListener((message, sender) => {
     if (message?.type !== "chzzk.live-page-ready") return void 0;
@@ -1874,15 +2090,23 @@
   async function prewarmExistingLiveTabs() {
     if (typeof api.tabs?.query !== "function") return;
     const tabs = await api.tabs.query({ url: liveTabQueryUrls() });
-    await Promise.all(tabs.map((tab) => prewarmLiveTab(tab?.id, tab?.url)));
+    await Promise.all(
+      tabs.map((tab) => prewarmCurrentLiveTab(tab?.id, { migrateVerifiedContextless: true })),
+    );
   }
-  async function resetAndPrewarmRuntimeState() {
-    await Promise.all([
-      clearRuntimeRedirectState().catch((error) =>
-        console.warn("[CHZZK] failed to persist startup redirect cleanup", error),
-      ),
-      prewarmExistingLiveTabs(),
-    ]);
+  async function refreshAndPrewarmRuntimeState() {
+    let prewarmError = null;
+    try {
+      await prewarmExistingLiveTabs();
+    } catch (error) {
+      prewarmError = error;
+    }
+    try {
+      await updateRedirectDiagnostics();
+    } catch (error) {
+      if (!prewarmError) throw error;
+    }
+    if (prewarmError) throw prewarmError;
   }
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     if (changeInfo?.status === "loading") {
@@ -1895,6 +2119,7 @@
         );
         return;
       }
+      miniPlayerTabIds.delete(tabId);
       pendingTrustValidationByTab.delete(tabId);
       if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
         clearTabQualityState(tabId).catch((error) =>
@@ -1934,9 +2159,9 @@
     );
   });
   api.runtime.onInstalled?.addListener(() => {
-    resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+    refreshAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup prewarm failed", error));
   });
   api.runtime.onStartup?.addListener(() => {
-    resetAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup cleanup failed", error));
+    refreshAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup prewarm failed", error));
   });
 })();

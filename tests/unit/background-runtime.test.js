@@ -13,10 +13,12 @@ async function loadBackground({
   existingLiveTabs = [],
   fetchImplementation = null,
   filterResponseDataAvailable = true,
+  filterResponseDataThrows = false,
   maxInternalTimerMs = null,
   responsesByUrl = new Map(),
   storageSetImplementation = null,
   tabsGetImplementation = null,
+  tabsQueryImplementation = null,
   tabUrlsById = new Map(),
 } = {}) {
   const listeners = {};
@@ -139,6 +141,7 @@ async function loadBackground({
       },
       async query(queryInfo) {
         tabQueries.push(queryInfo);
+        if (tabsQueryImplementation) return tabsQueryImplementation(queryInfo);
         return existingLiveTabs;
       },
       onRemoved: {
@@ -155,6 +158,9 @@ async function loadBackground({
     webRequest: {
       filterResponseData: filterResponseDataAvailable
         ? function filterResponseData(requestId) {
+            if (filterResponseDataThrows) {
+              throw new Error("synthetic response-filter attachment failure");
+            }
             const writes = [];
             const filter = {
               closed: false,
@@ -446,12 +452,15 @@ describe("background runtime quality resolution", () => {
       statusCode: 200,
       url: fullPlayerRedirect.redirectUrl,
     });
+    const fetchCountBeforeMiniPlayer = fetches.length;
 
     listeners.onUpdated(tabId, { url: miniPlayerUrl });
     await waitForDiagnosticsQueue();
     const miniPlayerRequest = (requestId) => ({
       ...firstLowQualityRequest(tabId),
-      documentUrl: miniPlayerUrl,
+      // Firefox can retain the original document URL after pushState even
+      // though tabs.onUpdated has already reported the search/list route.
+      documentUrl: liveUrl,
       requestId,
     });
     const firstMiniPlayerRedirect = plain(
@@ -474,6 +483,11 @@ describe("background runtime quality resolution", () => {
       "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
     );
     const fetchCountAfterMiniPlayerWarmup = fetches.length;
+    assert.equal(
+      fetchCountAfterMiniPlayerWarmup,
+      fetchCountBeforeMiniPlayer,
+      "a verified dedicated-livecloud target must migrate into the mini-player without a cold probe",
+    );
     advanceClock(9_000);
 
     for (let index = 1; index < 5; index += 1) {
@@ -508,6 +522,333 @@ describe("background runtime quality resolution", () => {
       true,
       "an idle family must still expire and re-probe",
     );
+  });
+
+  it("renews the observed CHZZK legacy playlist shape instead of periodically re-probing it", async () => {
+    const tabId = 635;
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground();
+    const validPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+    const request = (requestId) => ({
+      ...firstLowQualityRequest(tabId),
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      requestId,
+    });
+    let fetchCountAfterFirstResolution = 0;
+
+    for (let index = 0; index < 5; index += 1) {
+      const current = request(`legacy-shape-${index}`);
+      assert.equal(await listeners.onBeforeRequest(current), undefined);
+      deliverFilteredResponse(responseFilters, current.requestId, validPlaylist);
+      listeners.onCompleted({ requestId: current.requestId, statusCode: 200, url: current.url });
+      if (index === 0) {
+        assert.equal(fetches.length > 0, true, "the first request must still resolve candidates");
+        fetchCountAfterFirstResolution = fetches.length;
+      }
+      advanceClock(9_000);
+    }
+
+    assert.equal(
+      fetches.length,
+      fetchCountAfterFirstResolution,
+      "the safe 360p-directory/chunklist_480p form must remain valid while its body is verified",
+    );
+    const final = request("legacy-shape-final");
+    assert.equal(await listeners.onBeforeRequest(final), undefined);
+    assert.equal(
+      fetches.length,
+      fetchCountAfterFirstResolution,
+      "verified legacy evidence must not trigger a 30-second cold probe",
+    );
+  });
+
+  it("keeps migrated response verification authoritative after a live-to-mini-player transition", async () => {
+    const tabId = 629;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const family = "migrated-response";
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: `${family}-first`,
+    };
+    const { fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["2160p", "1080p"]),
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    await observeRedirectTarget(listeners, request, first.redirectUrl);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    deliverFilteredResponse(responseFilters, request.requestId, "<!doctype html>");
+    listeners.onCompleted({
+      requestId: request.requestId,
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    const retry = plain(
+      await listeners.onBeforeRequest({
+        ...firstLowQualityRequest(tabId),
+        documentUrl: miniPlayerUrl,
+        requestId: `${family}-retry`,
+      }),
+    );
+    assert.match(retry.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.filter((url) => url.includes("2160p")).length,
+      1,
+      "a failed in-flight response from the migrated target must preserve downgrade suppression",
+    );
+  });
+
+  it("migrates a dedicated target whose first response verification is still in flight", async () => {
+    const tabId = 632;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { fetches, listeners, responseFilters } = await loadBackground();
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "pending-live-verification",
+      url: firstLowQualityRequest(tabId).url.replace("chunklist_480p", "chunklist_360p"),
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
+    const fetchCountBeforeTransition = fetches.length;
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    deliverFilteredResponse(
+      responseFilters,
+      request.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({ requestId: request.requestId, statusCode: 200, url: request.url });
+
+    const next = listeners.onBeforeRequest({
+      ...request,
+      documentUrl: miniPlayerUrl,
+      requestId: "pending-live-verification-next",
+    });
+    assert.equal(next, undefined);
+    assert.equal(
+      fetches.length,
+      fetchCountBeforeTransition,
+      "the completed in-flight proof must avoid another candidate scan after the transition",
+    );
+  });
+
+  it("drops an unverified live target without a response-verification handle at the mini-player boundary", async () => {
+    const tabId = 633;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { fetches, listeners } = await loadBackground();
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: undefined,
+      url: firstLowQualityRequest(tabId).url.replace("chunklist_480p", "chunklist_360p"),
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
+    const fetchCountBeforeTransition = fetches.length;
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    await listeners.onBeforeRequest({ ...request, documentUrl: miniPlayerUrl });
+
+    assert.equal(
+      fetches.length > fetchCountBeforeTransition,
+      true,
+      "state without prior evidence or an in-flight verifier must be re-resolved",
+    );
+  });
+
+  it("does not treat unavailable or throwing response filters as in-flight verification during migration", async () => {
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const variants = [
+      ["unavailable", { filterResponseDataAvailable: false }],
+      ["throwing", { filterResponseDataThrows: true }],
+    ];
+
+    for (const [index, [variant, filterOptions]] of variants.entries()) {
+      const tabId = 637 + index;
+      const { fetches, listeners } = await loadBackground(filterOptions);
+      const request = {
+        ...firstLowQualityRequest(tabId),
+        documentUrl: liveUrl,
+        requestId: `${variant}-filter-first`,
+        url: firstLowQualityRequest(tabId).url.replace("chunklist_480p", "chunklist_360p"),
+      };
+
+      listeners.onUpdated(tabId, { url: liveUrl });
+      assert.equal(await listeners.onBeforeRequest(request), undefined);
+      const fetchCountBeforeTransition = fetches.length;
+      listeners.onUpdated(tabId, { url: miniPlayerUrl });
+      const next = listeners.onBeforeRequest({
+        ...request,
+        documentUrl: miniPlayerUrl,
+        requestId: `${variant}-filter-next`,
+      });
+
+      assert.equal(
+        typeof next?.then,
+        "function",
+        `${variant} response-filter attachment must force a new resolution`,
+      );
+      await next;
+      assert.equal(fetches.length > fetchCountBeforeTransition, true);
+    }
+  });
+
+  it("does not migrate a target whose attached response verifier already failed", async () => {
+    const tabId = 639;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { fetches, listeners, responseFilters } = await loadBackground();
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "failed-filter-first",
+      url: firstLowQualityRequest(tabId).url.replace("chunklist_480p", "chunklist_360p"),
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
+    responseFilters.get(request.requestId).onerror();
+    const fetchCountBeforeTransition = fetches.length;
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    const next = listeners.onBeforeRequest({
+      ...request,
+      documentUrl: miniPlayerUrl,
+      requestId: "failed-filter-next",
+    });
+
+    assert.equal(
+      typeof next?.then,
+      "function",
+      "a known-bad in-flight response must not keep its target alive across navigation",
+    );
+    await next;
+    assert.equal(fetches.length > fetchCountBeforeTransition, true);
+  });
+
+  it("does not migrate generic-CDN live targets into the mini-player", async () => {
+    const tabId = 630;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["2160p"]),
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    const genericRequest = familyRequest(tabId, "generic-live-target", "generic-live-target-first");
+    const genericRedirect = plain(await listeners.onBeforeRequest(genericRequest));
+    assert.match(genericRedirect.redirectUrl, /chunklist_2160p/);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(
+      plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab),
+      {},
+      "a generic-CDN live target must be removed at the non-live same-site boundary",
+    );
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...genericRequest,
+        documentUrl: liveUrl,
+        requestId: "generic-live-target-mini",
+      }),
+      undefined,
+    );
+  });
+
+  it("does not migrate expired dedicated-livecloud evidence into the mini-player", async () => {
+    const tabId = 634;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { advanceClock, fetches, listeners } = await loadBackground({
+      availableQualities: new Set(["2160p"]),
+    });
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "expired-live-target",
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+    const fetchCountBeforeTransition = fetches.length;
+
+    advanceClock(31_000);
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    await listeners.onBeforeRequest({
+      ...request,
+      documentUrl: miniPlayerUrl,
+      requestId: "expired-live-target-mini",
+    });
+    assert.equal(
+      fetches.length > fetchCountBeforeTransition,
+      true,
+      "expired evidence must not bypass a fresh availability check",
+    );
+  });
+
+  it("leaves mini-player mode before accepting a new live channel and generic CDN family", async () => {
+    const tabId = 636;
+    const firstLiveUrl = "https://chzzk.naver.com/live/first-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const nextLiveUrl = "https://chzzk.naver.com/live/next-channel";
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+    });
+
+    listeners.onUpdated(tabId, { url: firstLiveUrl });
+    const dedicated = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: firstLiveUrl,
+      requestId: "live-mini-live-dedicated",
+    };
+    assert.match(plain(await listeners.onBeforeRequest(dedicated)).redirectUrl, /chunklist_1080p/);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    listeners.onUpdated(tabId, { url: nextLiveUrl });
+    const generic = {
+      ...familyRequest(tabId, "next-live-generic", "next-live-generic-first"),
+      documentUrl: nextLiveUrl,
+    };
+    assert.match(
+      plain(await listeners.onBeforeRequest(generic)).redirectUrl,
+      /chunklist_1080p\.m3u8/,
+      "a real live navigation must clear the dedicated-host-only mini-player boundary",
+    );
+  });
+
+  it("returns cached playlist redirects synchronously on the playback hot path", async () => {
+    const tabId = 631;
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["2160p"]),
+    });
+    const firstRequest = {
+      ...firstLowQualityRequest(tabId),
+      requestId: "sync-hot-path-first",
+    };
+    const first = plain(await listeners.onBeforeRequest(firstRequest));
+    assert.match(first.redirectUrl, /chunklist_2160p/);
+
+    const cachedDecision = listeners.onBeforeRequest({
+      ...firstRequest,
+      requestId: "sync-hot-path-cached",
+    });
+    assert.equal(
+      typeof cachedDecision?.then,
+      "undefined",
+      "a cached target must not pay a Promise turn in the blocking listener",
+    );
+    assert.match(plain(cachedDecision).redirectUrl, /chunklist_2160p/);
   });
 
   it("preserves verified mini-player targets across same-site SPA route changes", async () => {
@@ -574,32 +915,168 @@ describe("background runtime quality resolution", () => {
     );
   });
 
-  it("aborts unresolved mini-player probes across same-site SPA route changes", async () => {
+  it("continues an unresolved dedicated probe across a live-to-mini-player transition", async () => {
     const pendingProbe = deferred();
     const tabId = 627;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=channel-b";
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async (url) => {
+        if (url.includes("1440p")) return pendingProbe.promise;
+        if (url.includes("1080p")) return playlistResponse(url);
+        return {
+          headers: { get: () => null },
+          ok: false,
+          status: 404,
+          text: async () => "not found",
+          url,
+        };
+      },
+    });
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "pending-live-probe",
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
+    assert.deepEqual(
+      fetches.map((url) => url.match(/chunklist_(\d+p)/)?.[1]),
+      ["2160p", "1440p"],
+      "the blocking deadline must expire while the original candidate scan remains in flight",
+    );
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    pendingProbe.resolve({
+      headers: { get: () => null },
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+      url: fetches[1],
+    });
+    await waitForDiagnosticsQueue();
+
+    const nextDecision = listeners.onBeforeRequest({
+      ...request,
+      // Firefox can retain the live document URL after the same-document
+      // transition even though tabs.onUpdated reported the mini-player route.
+      requestId: "pending-mini-player-probe",
+    });
+    assert.equal(
+      typeof nextDecision?.then,
+      "undefined",
+      "the completed live probe must already be cached for the mini-player request",
+    );
+    assert.match(plain(nextDecision).redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length, 3, "the live-to-mini transition must not restart the candidate scan");
+  });
+
+  it("continues one unresolved dedicated probe across repeated mini-player SPA routes", async () => {
+    const pendingProbe = deferred();
+    const tabId = 641;
     const firstRoute = "https://chzzk.naver.com/lives?keyword=channel-a";
     const nextRoute = "https://chzzk.naver.com/lives?keyword=channel-b";
-    const { fetches, listeners, storage } = await loadBackground({
-      fetchImplementation: async () => pendingProbe.promise,
+    const { fetches, listeners } = await loadBackground({
+      fetchImplementation: async (url) =>
+        fetches.length === 1 ? pendingProbe.promise : playlistResponse(url),
     });
     const request = {
       ...firstLowQualityRequest(tabId),
       documentUrl: firstRoute,
-      requestId: "pending-spa-probe",
+      requestId: "pending-first-mini-route",
     };
 
-    const firstDecision = listeners.onBeforeRequest(request);
-    await waitForDiagnosticsQueue(10);
+    listeners.onUpdated(tabId, { url: firstRoute });
+    assert.equal(await listeners.onBeforeRequest(request), undefined);
     assert.equal(fetches.length, 1);
+
     listeners.onUpdated(tabId, { url: nextRoute });
     pendingProbe.resolve(playlistResponse(fetches[0]));
-    assert.equal(await firstDecision, undefined);
     await waitForDiagnosticsQueue();
-    assert.deepEqual(
-      plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab),
-      {},
-      "an unresolved probe from the old SPA route must not install a target afterward",
+
+    const nextDecision = listeners.onBeforeRequest({
+      ...request,
+      documentUrl: nextRoute,
+      requestId: "pending-next-mini-route",
+    });
+    assert.equal(typeof nextDecision?.then, "undefined");
+    assert.match(plain(nextDecision).redirectUrl, /chunklist_2160p/);
+    assert.equal(fetches.length, 1, "a second mini-player route must share the original scan");
+  });
+
+  it("still aborts an unresolved generic-CDN probe at the mini-player boundary", async () => {
+    const pendingProbe = deferred();
+    const tabId = 642;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=channel-b";
+    const { fetchOptions, fetches, listeners, storage } = await loadBackground({
+      fetchImplementation: async () => pendingProbe.promise,
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "pending-generic", "pending-generic-live"),
+        documentUrl: liveUrl,
+      }),
+      undefined,
     );
+    assert.equal(fetches.length, 1);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      fetchOptions[0].signal.aborted,
+      true,
+      "only dedicated CHZZK livecloud work may cross into mini-player mode",
+    );
+    pendingProbe.resolve(playlistResponse(fetches[0]));
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
+  });
+
+  it("aborts unresolved dedicated probes on full document loads and foreign navigation", async () => {
+    const transitions = [
+      {
+        changeInfo: {
+          status: "loading",
+          url: "https://chzzk.naver.com/lives?keyword=full-load",
+        },
+        label: "full document load",
+      },
+      {
+        changeInfo: { url: "https://unrelated.example/watch" },
+        label: "foreign navigation",
+      },
+    ];
+
+    for (const [index, { changeInfo, label }] of transitions.entries()) {
+      const pendingProbe = deferred();
+      const tabId = 643 + index;
+      const liveUrl = "https://chzzk.naver.com/live/example-channel";
+      const { fetchOptions, fetches, listeners, storage } = await loadBackground({
+        fetchImplementation: async () => pendingProbe.promise,
+      });
+
+      listeners.onUpdated(tabId, { url: liveUrl });
+      assert.equal(
+        await listeners.onBeforeRequest({
+          ...firstLowQualityRequest(tabId),
+          documentUrl: liveUrl,
+          requestId: `pending-dedicated-${index}`,
+        }),
+        undefined,
+      );
+      listeners.onUpdated(tabId, changeInfo);
+      assert.equal(fetchOptions[0].signal.aborted, true, `${label} must abort the old scan`);
+      pendingProbe.resolve(playlistResponse(fetches[0]));
+      await waitForDiagnosticsQueue();
+      assert.deepEqual(
+        plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab),
+        {},
+        `${label} must prevent a late target from being restored`,
+      );
+    }
   });
 
   it("invalidates mini-player targets on full same-site document loads", async () => {
@@ -1277,6 +1754,82 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
   });
 
+  it("does not let a stale content-message tab snapshot overwrite newer mini-player state", async () => {
+    const tabId = 515;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const pendingTab = deferred();
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: tabId } });
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    pendingTab.resolve({ id: tabId, url: liveUrl });
+    await waitForDiagnosticsQueue();
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "stale-content-message"),
+        documentUrl: liveUrl,
+      }),
+      undefined,
+      "a delayed live snapshot must not remove the dedicated-host mini-player boundary",
+    );
+  });
+
+  it("migrates verified contextless state established during content-message tab validation", async () => {
+    const tabId = 517;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const pendingTab = deferred();
+    const { fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: undefined,
+      initiator: undefined,
+      originUrl: undefined,
+      requestId: "message-contextless-first",
+    };
+
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: tabId } });
+    const first = plain(await listeners.onBeforeRequest(request));
+    assert.match(first.redirectUrl, /chunklist_1080p/);
+    await observeRedirectTarget(listeners, request, first.redirectUrl);
+    deliverFilteredResponse(
+      responseFilters,
+      request.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: request.requestId,
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+    const fetchCountBeforeValidation = fetches.length;
+
+    pendingTab.resolve({ id: tabId, url: liveUrl });
+    await waitForDiagnosticsQueue();
+    const cached = listeners.onBeforeRequest({
+      ...request,
+      documentUrl: liveUrl,
+      initiator: "https://chzzk.naver.com",
+      requestId: "message-contextless-cached",
+    });
+
+    assert.equal(
+      typeof cached?.then,
+      "undefined",
+      "message prewarm must migrate verified contextless state instead of probing again",
+    );
+    assert.match(plain(cached).redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length, fetchCountBeforeValidation);
+  });
+
   it("evicts stale tab trust when explicit request metadata proves a non-CHZZK document", async () => {
     const tabId = 514;
     const { listeners, storage } = await loadBackground({ availableQualities: new Set(["1080p"]) });
@@ -1332,6 +1885,100 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     assert.equal(
       redirect.redirectUrl,
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
+    );
+  });
+
+  it("does not erase a target established before a delayed startup event settles", async () => {
+    const tabId = 90;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const { fetches, listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      existingLiveTabs: [{ id: tabId, url: liveUrl }],
+    });
+    listeners.onUpdated(tabId, { url: liveUrl });
+    const request = {
+      ...firstLowQualityRequest(tabId),
+      documentUrl: liveUrl,
+      requestId: "startup-race-first",
+    };
+    assert.match(plain(await listeners.onBeforeRequest(request)).redirectUrl, /chunklist_1080p/);
+    const fetchCountBeforeStartup = fetches.length;
+
+    listeners.onInstalled();
+    await waitForDiagnosticsQueue();
+    const cached = listeners.onBeforeRequest({
+      ...request,
+      requestId: "startup-race-cached",
+    });
+
+    assert.equal(
+      typeof cached?.then,
+      "undefined",
+      "a late startup event must not turn a verified target back into a blocking probe",
+    );
+    assert.match(plain(cached).redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length, fetchCountBeforeStartup);
+  });
+
+  it("migrates verified contextless state when delayed startup prewarm binds the live URL", async () => {
+    const tabId = 92;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const pendingQuery = deferred();
+    const { fetches, listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsQueryImplementation: async () => pendingQuery.promise,
+      tabUrlsById: new Map([[tabId, liveUrl]]),
+    });
+
+    listeners.onInstalled();
+    const firstRequest = {
+      ...firstLowQualityRequest(tabId),
+      requestId: "startup-contextless-first",
+    };
+    assert.match(plain(await listeners.onBeforeRequest(firstRequest)).redirectUrl, /chunklist_1080p/);
+    const fetchCountBeforePrewarm = fetches.length;
+
+    pendingQuery.resolve([{ id: tabId, url: liveUrl }]);
+    await waitForDiagnosticsQueue();
+    const cached = listeners.onBeforeRequest({
+      ...firstRequest,
+      documentUrl: liveUrl,
+      requestId: "startup-contextless-cached",
+    });
+
+    assert.equal(
+      typeof cached?.then,
+      "undefined",
+      "startup prewarm must migrate verified contextless state instead of probing again",
+    );
+    assert.match(plain(cached).redirectUrl, /chunklist_1080p/);
+    assert.equal(fetches.length, fetchCountBeforePrewarm);
+  });
+
+  it("does not let a stale startup-query snapshot overwrite newer mini-player state", async () => {
+    const tabId = 516;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const pendingQuery = deferred();
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsQueryImplementation: async () => pendingQuery.promise,
+      tabUrlsById: new Map([[tabId, miniPlayerUrl]]),
+    });
+
+    listeners.onInstalled();
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    pendingQuery.resolve([{ id: tabId, url: liveUrl }]);
+    await waitForDiagnosticsQueue();
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...familyRequest(tabId, "stale-startup-query"),
+        documentUrl: liveUrl,
+      }),
+      undefined,
+      "a delayed query result must be revalidated before removing mini-player mode",
     );
   });
 
@@ -1523,6 +2170,46 @@ chunklist_1080p.m3u8?Policy=redacted
     assert.match(redirect.redirectUrl, /chunklist_1080p\.m3u8\?Policy=synthetic#tail$/);
     await waitForDiagnosticsQueue();
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [tabId]);
+  });
+
+  it("retains mini-player restrictions while a URL-less reload validates the current tab", async () => {
+    const tabId = 91;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const pendingTab = deferred();
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.match(
+      plain(
+        await listeners.onBeforeRequest({
+          ...firstLowQualityRequest(tabId),
+          documentUrl: liveUrl,
+          requestId: "mini-reload-initial",
+        }),
+      ).redirectUrl,
+      /chunklist_1080p/,
+    );
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    listeners.onUpdated(tabId, { status: "loading" });
+
+    const staleLiveGenericRequest = {
+      ...familyRequest(tabId, "stale-live-during-mini-reload", "mini-reload-generic"),
+      documentUrl: liveUrl,
+    };
+    assert.equal(
+      await listeners.onBeforeRequest(staleLiveGenericRequest),
+      undefined,
+      "stale live metadata must not bypass the dedicated-host boundary during validation",
+    );
+
+    pendingTab.resolve({ id: tabId, url: miniPlayerUrl });
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), []);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {});
   });
 
   it("shares one blocking deadline between reload trust validation and candidate resolution", async () => {

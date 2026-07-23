@@ -42,8 +42,10 @@ The test exercises real Firefox rather than a VM mock:
 2. Opens a CHZZK-shaped live fixture and issues a `480p` HLS request.
 3. Confirms the extension probes candidates and Firefox requests the available `1080p` URL.
 4. Confirms the signed-style query remains byte-for-byte unchanged.
-5. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.
-6. Calls `AddonManager.findUpdates` and confirms the installed version becomes `0.1.4`.
+5. Moves the live page to the same-site `/lives` mini-player route with `history.pushState`, keeps Firefox's observed original-live `documentUrl`, changes routes repeatedly, and confirms unavailable candidates are not re-probed.
+6. Revalidates the selected playlist with an empty HTTP 304 and confirms the cached target remains usable.
+7. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.
+8. Calls `AddonManager.findUpdates` and confirms the installed version becomes `0.1.4`.
 
 The fixture XPIs are unsigned and exist only in the disposable Developer Edition profile, so signature/update certificate checks are disabled only for this functional test. This test makes no authenticity claim about a Release artifact.
 
