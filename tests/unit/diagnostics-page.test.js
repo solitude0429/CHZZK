@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 async function renderStoredDiagnostics(storedDiagnostics) {
   const elements = new Map(
-    ["#summary", "#payload", "#refresh", "#copy", "#clear"].map((selector) => [
+    ["#summary", "#payload", "#status", "#refresh", "#copy", "#clear"].map((selector) => [
       selector,
       {
         addEventListener(_type, listener) {
@@ -18,12 +18,17 @@ async function renderStoredDiagnostics(storedDiagnostics) {
   );
   const context = {
     browser: {
+      runtime: {
+        async sendMessage(message) {
+          assert.deepEqual(message, { type: "chzzk.clear-diagnostics" });
+          return { ok: true };
+        },
+      },
       storage: {
         local: {
           async get() {
             return { chzzkDiagnostics: storedDiagnostics };
           },
-          async remove() {},
         },
       },
     },
