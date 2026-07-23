@@ -454,6 +454,33 @@ describe("background runtime quality resolution", () => {
     }
   });
 
+  it("invalidates bodyless redirected playlist responses instead of renewing the target", async () => {
+    for (const statusCode of [204, 205]) {
+      const family = `bodyless-${statusCode}`;
+      const requestId = `${family}-redirect`;
+      const { fetches, listeners } = await loadBackground({
+        availableQualities: new Set(["2160p", "1080p"]),
+      });
+      const first = plain(await listeners.onBeforeRequest(familyRequest(616, family, requestId)));
+      assert.match(first.redirectUrl, /chunklist_2160p/);
+
+      listeners.onCompleted({
+        requestId,
+        statusCode,
+        tabId: 616,
+        url: first.redirectUrl,
+      });
+      const second = plain(await listeners.onBeforeRequest(familyRequest(616, family, `${requestId}-retry`)));
+
+      assert.match(second.redirectUrl, /chunklist_1080p/);
+      assert.equal(
+        fetches.filter((url) => url.includes(family) && url.includes("2160p")).length,
+        1,
+        `HTTP ${statusCode} must suppress the unusable target instead of renewing it`,
+      );
+    }
+  });
+
   it("remembers every recent failed target while repeatedly downgrading a playlist family", async () => {
     const { fetches, listeners } = await loadBackground({
       availableQualities: new Set(["2160p", "1440p", "1080p"]),

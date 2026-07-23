@@ -1468,7 +1468,11 @@
     if (!record) return;
     redirectedRequestsById.delete(requestId);
     const statusCode = Number(details.statusCode);
-    if (Number.isSafeInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
+    const bodylessPlaylistResponse = statusCode === 204 || statusCode === 205;
+    if (
+      Number.isSafeInteger(statusCode) &&
+      (bodylessPlaylistResponse || (statusCode >= 400 && statusCode <= 599))
+    ) {
       invalidateRedirectedTarget(record);
     } else if (Number.isSafeInteger(statusCode) && statusCode >= 200 && statusCode <= 399) {
       renewSuccessfulRedirectTarget(record);
