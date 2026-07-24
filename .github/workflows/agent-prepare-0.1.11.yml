@@ -55,6 +55,7 @@ jobs:
           }
           writeFileSync(finalizePath, finalizeSource.replace(before, after));
           NODE
+          npx prettier --write package.json package-lock.json manifest.json scripts/lib/release-finalize-state.js
       - name: Remove temporary preparation workflow
         run: rm .github/workflows/agent-prepare-0.1.11.yml
       - name: Verify final release-preparation tree
