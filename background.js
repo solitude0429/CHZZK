@@ -1271,22 +1271,41 @@
     }
     return new Set(state.targets.keys());
   }
+  function canReuseSessionTarget(previous, targetQuality, now) {
+    return Boolean(
+      previous?.resolved &&
+      previous.targetQuality === targetQuality &&
+      (previous.expiresAt == null || previous.expiresAt > now),
+    );
+  }
   async function setSessionTarget(session, resolution, token) {
     const targetQuality = resolution?.targetQuality;
     if (!targetQuality || tabContextTokenByTab.get(session.tabId) !== token) return false;
     if (!resolutionContextIsCurrent(session.tabId, session.contextKey)) return false;
     if (failedTargetsForSession(session).has(targetQuality)) return false;
+    const now = Date.now();
     const previous = activeTargetsBySession.get(session.key);
-    const targetEpoch = {};
-    const validatedNetworkUrls = /* @__PURE__ */ new Map();
-    if (resolution.validatedNetworkUrl) {
+    const reusePrevious = canReuseSessionTarget(previous, targetQuality, now);
+    const targetEpoch = reusePrevious ? previous.targetEpoch : {};
+    const validatedNetworkUrls =
+      reusePrevious && previous.validatedNetworkUrls instanceof Map
+        ? new Map(previous.validatedNetworkUrls)
+        : /* @__PURE__ */ new Map();
+    if (resolution.validatedNetworkUrl && !validatedNetworkUrls.has(resolution.validatedNetworkUrl)) {
       validatedNetworkUrls.set(resolution.validatedNetworkUrl, 0);
     }
+    while (validatedNetworkUrls.size > MAX_VALIDATED_TARGET_URLS) {
+      validatedNetworkUrls.delete(validatedNetworkUrls.keys().next().value);
+    }
+    const evidenceKind =
+      reusePrevious && (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
+        ? "master"
+        : resolution.evidenceKind;
     const state = {
       ...session,
-      evidenceKind: resolution.evidenceKind,
-      expiresAt: resolution.evidenceKind === "url-marker" ? Date.now() + markerEvidenceTtlMs() : null,
-      lastSuccessfulVerificationSequence: 0,
+      evidenceKind,
+      expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
+      lastSuccessfulVerificationSequence: reusePrevious ? previous.lastSuccessfulVerificationSequence : 0,
       resolved: true,
       targetEpoch,
       targetQuality,
@@ -1424,6 +1443,36 @@
       targetHasInFlightResponseVerification(state)
     );
   }
+  function migrateFailedTargetsAcrossContext(tabId, destinationContextKey, sourceContextKey, now) {
+    const failureGroups = /* @__PURE__ */ new Map();
+    for (const [oldKey, state] of failedTargetsBySession) {
+      if (state.tabId !== tabId) continue;
+      failedTargetsBySession.delete(oldKey);
+      if (
+        !state.dedicatedHls ||
+        !(state.targets instanceof Map) ||
+        (sourceContextKey && state.contextKey !== sourceContextKey)
+      ) {
+        continue;
+      }
+      const targets = new Map(
+        [...state.targets].filter(([, expiresAt]) => Number.isFinite(expiresAt) && expiresAt > now),
+      );
+      if (targets.size === 0) continue;
+      const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+      const group = failureGroups.get(key) ?? [];
+      group.push({
+        key,
+        state: { ...state, contextKey: destinationContextKey, key, targets },
+      });
+      failureGroups.set(key, group);
+    }
+    for (const group of failureGroups.values()) {
+      if (group.length !== 1) continue;
+      const [{ key, state }] = group;
+      failedTargetsBySession.set(key, state);
+    }
+  }
   function migrateTabQualityState(
     tabId,
     destinationContextKey,
@@ -1463,9 +1512,7 @@
       state.token = transitionToken;
       resolutionBySession.set(key, state);
     }
-    for (const [key, state] of failedTargetsBySession) {
-      if (state.tabId === tabId) failedTargetsBySession.delete(key);
-    }
+    migrateFailedTargetsAcrossContext(tabId, destinationContextKey, sourceContextKey, now);
     for (const [oldKey, state] of tabTargets) {
       activeTargetsBySession.delete(oldKey);
       if (
