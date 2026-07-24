@@ -1,0 +1,72 @@
+name: Prepare CHZZK 0.1.11
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-0.1.11-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-and-verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'release/0.1.11'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - name: Update canonical release version
+        run: |
+          set -euo pipefail
+          npm version 0.1.11 --no-git-tag-version
+          node <<'NODE'
+          const { readFileSync, writeFileSync } = require('node:fs');
+
+          const manifestPath = 'manifest.json';
+          const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+          if (manifest.version !== '0.1.10') {
+            throw new Error(`manifest.json expected 0.1.10, found ${manifest.version}`);
+          }
+          manifest.version = '0.1.11';
+          writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+          const finalizePath = 'scripts/lib/release-finalize-state.js';
+          const finalizeSource = readFileSync(finalizePath, 'utf8');
+          const before = 'export const RELEASE_VERSION = "0.1.10";';
+          const after = 'export const RELEASE_VERSION = "0.1.11";';
+          if (finalizeSource.split(before).length !== 2) {
+            throw new Error('release finalizer version marker was not unique');
+          }
+          writeFileSync(finalizePath, finalizeSource.replace(before, after));
+          NODE
+      - name: Remove temporary preparation workflow
+        run: rm .github/workflows/agent-prepare-0.1.11.yml
+      - name: Verify final release-preparation tree
+        run: npm run verify
+      - name: Commit verified release preparation
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "release: prepare 0.1.11"
+          git push origin HEAD:${HEAD_BRANCH}
