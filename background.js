@@ -1636,11 +1636,17 @@
       });
     return validation.promise;
   }
+  function forgetRedirectedRequest(record) {
+    if (redirectedRequestsById.get(record.requestId) === record) {
+      redirectedRequestsById.delete(record.requestId);
+    }
+  }
   function settleRedirectedRequest(record) {
     if (record.settled) return;
     const statusCode = record.statusCode;
     if (record.networkFailed) {
       record.settled = true;
+      forgetRedirectedRequest(record);
       invalidateRedirectedTarget(record);
       return;
     }
@@ -1648,9 +1654,7 @@
     if (statusCode === 304) {
       if (record.bodyEvidence === "pending") return;
       record.settled = true;
-      if (redirectedRequestsById.get(record.requestId) === record) {
-        redirectedRequestsById.delete(record.requestId);
-      }
+      forgetRedirectedRequest(record);
       if (
         record.bodyEvidence === "valid" ||
         (record.bodyEvidence === "empty" && targetPreviouslyValidatedNetworkUrl(record))
@@ -1668,15 +1672,14 @@
       (statusCode >= 400 && statusCode <= 599);
     if (statusFailed || record.bodyEvidence === "empty" || record.bodyEvidence === "invalid") {
       record.settled = true;
+      forgetRedirectedRequest(record);
       invalidateRedirectedTarget(record);
       return;
     }
     if (statusCode < 200 || statusCode > 299) return;
     if (record.bodyEvidence === "pending") return;
     record.settled = true;
-    if (redirectedRequestsById.get(record.requestId) === record) {
-      redirectedRequestsById.delete(record.requestId);
-    }
+    forgetRedirectedRequest(record);
     if (record.bodyEvidence === "valid") {
       renewSuccessfulRedirectTarget(record);
     } else {
