@@ -1,184 +1,504 @@
-completed_at=2026-07-25T14:03:31Z
+completed_at=2026-07-25T14:06:28Z
 status=failure
 
 --- verification log (last 500 lines) ---
-From https://github.com/solitude0429/CHZZK
- * branch            main       -> FETCH_HEAD
-Switched to a new branch 'agent/fix-static-analysis-findings'
-branch 'agent/fix-static-analysis-findings' set up to track 'origin/main'.
-Applied all static-analysis remediations and regression tests.
-npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
-npm warn deprecated @humanwhocodes/config-array@0.13.0: Use @eslint/config-array instead
-npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
-npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
-npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
-npm warn deprecated @humanwhocodes/object-schema@2.0.3: Use @eslint/object-schema instead
-npm warn deprecated eslint@8.57.1: This version is no longer supported. Please see https://eslint.org/version-support for other options.
-
-added 364 packages, and audited 365 packages in 5s
-
-111 packages are looking for funding
-  run `npm fund` for details
-
-13 high severity vulnerabilities
-
-To address all issues (including breaking changes), run:
-  npm audit fix --force
-
-Run `npm audit` for details.
-[90m.github/dependabot.yml[39m 25ms (unchanged)
-[90m.github/PULL_REQUEST_TEMPLATE/hardening.md[39m 44ms (unchanged)
-[90m.github/workflows/ci.yml[39m 12ms (unchanged)
-[90m.github/workflows/codeql.yml[39m 5ms (unchanged)
-[90m.github/workflows/review-gate.yml[39m 23ms (unchanged)
-[90m.github/workflows/scorecard.yml[39m 5ms (unchanged)
-[90m.github/workflows/sign-unlisted.yml[39m 28ms (unchanged)
-[90m.prettierrc.json[39m 28ms (unchanged)
-[90mdocs/HARDENING.md[39m 84ms (unchanged)
-[90mdocs/OPERATIONS.md[39m 35ms (unchanged)
-[90mdocs/SECURITY.md[39m 34ms (unchanged)
-[90mdocs/SIGNING.md[39m 68ms (unchanged)
-[90mdocs/TESTING.md[39m 21ms (unchanged)
-[90mdocs/TROUBLESHOOTING.md[39m 23ms (unchanged)
-[90mdocs/UPDATES.md[39m 25ms (unchanged)
-manifest.json 6ms
-[90mpackage.json[39m 4ms (unchanged)
-policy/quality-policy.json 3ms
-[90mREADME.md[39m 25ms (unchanged)
-[90mscripts/admin-release-bootstrap.js[39m 107ms (unchanged)
-[90mscripts/analyze-diagnostics.js[39m 10ms (unchanged)
-[90mscripts/audit-fuzz.js[39m 154ms (unchanged)
-[90mscripts/build-runtime.js[39m 3ms (unchanged)
-[90mscripts/build-update-manifest.js[39m 8ms (unchanged)
-[90mscripts/check-generated.js[39m 4ms (unchanged)
-[90mscripts/check-review-gate.js[39m 26ms (unchanged)
-[90mscripts/configure-review-gate.js[39m 29ms (unchanged)
-[90mscripts/deploy-internal-updates.js[39m 8ms (unchanged)
-[90mscripts/finalize-release.js[39m 28ms (unchanged)
-[90mscripts/firefox-signed-smoke.js[39m 2ms (unchanged)
-[90mscripts/lib/amo-client.js[39m 34ms (unchanged)
-[90mscripts/lib/firefox-signed-smoke.js[39m 33ms (unchanged)
-[90mscripts/lib/github-release-state.js[39m 17ms (unchanged)
-[90mscripts/lib/release-artifacts.js[39m 50ms (unchanged)
-[90mscripts/lib/release-finalize-state.js[39m 105ms (unchanged)
-[90mscripts/lib/release-finalize.js[39m 26ms (unchanged)
-[90mscripts/lib/release-version.js[39m 3ms (unchanged)
-[90mscripts/lib/review-gate.js[39m 12ms (unchanged)
-[90mscripts/lib/update-deployment.js[39m 55ms (unchanged)
-[90mscripts/lib/update-manifest.js[39m 9ms (unchanged)
-[90mscripts/preflight-release-state.js[39m 3ms (unchanged)
-[90mscripts/prepare-release.js[39m 6ms (unchanged)
-[90mscripts/setup-firefox-e2e.js[39m 11ms (unchanged)
-[90mscripts/setup-firefox-signed-smoke.js[39m 9ms (unchanged)
-[90mscripts/sign-unlisted.js[39m 3ms (unchanged)
-[90mscripts/validate-manifest.js[39m 6ms (unchanged)
-[90mscripts/validate-project-cleanliness.js[39m 5ms (unchanged)
-[90mscripts/validate-update-manifest.js[39m 4ms (unchanged)
-[90mscripts/validate-workflows.js[39m 13ms (unchanged)
-[90mscripts/verify-package.js[39m 3ms (unchanged)
-[90mscripts/verify-signed-release-structure.js[39m 3ms (unchanged)
-[90msrc/runtime/diagnostics-page.js[39m 8ms (unchanged)
-src/shared/playlist-evidence.js 10ms
-[90msrc/shared/quality.js[39m 27ms (unchanged)
-[90msrc/shared/request-policy.js[39m 17ms (unchanged)
-[90mtests/e2e/firefox-update-playback.mjs[39m 37ms (unchanged)
-[90mtests/fixtures/update-deployment-crash.mjs[39m 2ms (unchanged)
-[90mtests/unit/audit-fuzz.test.js[39m 7ms (unchanged)
-[90mtests/unit/background-hardening-notes.test.js[39m 4ms (unchanged)
-[90mtests/unit/background-request-lifecycle.test.js[39m 7ms (unchanged)
-tests/unit/background-runtime.test.js 142ms
-[90mtests/unit/background-transition-regressions.test.js[39m 14ms (unchanged)
-[90mtests/unit/diagnostics-page.test.js[39m 5ms (unchanged)
-[90mtests/unit/diagnostics.test.js[39m 14ms (unchanged)
-[90mtests/unit/extension-policy.test.js[39m 7ms (unchanged)
-[90mtests/unit/firefox-signed-smoke.test.js[39m 15ms (unchanged)
-tests/unit/playlist-evidence.test.js 2ms
-[90mtests/unit/quality.test.js[39m 10ms (unchanged)
-[90mtests/unit/release-finalize.test.js[39m 89ms (unchanged)
-[90mtests/unit/release-metadata.test.js[39m 5ms (unchanged)
-tests/unit/release-package-notices.test.js 1ms
-[90mtests/unit/release-pipeline.test.js[39m 75ms (unchanged)
-[90mtests/unit/release-state.test.js[39m 9ms (unchanged)
-[90mtests/unit/release-workflow-shell.test.js[39m 14ms (unchanged)
-[90mtests/unit/review-gate-cli.test.js[39m 4ms (unchanged)
-[90mtests/unit/review-gate-settings.test.js[39m 11ms (unchanged)
-[90mtests/unit/review-gate.test.js[39m 10ms (unchanged)
-[90mtests/unit/security-remediation.test.js[39m 22ms (unchanged)
-[90mtests/unit/session-rules.test.js[39m 12ms (unchanged)
-[90mtests/unit/update-deployment.test.js[39m 23ms (unchanged)
-[90mtests/unit/update-manifest.test.js[39m 9ms (unchanged)
-[90mtests/unit/workflow-policy.test.js[39m 3ms (unchanged)
-
-> chzzk@0.1.11 build:runtime
-> node scripts/build-runtime.js
-
-
-  background.js  98.0kb
-
-⚡ Done in 10ms
-
-  diagnostics.js  16.9kb
-
-⚡ Done in 5ms
-
-  site-observer.js  482b 
-
-⚡ Done in 2ms
-
-> chzzk@0.1.11 verify
-> npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:coverage && npm run test:audit-fuzz && npm run audit:deps && npm run build && npm run audit:package
-
-
-> chzzk@0.1.11 format:check
-> prettier --check "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
-
-Checking formatting...
-All matched files use Prettier code style!
-
-> chzzk@0.1.11 check:generated
-> node scripts/check-generated.js
-
-
-> chzzk@0.1.11 build:runtime
-> node scripts/build-runtime.js
-
-
-  background.js  98.0kb
-
-⚡ Done in 9ms
-
-  diagnostics.js  16.9kb
-
-⚡ Done in 5ms
-
-  site-observer.js  482b 
-
-⚡ Done in 2ms
-
-> chzzk@0.1.11 validate:manifest
-> node scripts/validate-manifest.js
-
-manifest and MV2 required-permission CHZZK redirect policy are valid
-
-> chzzk@0.1.11 validate:project
-> node scripts/validate-project-cleanliness.js
-
-project branding is clean
-
-> chzzk@0.1.11 validate:workflows
-> node scripts/validate-workflows.js
-
-Validated 5 workflow files semantically.
-
-> chzzk@0.1.11 lint
-> eslint .
-
-
-/home/runner/work/CHZZK/CHZZK/background.js
-  657:8  error  Unexpected control character(s) in regular expression: \x00, \x1f  no-control-regex
-
-/home/runner/work/CHZZK/CHZZK/src/shared/playlist-evidence.js
-  59:6  error  Unexpected control character(s) in regular expression: \x00, \x1f  no-control-regex
-
-✖ 2 problems (2 errors, 0 warnings)
-
+      duration_ms: 677.133724
+      type: 'test'
+      ...
+    1..8
+ok 20 - attested release draft staging workflow shell
+  ---
+  duration_ms: 3465.06379
+  type: 'suite'
+  ...
+# Subtest: review-gate GitHub evidence collection
+    # Subtest: collects a reaction only from the exact-head operator request before passing
+    ok 1 - collects a reaction only from the exact-head operator request before passing
+      ---
+      duration_ms: 418.058242
+      type: 'test'
+      ...
+    # Subtest: fails closed on reaction provenance, timestamps, metadata, comment, or review races
+    ok 2 - fails closed on reaction provenance, timestamps, metadata, comment, or review races
+      ---
+      duration_ms: 2066.988565
+      type: 'test'
+      ...
+    # Subtest: reports a pending collection race when a same-second comment appears between snapshots
+    ok 3 - reports a pending collection race when a same-second comment appears between snapshots
+      ---
+      duration_ms: 487.811384
+      type: 'test'
+      ...
+    1..3
+ok 21 - review-gate GitHub evidence collection
+  ---
+  duration_ms: 2974.057938
+  type: 'suite'
+  ...
+# Subtest: sole-owner review-gate repository configuration
+    # Subtest: plans without mutation, applies exactly, preserves branch protection, and is idempotent
+    ok 1 - plans without mutation, applies exactly, preserves branch protection, and is idempotent
+      ---
+      duration_ms: 1666.06614
+      type: 'test'
+      ...
+    # Subtest: bootstraps missing status-check protection and accepts contexts-only responses
+    ok 2 - bootstraps missing status-check protection and accepts contexts-only responses
+      ---
+      duration_ms: 823.206722
+      type: 'test'
+      ...
+    1..2
+ok 22 - sole-owner review-gate repository configuration
+  ---
+  duration_ms: 2490.551917
+  type: 'suite'
+  ...
+# Subtest: exact-head release and security review completion
+    # Subtest: classifies broad security/release paths plus explicit labels or force input
+    ok 1 - classifies broad security/release paths plus explicit labels or force input
+      ---
+      duration_ms: 2.01443
+      type: 'test'
+      ...
+    # Subtest: includes a renamed file's previous path in sensitive-path classification
+    ok 2 - includes a renamed file's previous path in sensitive-path classification
+      ---
+      duration_ms: 0.834283
+      type: 'test'
+      ...
+    # Subtest: accepts only an exact-head APPROVED review as direct completion evidence
+    ok 3 - accepts only an exact-head APPROVED review as direct completion evidence
+      ---
+      duration_ms: 1.829135
+      type: 'test'
+      ...
+    # Subtest: rejects an unbound issue-level +1
+    ok 4 - rejects an unbound issue-level +1
+      ---
+      duration_ms: 0.358424
+      type: 'test'
+      ...
+    # Subtest: rejects a pre-bound reaction when GitHub observed the exact head later
+    ok 5 - rejects a pre-bound reaction when GitHub observed the exact head later
+      ---
+      duration_ms: 0.49646
+      type: 'test'
+      ...
+    # Subtest: requires a reaction to be strictly later than both PR activity and request-comment edits
+    ok 6 - requires a reaction to be strictly later than both PR activity and request-comment edits
+      ---
+      duration_ms: 0.659812
+      type: 'test'
+      ...
+    # Subtest: prefers a +1 bound to an operator comment containing the full exact head SHA
+    ok 7 - prefers a +1 bound to an operator comment containing the full exact head SHA
+      ---
+      duration_ms: 0.501287
+      type: 'test'
+      ...
+    # Subtest: does not treat an issue-level clean-review comment as completion evidence
+    ok 8 - does not treat an issue-level clean-review comment as completion evidence
+      ---
+      duration_ms: 0.413396
+      type: 'test'
+      ...
+    # Subtest: requires a clean reaction to postdate an exact-head findings review
+    ok 9 - requires a clean reaction to postdate an exact-head findings review
+      ---
+      duration_ms: 0.621766
+      type: 'test'
+      ...
+    # Subtest: rejects otherwise valid evidence from the wrong actor
+    ok 10 - rejects otherwise valid evidence from the wrong actor
+      ---
+      duration_ms: 0.615427
+      type: 'test'
+      ...
+    # Subtest: fails closed on malformed or missing evidence dates and identities
+    ok 11 - fails closed on malformed or missing evidence dates and identities
+      ---
+      duration_ms: 0.585332
+      type: 'test'
+      ...
+    # Subtest: requires zero unresolved review threads even with exact-head reviewer evidence
+    ok 12 - requires zero unresolved review threads even with exact-head reviewer evidence
+      ---
+      duration_ms: 0.364453
+      type: 'test'
+      ...
+    # Subtest: does not require reviewer evidence for an ordinary PR, but still binds the reported head
+    ok 13 - does not require reviewer evidence for an ordinary PR, but still binds the reported head
+      ---
+      duration_ms: 0.176243
+      type: 'test'
+      ...
+    1..13
+ok 23 - exact-head release and security review completion
+  ---
+  duration_ms: 11.120925
+  type: 'suite'
+  ...
+# Subtest: release and repository security guardrails
+    # Subtest: rejects command-line delivery of AMO signing secrets and uses a dependency-free signer
+    ok 1 - rejects command-line delivery of AMO signing secrets and uses a dependency-free signer
+      ---
+      duration_ms: 51.575517
+      type: 'test'
+      ...
+    # Subtest: pins all actions and semantically separates build, secret, attestation, and staging authority
+    ok 2 - pins all actions and semantically separates build, secret, attestation, and staging authority
+      ---
+      duration_ms: 27.254108
+      type: 'test'
+      ...
+    # Subtest: stages exact release assets and leaves immutable publication to the out-of-band administrator
+    ok 3 - stages exact release assets and leaves immutable publication to the out-of-band administrator
+      ---
+      duration_ms: 14.997169
+      type: 'test'
+      ...
+    # Subtest: runs the final AMO-signed XPI through stock Firefox before attestation and draft staging
+    ok 4 - runs the final AMO-signed XPI through stock Firefox before attestation and draft staging
+      ---
+      duration_ms: 18.808246
+      type: 'test'
+      ...
+    # Subtest: removes generated-file auto-commit workflows and retired external collector code
+    ok 5 - removes generated-file auto-commit workflows and retired external collector code
+      ---
+      duration_ms: 0.352435
+      type: 'test'
+      ...
+    # Subtest: removes unnecessary Scorecard OIDC and analyzes only shipped JavaScript
+    ok 6 - removes unnecessary Scorecard OIDC and analyzes only shipped JavaScript
+      ---
+      duration_ms: 0.380507
+      type: 'test'
+      ...
+    # Subtest: pins direct dependencies and ignores local secrets and generated release artifacts
+    ok 7 - pins direct dependencies and ignores local secrets and generated release artifacts
+      ---
+      duration_ms: 0.539554
+      type: 'test'
+      ...
+    # Subtest: deploys only an attested exact release set through the transactional deployment library
+    ok 8 - deploys only an attested exact release set through the transactional deployment library
+      ---
+      duration_ms: 0.622107
+      type: 'test'
+      ...
+    # Subtest: requires trusted exact-head reviewer evidence with sole-owner branch protection
+    ok 9 - requires trusted exact-head reviewer evidence with sole-owner branch protection
+      ---
+      duration_ms: 120.568747
+      type: 'test'
+      ...
+    # Subtest: keeps extension diagnostics local-only and documented as such
+    ok 10 - keeps extension diagnostics local-only and documented as such
+      ---
+      duration_ms: 0.813562
+      type: 'test'
+      ...
+    1..10
+ok 24 - release and repository security guardrails
+  ---
+  duration_ms: 237.766673
+  type: 'suite'
+  ...
+# Subtest: MV2 required-permission CHZZK redirect request policy
+    # Subtest: recognizes only HTTPS CHZZK site URLs for same-site navigation state
+    ok 1 - recognizes only HTTPS CHZZK site URLs for same-site navigation state
+      ---
+      duration_ms: 1.056633
+      type: 'test'
+      ...
+    # Subtest: derives required install permissions from CHZZK and trusted HLS domains
+    ok 2 - derives required install permissions from CHZZK and trusted HLS domains
+      ---
+      duration_ms: 12.120905
+      type: 'test'
+      ...
+    # Subtest: trusts CHZZK context or the narrowly scoped dedicated-livecloud fallback
+    ok 3 - trusts CHZZK context or the narrowly scoped dedicated-livecloud fallback
+      ---
+      duration_ms: 3.025607
+      type: 'test'
+      ...
+    # Subtest: recognizes trusted master playlists without treating numeric playlists as masters
+    ok 4 - recognizes trusted master playlists without treating numeric playlists as masters
+      ---
+      duration_ms: 0.681215
+      type: 'test'
+      ...
+    # Subtest: reports contradictory quality markers as a distinct fail-closed decision
+    ok 5 - reports contradictory quality markers as a distinct fail-closed decision
+      ---
+      duration_ms: 0.352365
+      type: 'test'
+      ...
+    # Subtest: trusts a prewarmed CHZZK live tab even when Firefox omits documentUrl on the first HLS request
+    ok 6 - trusts a prewarmed CHZZK live tab even when Firefox omits documentUrl on the first HLS request
+      ---
+      duration_ms: 0.433355
+      type: 'test'
+      ...
+    # Subtest: lets explicit non-CHZZK document and origin metadata veto stale prewarmed trust
+    ok 7 - lets explicit non-CHZZK document and origin metadata veto stale prewarmed trust
+      ---
+      duration_ms: 0.34205
+      type: 'test'
+      ...
+    # Subtest: continues same-site CHZZK mini-player playback only on dedicated livecloud hosts
+    ok 8 - continues same-site CHZZK mini-player playback only on dedicated livecloud hosts
+      ---
+      duration_ms: 0.804007
+      type: 'test'
+      ...
+    # Subtest: rejects generic-CDN CHZZK path markers without page context
+    ok 9 - rejects generic-CDN CHZZK path markers without page context
+      ---
+      duration_ms: 0.428489
+      type: 'test'
+      ...
+    # Subtest: does not trust generic livecloud-looking CDN HLS outside CHZZK request context
+    ok 10 - does not trust generic livecloud-looking CDN HLS outside CHZZK request context
+      ---
+      duration_ms: 0.608737
+      type: 'test'
+      ...
+    # Subtest: covers CHZZK-hosted numeric playlist requests when the site serves HLS from its own domain
+    ok 11 - covers CHZZK-hosted numeric playlist requests when the site serves HLS from its own domain
+      ---
+      duration_ms: 0.30836
+      type: 'test'
+      ...
+    # Subtest: covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests
+    ok 12 - covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests
+      ---
+      duration_ms: 0.367418
+      type: 'test'
+      ...
+    # Subtest: does not record diagnostics for unrelated CDN HLS traffic
+    ok 13 - does not record diagnostics for unrelated CDN HLS traffic
+      ---
+      duration_ms: 0.256412
+      type: 'test'
+      ...
+    1..13
+ok 25 - MV2 required-permission CHZZK redirect request policy
+  ---
+  duration_ms: 23.94666
+  type: 'suite'
+  ...
+# Subtest: atomic internal update deployment
+    # Subtest: bounds waits for a lock-holder child that never reports cleanup
+    ok 1 - bounds waits for a lock-holder child that never reports cleanup
+      ---
+      duration_ms: 21.465145
+      type: 'test'
+      ...
+    # Subtest: preserves pre-existing directory modes and reuses an exact immutable release
+    ok 2 - preserves pre-existing directory modes and reuses an exact immutable release
+      ---
+      duration_ms: 240.486829
+      type: 'test'
+      ...
+    # Subtest: deploys the verifier-returned bytes even if every validated input path is replaced afterward
+    ok 3 - deploys the verifier-returned bytes even if every validated input path is replaced afterward
+      ---
+      duration_ms: 93.547933
+      type: 'test'
+      ...
+    # Subtest: rejects writable managed directories instead of reusing them as immutable
+    ok 4 - rejects writable managed directories instead of reusing them as immutable
+      ---
+      duration_ms: 83.658064
+      type: 'test'
+      ...
+    # Subtest: rejects a target reached through a symbolic-link ancestor
+    ok 5 - rejects a target reached through a symbolic-link ancestor
+      ---
+      duration_ms: 36.526634
+      type: 'test'
+      ...
+    # Subtest: uses the validated normalized target instead of following a symlink hidden by parent segments
+    ok 6 - uses the validated normalized target instead of following a symlink hidden by parent segments
+      ---
+      duration_ms: 69.432365
+      type: 'test'
+      ...
+    # Subtest: fails closed while another process holds the advisory deployment lock
+    ok 7 - fails closed while another process holds the advisory deployment lock
+      ---
+      duration_ms: 52.795771
+      type: 'test'
+      ...
+    # Subtest: rolls back every live link and removes the new release when activation fails
+    ok 8 - rolls back every live link and removes the new release when activation fails
+      ---
+      duration_ms: 125.867544
+      type: 'test'
+      ...
+    # Subtest: rolls back activation when post-commit release verification fails
+    ok 9 - rolls back activation when post-commit release verification fails
+      ---
+      duration_ms: 132.138961
+      type: 'test'
+      ...
+    # Subtest: recovers and retries after process death at every durable activation boundary
+    ok 10 - recovers and retries after process death at every durable activation boundary
+      ---
+      duration_ms: 925.919701
+      type: 'test'
+      ...
+    # Subtest: restores the pre-crash generation before a failed retry rolls back
+    ok 11 - restores the pre-crash generation before a failed retry rolls back
+      ---
+      duration_ms: 290.085254
+      type: 'test'
+      ...
+    1..11
+ok 26 - atomic internal update deployment
+  ---
+  duration_ms: 2074.354161
+  type: 'suite'
+  ...
+# Subtest: strict Firefox update manifest
+    # Subtest: builds update metadata only from immutable release metadata and signed XPI bytes
+    not ok 1 - builds update metadata only from immutable release metadata and signed XPI bytes
+      ---
+      duration_ms: 2.904326
+      type: 'test'
+      location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:41:3'
+      failureType: 'testCodeFailure'
+      error: 'Invalid release file digest: manifest.json'
+      code: 'ERR_TEST_FAILURE'
+      stack: |-
+        assertReleaseMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/amo-client.js:116:45)
+        validateReleaseUpdateMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:25:3)
+        buildUpdateManifestDocument (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:55:3)
+        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:47:24)
+        Test.runInAsyncScope (node:async_hooks:214:14)
+        Test.run (node:internal/test_runner/test:1047:25)
+        Test.start (node:internal/test_runner/test:944:17)
+        node:internal/test_runner/test:1440:71
+        node:internal/per_context/primordials:466:82
+        new Promise (<anonymous>)
+      ...
+    # Subtest: rejects extra keys, add-ons, update entries, and noncanonical update URLs
+    not ok 2 - rejects extra keys, add-ons, update entries, and noncanonical update URLs
+      ---
+      duration_ms: 0.473167
+      type: 'test'
+      location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:67:3'
+      failureType: 'testCodeFailure'
+      error: 'Invalid release file digest: manifest.json'
+      code: 'ERR_TEST_FAILURE'
+      stack: |-
+        assertReleaseMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/amo-client.js:116:45)
+        validateReleaseUpdateMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:25:3)
+        buildUpdateManifestDocument (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:55:3)
+        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:68:18)
+        Test.runInAsyncScope (node:async_hooks:214:14)
+        Test.run (node:internal/test_runner/test:1047:25)
+        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+        Test.postRun (node:internal/test_runner/test:1173:19)
+        Test.run (node:internal/test_runner/test:1101:12)
+        async Promise.all (index 0)
+      ...
+    # Subtest: rejects a noncanonical signed XPI basename in direct path-based API use
+    not ok 3 - rejects a noncanonical signed XPI basename in direct path-based API use
+      ---
+      duration_ms: 1.977301
+      type: 'test'
+      location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:106:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        The input did not match the regular expression /canonical|signed XPI.*filename|basename/i. Input:
+        
+        'Error: Invalid release file digest: manifest.json'
+        
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected:
+      actual:
+      error: 'Invalid release file digest: manifest.json'
+      stack: |-
+        assertReleaseMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/amo-client.js:116:45)
+        validateReleaseUpdateMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:25:3)
+        buildUpdateManifestDocument (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:55:3)
+        file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:112:15
+        getActual (node:assert:609:5)
+        Function.throws (node:assert:757:24)
+        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:111:14)
+        Test.runInAsyncScope (node:async_hooks:214:14)
+        Test.run (node:internal/test_runner/test:1047:25)
+        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+      operator: 'throws'
+      stack: |-
+        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:111:14)
+        Test.runInAsyncScope (node:async_hooks:214:14)
+        Test.run (node:internal/test_runner/test:1047:25)
+        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
+        Test.postRun (node:internal/test_runner/test:1173:19)
+        Test.run (node:internal/test_runner/test:1101:12)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
+      ...
+    1..3
+not ok 27 - strict Firefox update manifest
+  ---
+  duration_ms: 6.864297
+  type: 'suite'
+  location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:40:1'
+  failureType: 'subtestsFailed'
+  error: '3 subtests failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: semantic workflow policy
+    # Subtest: accepts an explicitly permissioned read-only workflow
+    ok 1 - accepts an explicitly permissioned read-only workflow
+      ---
+      duration_ms: 1.231283
+      type: 'test'
+      ...
+    # Subtest: rejects package installation or project builds in a write-capable job
+    ok 2 - rejects package installation or project builds in a write-capable job
+      ---
+      duration_ms: 1.045129
+      type: 'test'
+      ...
+    # Subtest: rejects checkout credentials and unpinned action references
+    ok 3 - rejects checkout credentials and unpinned action references
+      ---
+      duration_ms: 0.416132
+      type: 'test'
+      ...
+    # Subtest: rejects secrets in jobs that also hold repository or OIDC write authority
+    ok 4 - rejects secrets in jobs that also hold repository or OIDC write authority
+      ---
+      duration_ms: 0.315584
+      type: 'test'
+      ...
+    # Subtest: requires workflow concurrency and per-job timeout/permissions
+    ok 5 - requires workflow concurrency and per-job timeout/permissions
+      ---
+      duration_ms: 0.298099
+      type: 'test'
+      ...
+    1..5
+ok 28 - semantic workflow policy
+  ---
+  duration_ms: 4.396364
+  type: 'suite'
+  ...
+1..28
+# tests 282
+# suites 28
+# pass 257
+# fail 25
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7892.540502
