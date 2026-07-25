@@ -1,4 +1,4 @@
-name: Capture static-analysis dependency audit
+name: Prepare secure static-analysis dependencies
 
 on:
   pull_request:
@@ -7,15 +7,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: capture-static-analysis-audit-${{ github.event.pull_request.number }}
+  group: prepare-static-analysis-dependencies-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  audit:
+  prepare:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -23,9 +23,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          cache: npm
           node-version: 22
-      - run: npm ci
+      - name: Resolve the candidate dependency graph
+        run: |
+          cp .github/chzzk-static-analysis-candidate-package.json package.json
+          rm -f package-lock.json
+          npm install --ignore-scripts
       - name: Capture npm audit JSON and exit status
         shell: bash
         run: |
@@ -34,11 +37,16 @@ jobs:
           STATUS=$?
           set -e
           printf 'exit_code=%s\n' "$STATUS" > "$RUNNER_TEMP/npm-audit-status.txt"
+          tar -czf "$RUNNER_TEMP/node_modules.tar.gz" node_modules
+          cp package.json package-lock.json "$RUNNER_TEMP/"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           if-no-files-found: error
-          name: chzzk-static-analysis-audit-${{ github.event.pull_request.head.sha }}
+          name: chzzk-static-analysis-dependencies-${{ github.event.pull_request.head.sha }}
           path: |
+            ${{ runner.temp }}/package.json
+            ${{ runner.temp }}/package-lock.json
+            ${{ runner.temp }}/node_modules.tar.gz
             ${{ runner.temp }}/npm-audit.json
             ${{ runner.temp }}/npm-audit-status.txt
           retention-days: 1
