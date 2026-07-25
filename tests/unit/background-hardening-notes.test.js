@@ -17,6 +17,24 @@ describe("background hardening invariants", () => {
     assert.doesNotMatch(source, /activeTargetsByTab/);
   });
 
+  it("keeps playlist probing and session retention outside the orchestration module", () => {
+    const playlistProbe = readFileSync(
+      new URL("../../src/runtime/playlist-probe.js", import.meta.url),
+      "utf8",
+    );
+    const sessionStateStore = readFileSync(
+      new URL("../../src/runtime/session-state-store.js", import.meta.url),
+      "utf8",
+    );
+
+    assert.match(source, /createPlaylistProbe/);
+    assert.match(source, /createSessionStateStore/);
+    assert.doesNotMatch(source, /async function fetchPlaylistEvidence/);
+    assert.doesNotMatch(source, /function enforceSessionStateLimits/);
+    assert.match(playlistProbe, /fetchPlaylistEvidence/);
+    assert.match(sessionStateStore, /enforceLimits/);
+  });
+
   it("prewarms CHZZK live tabs before the first playlist request is observed", () => {
     const observer = readFileSync(new URL("../../src/runtime/site-observer.js", import.meta.url), "utf8");
     assert.match(observer, /chzzk\.live-page-ready/);

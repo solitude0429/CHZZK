@@ -6,10 +6,6 @@ import {
   updateRuntimeRedirectDiagnostics,
 } from "../shared/diagnostics.js";
 import {
-  isUsableHlsPlaylist,
-  isUtf8TextWithinByteLimit,
-} from "../shared/playlist-evidence.js";
-import {
   configuredResourceTypes,
   configuredWebRequestUrls,
   hasContradictoryChzzkMetadata,
@@ -19,46 +15,55 @@ import {
   isDedicatedChzzkHlsPlaylistUrl,
   isHlsPlaylistUrl,
   isTrustedMasterPlaylistRequest,
-  isTrustedRequestDomain,
   isValidRedirectTabId,
   shouldRecordDiagnostics,
   shouldRedirectRequest,
 } from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
-  chooseBestHlsVariantFromVariants,
-  normalizeQualityCandidates,
-  parseHlsMasterPlaylistVariants,
-  parseQualitiesFromUrl,
-  parseQualityFromUrl,
   playlistFamilyKey,
   qualityNumber,
-  replaceQualityInUrl,
-  urlQualityMarkersAreSafe,
 } from "../shared/quality.js";
+import { createPlaylistProbe, networkRequestUrl } from "./playlist-probe.js";
+import { createSessionStateStore } from "./session-state-store.js";
 
 const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
 const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
 const activeLiveTabIds = new Set();
-const activeTargetsBySession = new Map();
-const failedTargetsBySession = new Map();
 const liveContextByTab = new Map();
 const miniPlayerTabIds = new Set();
 const pendingTrustValidationByTab = new Map();
 const redirectedRequestsById = new Map();
-const resolutionBySession = new Map();
 const tabContextTokenByTab = new Map();
+const {
+  activeTargetsBySession,
+  enforceLimits: enforceSessionStateLimits,
+  failedTargetsBySession,
+  forgetRedirectedRequests: forgetRedirectedRequestsForSession,
+  resolutionBySession,
+  sweepExpired: sweepExpiredSessionState,
+  touch: touchSessionState,
+} = createSessionStateStore({
+  maxStates: policy.maxSessionStates,
+  maxStatesPerTab: policy.maxSessionStatesPerTab,
+  onActiveTargetsChanged: () => scheduleRedirectDiagnostics(),
+  redirectedRequestsById,
+});
+const {
+  playlistEvidenceSupportsExpectedQuality,
+  probeMaxBytes,
+  resolveBestVariantFromMaster,
+  resolveHighestSupportedQuality,
+  urlQualityMarkersMatch,
+} = createPlaylistProbe({ policy });
 const MAX_MARKER_EVIDENCE_TTL_MS = 30_000;
 const MAX_REDIRECT_FAILURE_BACKOFF_MS = 30_000;
-const HARD_MAX_SESSION_STATES = 1024;
-const HARD_MAX_SESSION_STATES_PER_TAB = 128;
 const MAX_TRACKED_REDIRECT_REQUESTS = 500;
 const MAX_VALIDATED_TARGET_URLS = 16;
 let diagnosticsMutationQueue = Promise.resolve();
 let diagnosticsMutationQueueDepth = 0;
 let redirectVerificationSequence = 0;
-let sessionAccessSequence = 0;
 
 async function loadDiagnostics() {
   const stored = await api.storage.local.get(STORAGE_KEY);
@@ -131,11 +136,6 @@ function resolvedTargetCoversObserved(state, observedQuality) {
   return Boolean(state?.resolved && activeTargetCoversObserved(state, observedQuality));
 }
 
-function probeTimeoutMs() {
-  const configured = Number(policy.probeTimeoutMs ?? 1500);
-  return Number.isFinite(configured) && configured > 0 ? configured : 1500;
-}
-
 function blockingProbeBudgetMs() {
   const configured = Number(policy.blockingProbeBudgetMs ?? 50);
   return Number.isFinite(configured) && configured > 0 ? configured : 50;
@@ -170,11 +170,6 @@ function probeResolutionBudgetMs() {
   return Number.isFinite(configured) && configured > 0 ? configured : 3000;
 }
 
-function probeMaxBytes() {
-  const configured = Number(policy.probeMaxBytes ?? 256_000);
-  return Number.isFinite(configured) && configured > 0 ? configured : 256_000;
-}
-
 function markerEvidenceTtlMs() {
   const configured = Number(policy.markerEvidenceTtlMs ?? 30_000);
   return Number.isSafeInteger(configured) && configured > 0
@@ -187,348 +182,6 @@ function redirectFailureBackoffMs() {
   return Number.isSafeInteger(configured) && configured > 0
     ? Math.min(configured, MAX_REDIRECT_FAILURE_BACKOFF_MS)
     : 10_000;
-}
-
-function maxSessionStates() {
-  const configured = Number(policy.maxSessionStates ?? 256);
-  return Number.isSafeInteger(configured) && configured > 0
-    ? Math.min(configured, HARD_MAX_SESSION_STATES)
-    : 256;
-}
-
-function maxSessionStatesPerTab() {
-  const configured = Number(policy.maxSessionStatesPerTab ?? 64);
-  return Number.isSafeInteger(configured) && configured > 0
-    ? Math.min(configured, HARD_MAX_SESSION_STATES_PER_TAB)
-    : 64;
-}
-
-function compareSessionAccess(left, right) {
-  if (left.lastTouchedOrder !== right.lastTouchedOrder) {
-    return left.lastTouchedOrder - right.lastTouchedOrder;
-  }
-  return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
-}
-
-function normalizeSessionAccessOrder() {
-  const groupsByKey = new Map();
-  for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
-    for (const [key, state] of map) {
-      const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
-      group.lastTouchedOrder = Math.max(
-        group.lastTouchedOrder,
-        Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
-      );
-      group.states.push(state);
-      groupsByKey.set(key, group);
-    }
-  }
-  sessionAccessSequence = 0;
-  for (const group of [...groupsByKey.values()].sort(compareSessionAccess)) {
-    sessionAccessSequence += 1;
-    for (const state of group.states) state.lastTouchedOrder = sessionAccessSequence;
-  }
-}
-
-function nextSessionAccessOrder() {
-  if (sessionAccessSequence >= Number.MAX_SAFE_INTEGER - HARD_MAX_SESSION_STATES) {
-    normalizeSessionAccessOrder();
-  }
-  sessionAccessSequence += 1;
-  return sessionAccessSequence;
-}
-
-function touchSessionState(state) {
-  if (!state || typeof state !== "object") return state;
-  state.lastTouchedOrder = nextSessionAccessOrder();
-  return state;
-}
-
-function forgetRedirectedRequestsForSession(sessionKey) {
-  for (const [requestId, record] of redirectedRequestsById) {
-    if (record.key !== sessionKey) continue;
-    record.settled = true;
-    redirectedRequestsById.delete(requestId);
-  }
-}
-
-function removeSessionState(sessionKey) {
-  const removedActiveTarget = activeTargetsBySession.delete(sessionKey);
-  failedTargetsBySession.delete(sessionKey);
-  const resolution = resolutionBySession.get(sessionKey);
-  resolution?.controller.abort();
-  resolutionBySession.delete(sessionKey);
-  forgetRedirectedRequestsForSession(sessionKey);
-  return removedActiveTarget;
-}
-
-function sweepExpiredSessionState(now = Date.now()) {
-  let removedActiveTarget = false;
-  for (const [key, state] of activeTargetsBySession) {
-    if (state.expiresAt == null || state.expiresAt > now) continue;
-    activeTargetsBySession.delete(key);
-    forgetRedirectedRequestsForSession(key);
-    removedActiveTarget = true;
-  }
-  for (const [key, state] of failedTargetsBySession) {
-    if (!(state.targets instanceof Map)) {
-      failedTargetsBySession.delete(key);
-      continue;
-    }
-    for (const [quality, expiresAt] of state.targets) {
-      if (!Number.isFinite(expiresAt) || expiresAt <= now) state.targets.delete(quality);
-    }
-    if (state.targets.size === 0) failedTargetsBySession.delete(key);
-  }
-  for (const [key, state] of resolutionBySession) {
-    if (state.controller?.signal?.aborted) resolutionBySession.delete(key);
-  }
-  return removedActiveTarget;
-}
-
-function sessionStateEntries() {
-  const byKey = new Map();
-  for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
-    for (const [key, state] of map) {
-      const entry = byKey.get(key) ?? {
-        key,
-        lastTouchedOrder: 0,
-        tabId: state.tabId,
-      };
-      entry.lastTouchedOrder = Math.max(
-        entry.lastTouchedOrder,
-        Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
-      );
-      byKey.set(key, entry);
-    }
-  }
-  return [...byKey.values()];
-}
-
-function enforceSessionStateLimits(protectedKey = null) {
-  let removedActiveTarget = sweepExpiredSessionState();
-  const perTabLimit = maxSessionStatesPerTab();
-  const byTab = new Map();
-  for (const entry of sessionStateEntries()) {
-    const entries = byTab.get(entry.tabId) ?? [];
-    entries.push(entry);
-    byTab.set(entry.tabId, entries);
-  }
-  for (const entries of byTab.values()) {
-    entries.sort((left, right) => left.lastTouchedOrder - right.lastTouchedOrder);
-    let excess = entries.length - perTabLimit;
-    for (const entry of entries) {
-      if (excess <= 0) break;
-      if (entry.key === protectedKey) continue;
-      removedActiveTarget = removeSessionState(entry.key) || removedActiveTarget;
-      excess -= 1;
-    }
-  }
-
-  const entries = sessionStateEntries().sort(
-    (left, right) => left.lastTouchedOrder - right.lastTouchedOrder,
-  );
-  let excess = entries.length - maxSessionStates();
-  for (const entry of entries) {
-    if (excess <= 0) break;
-    if (entry.key === protectedKey) continue;
-    removedActiveTarget = removeSessionState(entry.key) || removedActiveTarget;
-    excess -= 1;
-  }
-  if (removedActiveTarget) scheduleRedirectDiagnostics();
-  return removedActiveTarget;
-}
-
-function responseHeader(response, name) {
-  return response?.headers?.get?.(name) ?? null;
-}
-
-function responseContentLength(response) {
-  const value = Number(responseHeader(response, "content-length") ?? 0);
-  return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-function hasRejectedPlaylistContentType(response) {
-  const contentType = String(responseHeader(response, "content-type") ?? "")
-    .split(";", 1)[0]
-    .trim()
-    .toLowerCase();
-  return (
-    contentType === "application/json" ||
-    contentType === "application/xhtml+xml" ||
-    contentType === "text/html" ||
-    contentType === "text/json" ||
-    contentType.endsWith("+json")
-  );
-}
-
-async function readResponseTextWithLimit(response, maxBytes) {
-  const declaredLength = responseContentLength(response);
-  if (declaredLength > maxBytes) return null;
-
-  if (!response?.body?.getReader) {
-    const text = String(await response.text());
-    return isUtf8TextWithinByteLimit(text, maxBytes) ? text : null;
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const chunks = [];
-  let totalBytes = 0;
-  try {
-    let done = false;
-    while (!done) {
-      const chunk = await reader.read();
-      done = chunk.done;
-      if (done) break;
-      const { value } = chunk;
-      totalBytes += value.byteLength ?? value.length ?? 0;
-      if (totalBytes > maxBytes) {
-        await reader.cancel();
-        return null;
-      }
-      chunks.push(decoder.decode(value, { stream: true }));
-    }
-    chunks.push(decoder.decode());
-    return chunks.join("");
-  } catch {
-    return null;
-  }
-}
-
-async function fetchPlaylistEvidence(url, { signal = null } = {}) {
-  if (!isTrustedRequestDomain(url, policy)) return null;
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort();
-  if (signal?.aborted) controller.abort();
-  signal?.addEventListener?.("abort", abortFromParent, { once: true });
-  const timeout = setTimeout(() => controller.abort(), probeTimeoutMs());
-
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    if (hasRejectedPlaylistContentType(response)) return null;
-    const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
-    if (!isTrustedRequestDomain(finalUrl, policy) || finalUrl !== url) return null;
-    const text = await readResponseTextWithLimit(response, probeMaxBytes());
-    return isUsableHlsPlaylist(text) ? { finalUrl, text } : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener?.("abort", abortFromParent);
-  }
-}
-
-function urlQualityMarkersMatch(url, expectedQuality) {
-  const qualities = parseQualitiesFromUrl(url);
-  return (
-    qualities.length > 0 &&
-    urlQualityMarkersAreSafe(url) &&
-    parseQualityFromUrl(url) === expectedQuality
-  );
-}
-
-function networkRequestUrl(url) {
-  if (typeof url !== "string" || !url) return null;
-  const fragmentIndex = url.indexOf("#");
-  return fragmentIndex < 0 ? url : url.slice(0, fragmentIndex);
-}
-
-async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = null } = {}) {
-  const evidence = await fetchPlaylistEvidence(url, { signal });
-  return playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality);
-}
-
-function playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality) {
-  if (!evidence || !isUsableHlsPlaylist(evidence.text)) return false;
-  const variants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl);
-  if (variants.length > 0 || /#EXT-X-STREAM-INF:/i.test(evidence.text)) {
-    return variants.some((variant) => {
-      const variantQuality = bestVariantTargetQuality(variant);
-      return (
-        variantQuality === expectedQuality &&
-        typeof variant.url === "string" &&
-        isTrustedRequestDomain(variant.url, policy) &&
-        urlQualityMarkersMatch(variant.url, expectedQuality)
-      );
-    });
-  }
-
-  return urlQualityMarkersMatch(evidence.finalUrl, expectedQuality);
-}
-
-async function resolveHighestSupportedQuality(
-  details,
-  observedQuality,
-  { signal = null, skipTargetQualities = new Set() } = {},
-) {
-  const observedNumber = qualityNumber(observedQuality);
-  if (!observedNumber) return null;
-
-  const candidates = normalizeQualityCandidates(policy.qualityCandidates, {
-    include: [observedQuality],
-    minRedirectQuality: policy.minRedirectQuality,
-  });
-
-  for (const candidate of candidates) {
-    if (signal?.aborted) return null;
-    if (skipTargetQualities.has(candidate)) continue;
-    const candidateNumber = qualityNumber(candidate);
-    if (!candidateNumber || candidateNumber < observedNumber) continue;
-
-    const candidateUrl = replaceQualityInUrl(details.url, candidate);
-    if (!candidateUrl) continue;
-    if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) {
-      return { evidenceKind: "url-marker", targetQuality: candidate };
-    }
-    if (await fetchSupportsExpectedQuality(candidateUrl, candidate, { signal })) {
-      return {
-        evidenceKind: "url-marker",
-        targetQuality: candidate,
-        validatedNetworkUrl: networkRequestUrl(candidateUrl),
-      };
-    }
-  }
-
-  return signal?.aborted
-    ? null
-    : { evidenceKind: "url-marker", targetQuality: observedQuality };
-}
-
-function bestVariantTargetQuality(variant) {
-  return variant?.quality ?? (variant?.resolution?.height ? `${variant.resolution.height}p` : null);
-}
-
-async function resolveBestVariantFromMaster(
-  details,
-  { signal = null, skipTargetQualities = new Set() } = {},
-) {
-  const evidence = await fetchPlaylistEvidence(details.url, { signal });
-  if (!evidence || signal?.aborted) return null;
-
-  const eligibleVariants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl).filter(
-    (candidate) => {
-      const candidateQuality = bestVariantTargetQuality(candidate);
-      return Boolean(
-        candidateQuality &&
-          typeof candidate?.url === "string" &&
-          isTrustedRequestDomain(candidate.url, policy) &&
-          urlQualityMarkersMatch(candidate.url, candidateQuality),
-      );
-    },
-  );
-  const variant = chooseBestHlsVariantFromVariants(eligibleVariants, {
-    excludedQualities: [...skipTargetQualities],
-    minRedirectQuality: policy.minRedirectQuality,
-  });
-  const targetQuality = bestVariantTargetQuality(variant);
-  return variant?.url && targetQuality ? { evidenceKind: "master", targetQuality } : null;
 }
 
 async function updateRedirectDiagnostics(lastError = null) {
