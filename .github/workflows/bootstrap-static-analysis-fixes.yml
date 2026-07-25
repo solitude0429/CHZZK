@@ -27,7 +27,7 @@ jobs:
         env:
           BOOTSTRAP_BRANCH: agent/bootstrap-static-analysis-fixes-20260725
           TARGET_BRANCH: agent/fix-static-analysis-findings
-          TRANSFORM_SHA256: cc8bb1de10eeedeaefa8d61641bd03f629215dbc2f6d0fa401540d6e1b15591a
+          TRANSFORM_SHA256: 09c9e982461f362b6f77a24ec92d8faf76dcd2c554a6a5f6cd3438955d50eb1d
         shell: bash
         run: |
           set -uo pipefail
