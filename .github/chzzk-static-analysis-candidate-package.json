@@ -1,0 +1,53 @@
+{
+  "name": "chzzk",
+  "version": "0.1.11",
+  "private": true,
+  "type": "module",
+  "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solitude0429/CHZZK.git"
+  },
+  "scripts": {
+    "audit:deps": "npm audit --audit-level=moderate",
+    "audit:package": "node scripts/verify-package.js",
+    "build": "npm run build:runtime && node scripts/build-extension-package.js",
+    "build:runtime": "node scripts/build-runtime.js",
+    "build:update-manifest": "node scripts/build-update-manifest.js",
+    "check:generated": "node scripts/check-generated.js",
+    "configure:review-gate": "node scripts/configure-review-gate.js",
+    "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
+    "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
+    "format:check": "prettier --check \"**/*.{js,mjs,json,md,yml}\" --ignore-path .prettierignore",
+    "lint": "eslint .",
+    "lint:webext": "node scripts/validate-extension-source.js",
+    "prepare:release": "node scripts/prepare-release.js",
+    "setup:firefox-e2e": "node scripts/setup-firefox-e2e.js",
+    "setup:firefox-signed-smoke": "node scripts/setup-firefox-signed-smoke.js",
+    "sign:unlisted": "node scripts/sign-unlisted.js",
+    "test": "node --test tests/unit/*.test.js",
+    "test:coverage": "npm run test:coverage:shared && npm run test:coverage:runtime",
+    "test:audit-fuzz": "node scripts/audit-fuzz.js",
+    "test:firefox-e2e": "npm run test:firefox-functional-e2e",
+    "test:firefox-functional-e2e": "node tests/e2e/firefox-update-playback.mjs",
+    "test:firefox-signed-smoke": "node scripts/firefox-signed-smoke.js",
+    "validate:manifest": "node scripts/validate-manifest.js",
+    "validate:project": "node scripts/validate-project-cleanliness.js",
+    "validate:update-manifest": "node scripts/validate-update-manifest.js",
+    "validate:workflows": "node scripts/validate-workflows.js",
+    "verify": "npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:coverage && npm run test:audit-fuzz && npm run audit:deps && npm run build && npm run audit:package",
+    "verify:signed-release": "npm run verify:signed-release-structure",
+    "verify:signed-release-structure": "node scripts/verify-signed-release-structure.js",
+    "test:coverage:shared": "node --test --experimental-test-coverage --test-coverage-include=src/shared/**/*.js --test-coverage-lines=90 --test-coverage-functions=90 --test-coverage-branches=65 tests/unit/diagnostics.test.js tests/unit/playlist-evidence.test.js tests/unit/quality.test.js tests/unit/session-rules.test.js",
+    "test:coverage:runtime": "node scripts/check-runtime-coverage.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "esbuild": "0.28.1",
+    "eslint": "10.8.0",
+    "globals": "17.7.0",
+    "jszip": "3.10.1",
+    "prettier": "3.9.4",
+    "yaml": "2.9.0"
+  }
+}
