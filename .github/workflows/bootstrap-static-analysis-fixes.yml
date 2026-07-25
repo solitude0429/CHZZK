@@ -57,12 +57,12 @@ jobs:
             node "$TRANSFORM"
             node <<'NODE'
           const { readFileSync, writeFileSync } = require("node:fs");
-          const path = "src/shared/playlist-evidence.js";
-          const source = readFileSync(path, "utf8");
-          const before = String.raw`function isPlaylistUri(value) {
+          const playlistPath = "src/shared/playlist-evidence.js";
+          const playlistSource = readFileSync(playlistPath, "utf8");
+          const playlistBefore = String.raw`function isPlaylistUri(value) {
             return typeof value === "string" && value !== "" && !value.startsWith("#") && !/[\u0000-\u001f\u007f]/.test(value);
           }`;
-          const after = `function isPlaylistUri(value) {
+          const playlistAfter = `function isPlaylistUri(value) {
             if (typeof value !== "string" || value === "" || value.startsWith("#")) return false;
             for (let index = 0; index < value.length; index += 1) {
               const codePoint = value.charCodeAt(index);
@@ -70,9 +70,28 @@ jobs:
             }
             return true;
           }`;
-          const count = source.split(before).length - 1;
-          if (count !== 1) throw new Error(`Expected one playlist URI helper, found ${count}`);
-          writeFileSync(path, source.replace(before, after), "utf8");
+          const playlistCount = playlistSource.split(playlistBefore).length - 1;
+          if (playlistCount !== 1) {
+            throw new Error(`Expected one playlist URI helper, found ${playlistCount}`);
+          }
+          writeFileSync(playlistPath, playlistSource.replace(playlistBefore, playlistAfter), "utf8");
+
+          const fixturePaths = [
+            "tests/unit/update-manifest.test.js",
+            "tests/unit/release-metadata.test.js",
+            "tests/unit/firefox-signed-smoke.test.js",
+            "tests/unit/release-pipeline.test.js",
+          ];
+          const digestBefore = "sha256: String(index + 1).repeat(64),";
+          const digestAfter = 'sha256: (index + 1).toString(16).padStart(64, "0"),';
+          for (const fixturePath of fixturePaths) {
+            const fixtureSource = readFileSync(fixturePath, "utf8");
+            const count = fixtureSource.split(digestBefore).length - 1;
+            if (count !== 1) {
+              throw new Error(`${fixturePath}: expected one synthetic digest generator, found ${count}`);
+            }
+            writeFileSync(fixturePath, fixtureSource.replace(digestBefore, digestAfter), "utf8");
+          }
           NODE
             npm ci
             npx prettier --write "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
@@ -104,8 +123,11 @@ jobs:
             echo "completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             cat "$OUTCOME"
             echo
-            echo "--- verification log (last 500 lines) ---"
-            tail -n 500 "$LOG"
+            echo "--- failure summary ---"
+            grep -nE "not ok|failureType:|error:|ERR_" "$LOG" | tail -n 1000 || true
+            echo
+            echo "--- verification log (last 800 lines) ---"
+            tail -n 800 "$LOG"
           } > .github/chzzk-static-analysis-result.txt
           git add .github/chzzk-static-analysis-result.txt
           if ! git diff --cached --quiet; then
