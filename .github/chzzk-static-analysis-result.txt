@@ -1,504 +1,822 @@
-completed_at=2026-07-25T14:06:28Z
+completed_at=2026-07-25T14:10:15Z
 status=failure
 
---- verification log (last 500 lines) ---
-      duration_ms: 677.133724
+--- failure summary ---
+576:    not ok 51 - prewarms already-open live tabs after extension install/startup so update does not require a manual refresh
+581:      failureType: 'testCodeFailure'
+582:      error: |-
+595:      code: 'ERR_ASSERTION'
+646:    not ok 55 - prewarms already-open live tabs even when startup diagnostics storage fails
+651:      failureType: 'testCodeFailure'
+652:      error: |-
+665:      code: 'ERR_ASSERTION'
+771:    not ok 69 - accepts BOM/whitespace-prefixed playlists with real CDN-compatible MIME types
+776:      failureType: 'testCodeFailure'
+777:      error: '"undefined" is not valid JSON'
+778:      code: 'ERR_TEST_FAILURE'
+824:not ok 4 - background runtime quality resolution
+829:  failureType: 'subtestsFailed'
+830:  error: '3 subtests failed'
+831:  code: 'ERR_TEST_FAILURE'
+
+--- verification log (last 800 lines) ---
+      duration_ms: 2.904689
+      type: 'test'
+      ...
+    # Subtest: rejects noncanonical project identity, URLs, and archive names
+    ok 2 - rejects noncanonical project identity, URLs, and archive names
+      ---
+      duration_ms: 0.834613
+      type: 'test'
+      ...
+    # Subtest: requires one valid digest and safe size for every exact runtime path
+    ok 3 - requires one valid digest and safe size for every exact runtime path
+      ---
+      duration_ms: 1.371708
+      type: 'test'
+      ...
+    # Subtest: makes AMO and update callers reject noncanonical metadata before side effects
+    ok 4 - makes AMO and update callers reject noncanonical metadata before side effects
+      ---
+      duration_ms: 2.701228
+      type: 'test'
+      ...
+    1..4
+ok 14 - canonical release metadata schema
+  ---
+  duration_ms: 9.759225
+  type: 'suite'
+  ...
+# Subtest: release notice packaging
+    # Subtest: ships the license and attribution notice through signing and finalization
+    ok 1 - ships the license and attribution notice through signing and finalization
+      ---
+      duration_ms: 1.154461
+      type: 'test'
+      ...
+    # Subtest: treats notice changes as release/security-sensitive
+    ok 2 - treats notice changes as release/security-sensitive
+      ---
+      duration_ms: 0.221024
+      type: 'test'
+      ...
+    1..2
+ok 15 - release notice packaging
+  ---
+  duration_ms: 2.41892
+  type: 'suite'
+  ...
+# Subtest: immutable release preparation
+    # Subtest: archives only exact regular allowlisted files and is byte deterministic
+    ok 1 - archives only exact regular allowlisted files and is byte deterministic
+      ---
+      duration_ms: 128.534106
+      type: 'test'
+      ...
+    # Subtest: fails before packaging when an allowlisted runtime path is a symlink
+    ok 2 - fails before packaging when an allowlisted runtime path is a symlink
+      ---
+      duration_ms: 4.165551
+      type: 'test'
+      ...
+    # Subtest: reads a source through one pinned descriptor even if its pathname is replaced after open
+    ok 3 - reads a source through one pinned descriptor even if its pathname is replaced after open
+      ---
+      duration_ms: 0.712404
+      type: 'test'
+      ...
+    1..3
+ok 16 - immutable release preparation
+  ---
+  duration_ms: 134.473418
+  type: 'suite'
+  ...
+# Subtest: signed release structural verification
+    # Subtest: binds an AMO-shaped XPI to prepared metadata without claiming signature authenticity
+    ok 1 - binds an AMO-shaped XPI to prepared metadata without claiming signature authenticity
+      ---
+      duration_ms: 72.092164
+      type: 'test'
+      ...
+    # Subtest: rejects noncanonical metadata and source archive basenames at the verifier API boundary
+    ok 2 - rejects noncanonical metadata and source archive basenames at the verifier API boundary
+      ---
+      duration_ms: 35.668735
+      type: 'test'
+      ...
+    # Subtest: accepts AMO manifest formatting and key-order normalization when semantics are identical
+    ok 3 - accepts AMO manifest formatting and key-order normalization when semantics are identical
+      ---
+      duration_ms: 53.398402
+      type: 'test'
+      ...
+    # Subtest: does not collapse distinct JSON numeric tokens during manifest comparison
+    ok 4 - does not collapse distinct JSON numeric tokens during manifest comparison
+      ---
+      duration_ms: 171.377465
+      type: 'test'
+      ...
+    # Subtest: normalizes mathematically equivalent JSON exponent spellings losslessly
+    ok 5 - normalizes mathematically equivalent JSON exponent spellings losslessly
+      ---
+      duration_ms: 76.858945
+      type: 'test'
+      ...
+    # Subtest: rejects a signed XPI whose embedded identity differs from release metadata
+    ok 6 - rejects a signed XPI whose embedded identity differs from release metadata
+      ---
+      duration_ms: 45.339786
+      type: 'test'
+      ...
+    # Subtest: rejects duplicate signed manifest keys before semantic comparison
+    ok 7 - rejects duplicate signed manifest keys before semantic comparison
+      ---
+      duration_ms: 40.593104
+      type: 'test'
+      ...
+    # Subtest: rejects signed ZIP entries whose raw names normalize into the runtime allowlist
+    ok 8 - rejects signed ZIP entries whose raw names normalize into the runtime allowlist
+      ---
+      duration_ms: 35.005822
+      type: 'test'
+      ...
+    # Subtest: rejects ZIP archive and central-directory entry comments
+    ok 9 - rejects ZIP archive and central-directory entry comments
+      ---
+      duration_ms: 33.1695
+      type: 'test'
+      ...
+    # Subtest: rejects unaccounted bytes before the first ZIP entry
+    ok 10 - rejects unaccounted bytes before the first ZIP entry
+      ---
+      duration_ms: 33.571106
+      type: 'test'
+      ...
+    # Subtest: rejects unaccounted bytes between the final ZIP entry and central directory
+    ok 11 - rejects unaccounted bytes between the final ZIP entry and central directory
+      ---
+      duration_ms: 29.161776
+      type: 'test'
+      ...
+    # Subtest: enforces the exact bounded Mozilla signature metadata structure
+    ok 12 - enforces the exact bounded Mozilla signature metadata structure
+      ---
+      duration_ms: 50.822724
+      type: 'test'
+      ...
+    # Subtest: rejects a signed XPI above the compressed archive cap before ZIP parsing
+    ok 13 - rejects a signed XPI above the compressed archive cap before ZIP parsing
+      ---
+      duration_ms: 48.834358
+      type: 'test'
+      ...
+    # Subtest: rejects oversized compressed and uncompressed entries from central-directory metadata
+    ok 14 - rejects oversized compressed and uncompressed entries from central-directory metadata
+      ---
+      duration_ms: 250.023736
+      type: 'test'
+      ...
+    # Subtest: rejects excessive aggregate uncompressed size before full inflation
+    ok 15 - rejects excessive aggregate uncompressed size before full inflation
+      ---
+      duration_ms: 82.554809
+      type: 'test'
+      ...
+    # Subtest: rejects excessive central-directory compression ratios before full inflation
+    ok 16 - rejects excessive central-directory compression ratios before full inflation
+      ---
+      duration_ms: 66.364926
+      type: 'test'
+      ...
+    1..16
+ok 17 - signed release structural verification
+  ---
+  duration_ms: 1126.556249
+  type: 'suite'
+  ...
+# Subtest: minimal AMO signing client
+    # Subtest: rejects a noncanonical prepared ZIP basename before any AMO request
+    ok 1 - rejects a noncanonical prepared ZIP basename before any AMO request
+      ---
+      duration_ms: 1.210594
+      type: 'test'
+      ...
+    # Subtest: rejects leading-zero and overlong release version components before any AMO request
+    ok 2 - rejects leading-zero and overlong release version components before any AMO request
+      ---
+      duration_ms: 1.593279
+      type: 'test'
+      ...
+    # Subtest: uploads only the prepared archive and downloads the approved signed XPI
+    ok 3 - uploads only the prepared archive and downloads the approved signed XPI
+      ---
+      duration_ms: 47.213547
+      type: 'test'
+      ...
+    # Subtest: resumes an existing unlisted target version without creating another upload
+    ok 4 - resumes an existing unlisted target version without creating another upload
+      ---
+      duration_ms: 3.318254
+      type: 'test'
+      ...
+    # Subtest: retries only approved-URL 404s with a fresh JWT inside the global deadline
+    ok 5 - retries only approved-URL 404s with a fresh JWT inside the global deadline
+      ---
+      duration_ms: 206.586251
+      type: 'test'
+      ...
+    # Subtest: stops repeated approved-URL 404 retries at the one global signing deadline
+    ok 6 - stops repeated approved-URL 404 retries at the one global signing deadline
+      ---
+      duration_ms: 27.220921
+      type: 'test'
+      ...
+    # Subtest: fails a signed-download 403 immediately without retrying
+    ok 7 - fails a signed-download 403 immediately without retrying
+      ---
+      duration_ms: 1.883733
+      type: 'test'
+      ...
+    # Subtest: validates the AMO poll interval as a bounded safe integer before any request
+    ok 8 - validates the AMO poll interval as a bounded safe integer before any request
+      ---
+      duration_ms: 1.808292
+      type: 'test'
+      ...
+    # Subtest: rejects oversized signed Content-Length and cancels before reading the body
+    ok 9 - rejects oversized signed Content-Length and cancels before reading the body
+      ---
+      duration_ms: 1.360443
+      type: 'test'
+      ...
+    # Subtest: streams and cancels an undeclared oversized signed body before aggregate allocation
+    ok 10 - streams and cancels an undeclared oversized signed body before aggregate allocation
+      ---
+      duration_ms: 3.076131
+      type: 'test'
+      ...
+    # Subtest: bounds AMO JSON response bytes before parsing and cancels oversized bodies
+    ok 11 - bounds AMO JSON response bytes before parsing and cancels oversized bodies
+      ---
+      duration_ms: 0.872441
+      type: 'test'
+      ...
+    # Subtest: rejects AMO JSON responses beyond the nesting limit
+    ok 12 - rejects AMO JSON responses beyond the nesting limit
+      ---
+      duration_ms: 1.739102
+      type: 'test'
+      ...
+    # Subtest: rejects listed or wrong-version submission records before polling
+    ok 13 - rejects listed or wrong-version submission records before polling
+      ---
+      duration_ms: 5.304167
+      type: 'test'
+      ...
+    # Subtest: rejects listed or wrong-version approval records before downloading
+    ok 14 - rejects listed or wrong-version approval records before downloading
+      ---
+      duration_ms: 5.644162
+      type: 'test'
+      ...
+    # Subtest: rejects duplicate target versions spread across pagination
+    ok 15 - rejects duplicate target versions spread across pagination
+      ---
+      duration_ms: 1.416619
+      type: 'test'
+      ...
+    # Subtest: times out a stalled AMO API fetch
+    ok 16 - times out a stalled AMO API fetch
+      ---
+      duration_ms: 24.975548
+      type: 'test'
+      ...
+    # Subtest: times out a stalled AMO JSON response body
+    ok 17 - times out a stalled AMO JSON response body
+      ---
+      duration_ms: 26.860322
+      type: 'test'
+      ...
+    # Subtest: times out a stalled signed-XPI fetch
+    ok 18 - times out a stalled signed-XPI fetch
+      ---
+      duration_ms: 27.290085
+      type: 'test'
+      ...
+    # Subtest: times out a stalled signed-XPI response body
+    ok 19 - times out a stalled signed-XPI response body
+      ---
+      duration_ms: 25.908042
+      type: 'test'
+      ...
+    1..19
+ok 18 - minimal AMO signing client
+  ---
+  duration_ms: 416.409411
+  type: 'suite'
+  ...
+# Subtest: pre-sign GitHub release state inspection
+    # Subtest: accepts a compatible partial draft only after comparing every existing expected byte
+    ok 1 - accepts a compatible partial draft only after comparing every existing expected byte
+      ---
+      duration_ms: 99.622885
+      type: 'test'
+      ...
+    # Subtest: reuses a compatible complete draft's already-verified signed XPI without another AMO operation
+    ok 2 - reuses a compatible complete draft's already-verified signed XPI without another AMO operation
+      ---
+      duration_ms: 88.511589
+      type: 'test'
+      ...
+    # Subtest: rejects stale targets, orphan tags, foreign assets, and changed expected bytes
+    ok 3 - rejects stale targets, orphan tags, foreign assets, and changed expected bytes
+      ---
+      duration_ms: 122.407687
+      type: 'test'
+      ...
+    1..3
+ok 19 - pre-sign GitHub release state inspection
+  ---
+  duration_ms: 312.320249
+  type: 'suite'
+  ...
+# Subtest: attested release draft staging workflow shell
+    # Subtest: stages a new release as a mutable draft without querying the repository immutable setting
+    ok 1 - stages a new release as a mutable draft without querying the repository immutable setting
+      ---
+      duration_ms: 586.447346
+      type: 'test'
+      ...
+    # Subtest: rejects a pre-existing published mutable release without mutating it
+    ok 2 - rejects a pre-existing published mutable release without mutating it
+      ---
+      duration_ms: 217.842871
+      type: 'test'
+      ...
+    # Subtest: is a true no-op when an existing immutable release has the same tag and exact bytes
+    ok 3 - is a true no-op when an existing immutable release has the same tag and exact bytes
+      ---
+      duration_ms: 270.57638
+      type: 'test'
+      ...
+    # Subtest: fails closed without overwriting an existing release when any byte differs
+    ok 4 - fails closed without overwriting an existing release when any byte differs
+      ---
+      duration_ms: 278.073791
+      type: 'test'
+      ...
+    # Subtest: rejects an existing prerelease instead of treating it as published reuse
+    ok 5 - rejects an existing prerelease instead of treating it as published reuse
+      ---
+      duration_ms: 132.244586
+      type: 'test'
+      ...
+    # Subtest: resumes a compatible partial draft and stages the exact asset set
+    ok 6 - resumes a compatible partial draft and stages the exact asset set
+      ---
+      duration_ms: 514.147544
+      type: 'test'
+      ...
+    # Subtest: recovers when release creation reports failure after committing the draft
+    ok 7 - recovers when release creation reports failure after committing the draft
+      ---
+      duration_ms: 588.327843
+      type: 'test'
+      ...
+    # Subtest: creates and verifies a new draft without making it visible
+    ok 8 - creates and verifies a new draft without making it visible
+      ---
+      duration_ms: 623.244271
       type: 'test'
       ...
     1..8
 ok 20 - attested release draft staging workflow shell
   ---
-  duration_ms: 3465.06379
+  duration_ms: 3212.473972
   type: 'suite'
   ...
 # Subtest: review-gate GitHub evidence collection
     # Subtest: collects a reaction only from the exact-head operator request before passing
     ok 1 - collects a reaction only from the exact-head operator request before passing
       ---
-      duration_ms: 418.058242
+      duration_ms: 386.064381
       type: 'test'
       ...
     # Subtest: fails closed on reaction provenance, timestamps, metadata, comment, or review races
     ok 2 - fails closed on reaction provenance, timestamps, metadata, comment, or review races
       ---
-      duration_ms: 2066.988565
+      duration_ms: 2067.277116
       type: 'test'
       ...
     # Subtest: reports a pending collection race when a same-second comment appears between snapshots
     ok 3 - reports a pending collection race when a same-second comment appears between snapshots
       ---
-      duration_ms: 487.811384
+      duration_ms: 476.982315
       type: 'test'
       ...
     1..3
 ok 21 - review-gate GitHub evidence collection
   ---
-  duration_ms: 2974.057938
+  duration_ms: 2931.636606
   type: 'suite'
   ...
 # Subtest: sole-owner review-gate repository configuration
     # Subtest: plans without mutation, applies exactly, preserves branch protection, and is idempotent
     ok 1 - plans without mutation, applies exactly, preserves branch protection, and is idempotent
       ---
-      duration_ms: 1666.06614
+      duration_ms: 1586.661307
       type: 'test'
       ...
     # Subtest: bootstraps missing status-check protection and accepts contexts-only responses
     ok 2 - bootstraps missing status-check protection and accepts contexts-only responses
       ---
-      duration_ms: 823.206722
+      duration_ms: 785.310469
       type: 'test'
       ...
     1..2
 ok 22 - sole-owner review-gate repository configuration
   ---
-  duration_ms: 2490.551917
+  duration_ms: 2373.480077
   type: 'suite'
   ...
 # Subtest: exact-head release and security review completion
     # Subtest: classifies broad security/release paths plus explicit labels or force input
     ok 1 - classifies broad security/release paths plus explicit labels or force input
       ---
-      duration_ms: 2.01443
+      duration_ms: 2.806015
       type: 'test'
       ...
     # Subtest: includes a renamed file's previous path in sensitive-path classification
     ok 2 - includes a renamed file's previous path in sensitive-path classification
       ---
-      duration_ms: 0.834283
+      duration_ms: 1.330328
       type: 'test'
       ...
     # Subtest: accepts only an exact-head APPROVED review as direct completion evidence
     ok 3 - accepts only an exact-head APPROVED review as direct completion evidence
       ---
-      duration_ms: 1.829135
+      duration_ms: 2.616782
       type: 'test'
       ...
     # Subtest: rejects an unbound issue-level +1
     ok 4 - rejects an unbound issue-level +1
       ---
-      duration_ms: 0.358424
+      duration_ms: 0.355865
       type: 'test'
       ...
     # Subtest: rejects a pre-bound reaction when GitHub observed the exact head later
     ok 5 - rejects a pre-bound reaction when GitHub observed the exact head later
       ---
-      duration_ms: 0.49646
+      duration_ms: 0.588139
       type: 'test'
       ...
     # Subtest: requires a reaction to be strictly later than both PR activity and request-comment edits
     ok 6 - requires a reaction to be strictly later than both PR activity and request-comment edits
       ---
-      duration_ms: 0.659812
+      duration_ms: 0.832747
       type: 'test'
       ...
     # Subtest: prefers a +1 bound to an operator comment containing the full exact head SHA
     ok 7 - prefers a +1 bound to an operator comment containing the full exact head SHA
       ---
-      duration_ms: 0.501287
+      duration_ms: 0.591126
       type: 'test'
       ...
     # Subtest: does not treat an issue-level clean-review comment as completion evidence
     ok 8 - does not treat an issue-level clean-review comment as completion evidence
       ---
-      duration_ms: 0.413396
+      duration_ms: 0.488253
       type: 'test'
       ...
     # Subtest: requires a clean reaction to postdate an exact-head findings review
     ok 9 - requires a clean reaction to postdate an exact-head findings review
       ---
-      duration_ms: 0.621766
+      duration_ms: 0.755363
       type: 'test'
       ...
     # Subtest: rejects otherwise valid evidence from the wrong actor
     ok 10 - rejects otherwise valid evidence from the wrong actor
       ---
-      duration_ms: 0.615427
+      duration_ms: 0.733492
       type: 'test'
       ...
     # Subtest: fails closed on malformed or missing evidence dates and identities
     ok 11 - fails closed on malformed or missing evidence dates and identities
       ---
-      duration_ms: 0.585332
+      duration_ms: 0.753498
       type: 'test'
       ...
     # Subtest: requires zero unresolved review threads even with exact-head reviewer evidence
     ok 12 - requires zero unresolved review threads even with exact-head reviewer evidence
       ---
-      duration_ms: 0.364453
+      duration_ms: 0.396792
       type: 'test'
       ...
     # Subtest: does not require reviewer evidence for an ordinary PR, but still binds the reported head
     ok 13 - does not require reviewer evidence for an ordinary PR, but still binds the reported head
       ---
-      duration_ms: 0.176243
+      duration_ms: 0.210072
       type: 'test'
       ...
     1..13
 ok 23 - exact-head release and security review completion
   ---
-  duration_ms: 11.120925
+  duration_ms: 14.82156
   type: 'suite'
   ...
 # Subtest: release and repository security guardrails
     # Subtest: rejects command-line delivery of AMO signing secrets and uses a dependency-free signer
     ok 1 - rejects command-line delivery of AMO signing secrets and uses a dependency-free signer
       ---
-      duration_ms: 51.575517
+      duration_ms: 59.457215
       type: 'test'
       ...
     # Subtest: pins all actions and semantically separates build, secret, attestation, and staging authority
     ok 2 - pins all actions and semantically separates build, secret, attestation, and staging authority
       ---
-      duration_ms: 27.254108
+      duration_ms: 29.821489
       type: 'test'
       ...
     # Subtest: stages exact release assets and leaves immutable publication to the out-of-band administrator
     ok 3 - stages exact release assets and leaves immutable publication to the out-of-band administrator
       ---
-      duration_ms: 14.997169
+      duration_ms: 10.35408
       type: 'test'
       ...
     # Subtest: runs the final AMO-signed XPI through stock Firefox before attestation and draft staging
     ok 4 - runs the final AMO-signed XPI through stock Firefox before attestation and draft staging
       ---
-      duration_ms: 18.808246
+      duration_ms: 16.561814
       type: 'test'
       ...
     # Subtest: removes generated-file auto-commit workflows and retired external collector code
     ok 5 - removes generated-file auto-commit workflows and retired external collector code
       ---
-      duration_ms: 0.352435
+      duration_ms: 0.251019
       type: 'test'
       ...
     # Subtest: removes unnecessary Scorecard OIDC and analyzes only shipped JavaScript
     ok 6 - removes unnecessary Scorecard OIDC and analyzes only shipped JavaScript
       ---
-      duration_ms: 0.380507
+      duration_ms: 0.382005
       type: 'test'
       ...
     # Subtest: pins direct dependencies and ignores local secrets and generated release artifacts
     ok 7 - pins direct dependencies and ignores local secrets and generated release artifacts
       ---
-      duration_ms: 0.539554
+      duration_ms: 0.443319
       type: 'test'
       ...
     # Subtest: deploys only an attested exact release set through the transactional deployment library
     ok 8 - deploys only an attested exact release set through the transactional deployment library
       ---
-      duration_ms: 0.622107
+      duration_ms: 0.561831
       type: 'test'
       ...
     # Subtest: requires trusted exact-head reviewer evidence with sole-owner branch protection
     ok 9 - requires trusted exact-head reviewer evidence with sole-owner branch protection
       ---
-      duration_ms: 120.568747
+      duration_ms: 104.959298
       type: 'test'
       ...
     # Subtest: keeps extension diagnostics local-only and documented as such
     ok 10 - keeps extension diagnostics local-only and documented as such
       ---
-      duration_ms: 0.813562
+      duration_ms: 0.835963
       type: 'test'
       ...
     1..10
 ok 24 - release and repository security guardrails
   ---
-  duration_ms: 237.766673
+  duration_ms: 225.655222
   type: 'suite'
   ...
 # Subtest: MV2 required-permission CHZZK redirect request policy
     # Subtest: recognizes only HTTPS CHZZK site URLs for same-site navigation state
     ok 1 - recognizes only HTTPS CHZZK site URLs for same-site navigation state
       ---
-      duration_ms: 1.056633
+      duration_ms: 1.612805
       type: 'test'
       ...
     # Subtest: derives required install permissions from CHZZK and trusted HLS domains
     ok 2 - derives required install permissions from CHZZK and trusted HLS domains
       ---
-      duration_ms: 12.120905
+      duration_ms: 13.330184
       type: 'test'
       ...
     # Subtest: trusts CHZZK context or the narrowly scoped dedicated-livecloud fallback
     ok 3 - trusts CHZZK context or the narrowly scoped dedicated-livecloud fallback
       ---
-      duration_ms: 3.025607
+      duration_ms: 3.254956
       type: 'test'
       ...
     # Subtest: recognizes trusted master playlists without treating numeric playlists as masters
     ok 4 - recognizes trusted master playlists without treating numeric playlists as masters
       ---
-      duration_ms: 0.681215
+      duration_ms: 0.671265
       type: 'test'
       ...
     # Subtest: reports contradictory quality markers as a distinct fail-closed decision
     ok 5 - reports contradictory quality markers as a distinct fail-closed decision
       ---
-      duration_ms: 0.352365
+      duration_ms: 0.4974
       type: 'test'
       ...
     # Subtest: trusts a prewarmed CHZZK live tab even when Firefox omits documentUrl on the first HLS request
     ok 6 - trusts a prewarmed CHZZK live tab even when Firefox omits documentUrl on the first HLS request
       ---
-      duration_ms: 0.433355
+      duration_ms: 0.442307
       type: 'test'
       ...
     # Subtest: lets explicit non-CHZZK document and origin metadata veto stale prewarmed trust
     ok 7 - lets explicit non-CHZZK document and origin metadata veto stale prewarmed trust
       ---
-      duration_ms: 0.34205
+      duration_ms: 0.346729
       type: 'test'
       ...
     # Subtest: continues same-site CHZZK mini-player playback only on dedicated livecloud hosts
     ok 8 - continues same-site CHZZK mini-player playback only on dedicated livecloud hosts
       ---
-      duration_ms: 0.804007
+      duration_ms: 0.627063
       type: 'test'
       ...
     # Subtest: rejects generic-CDN CHZZK path markers without page context
     ok 9 - rejects generic-CDN CHZZK path markers without page context
       ---
-      duration_ms: 0.428489
+      duration_ms: 0.356256
       type: 'test'
       ...
     # Subtest: does not trust generic livecloud-looking CDN HLS outside CHZZK request context
     ok 10 - does not trust generic livecloud-looking CDN HLS outside CHZZK request context
       ---
-      duration_ms: 0.608737
+      duration_ms: 0.445814
       type: 'test'
       ...
     # Subtest: covers CHZZK-hosted numeric playlist requests when the site serves HLS from its own domain
     ok 11 - covers CHZZK-hosted numeric playlist requests when the site serves HLS from its own domain
       ---
-      duration_ms: 0.30836
+      duration_ms: 0.252192
       type: 'test'
       ...
     # Subtest: covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests
     ok 12 - covers CHZZK livecloud GSCdn playlist requests and Firefox other-typed HLS requests
       ---
-      duration_ms: 0.367418
+      duration_ms: 0.505315
       type: 'test'
       ...
     # Subtest: does not record diagnostics for unrelated CDN HLS traffic
     ok 13 - does not record diagnostics for unrelated CDN HLS traffic
       ---
-      duration_ms: 0.256412
+      duration_ms: 0.254697
       type: 'test'
       ...
     1..13
 ok 25 - MV2 required-permission CHZZK redirect request policy
   ---
-  duration_ms: 23.94666
+  duration_ms: 27.323548
   type: 'suite'
   ...
 # Subtest: atomic internal update deployment
     # Subtest: bounds waits for a lock-holder child that never reports cleanup
     ok 1 - bounds waits for a lock-holder child that never reports cleanup
       ---
-      duration_ms: 21.465145
+      duration_ms: 20.719279
       type: 'test'
       ...
     # Subtest: preserves pre-existing directory modes and reuses an exact immutable release
     ok 2 - preserves pre-existing directory modes and reuses an exact immutable release
       ---
-      duration_ms: 240.486829
+      duration_ms: 382.121513
       type: 'test'
       ...
     # Subtest: deploys the verifier-returned bytes even if every validated input path is replaced afterward
     ok 3 - deploys the verifier-returned bytes even if every validated input path is replaced afterward
       ---
-      duration_ms: 93.547933
+      duration_ms: 88.106938
       type: 'test'
       ...
     # Subtest: rejects writable managed directories instead of reusing them as immutable
     ok 4 - rejects writable managed directories instead of reusing them as immutable
       ---
-      duration_ms: 83.658064
+      duration_ms: 77.268202
       type: 'test'
       ...
     # Subtest: rejects a target reached through a symbolic-link ancestor
     ok 5 - rejects a target reached through a symbolic-link ancestor
       ---
-      duration_ms: 36.526634
+      duration_ms: 32.287419
       type: 'test'
       ...
     # Subtest: uses the validated normalized target instead of following a symlink hidden by parent segments
     ok 6 - uses the validated normalized target instead of following a symlink hidden by parent segments
       ---
-      duration_ms: 69.432365
+      duration_ms: 68.987079
       type: 'test'
       ...
     # Subtest: fails closed while another process holds the advisory deployment lock
     ok 7 - fails closed while another process holds the advisory deployment lock
       ---
-      duration_ms: 52.795771
+      duration_ms: 54.172299
       type: 'test'
       ...
     # Subtest: rolls back every live link and removes the new release when activation fails
     ok 8 - rolls back every live link and removes the new release when activation fails
       ---
-      duration_ms: 125.867544
+      duration_ms: 131.120851
       type: 'test'
       ...
     # Subtest: rolls back activation when post-commit release verification fails
     ok 9 - rolls back activation when post-commit release verification fails
       ---
-      duration_ms: 132.138961
+      duration_ms: 119.056121
       type: 'test'
       ...
     # Subtest: recovers and retries after process death at every durable activation boundary
     ok 10 - recovers and retries after process death at every durable activation boundary
       ---
-      duration_ms: 925.919701
+      duration_ms: 843.606304
       type: 'test'
       ...
     # Subtest: restores the pre-crash generation before a failed retry rolls back
     ok 11 - restores the pre-crash generation before a failed retry rolls back
       ---
-      duration_ms: 290.085254
+      duration_ms: 251.658918
       type: 'test'
       ...
     1..11
 ok 26 - atomic internal update deployment
   ---
-  duration_ms: 2074.354161
+  duration_ms: 2071.572366
   type: 'suite'
   ...
 # Subtest: strict Firefox update manifest
     # Subtest: builds update metadata only from immutable release metadata and signed XPI bytes
-    not ok 1 - builds update metadata only from immutable release metadata and signed XPI bytes
+    ok 1 - builds update metadata only from immutable release metadata and signed XPI bytes
       ---
-      duration_ms: 2.904326
+      duration_ms: 4.079017
       type: 'test'
-      location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:41:3'
-      failureType: 'testCodeFailure'
-      error: 'Invalid release file digest: manifest.json'
-      code: 'ERR_TEST_FAILURE'
-      stack: |-
-        assertReleaseMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/amo-client.js:116:45)
-        validateReleaseUpdateMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:25:3)
-        buildUpdateManifestDocument (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:55:3)
-        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:47:24)
-        Test.runInAsyncScope (node:async_hooks:214:14)
-        Test.run (node:internal/test_runner/test:1047:25)
-        Test.start (node:internal/test_runner/test:944:17)
-        node:internal/test_runner/test:1440:71
-        node:internal/per_context/primordials:466:82
-        new Promise (<anonymous>)
       ...
     # Subtest: rejects extra keys, add-ons, update entries, and noncanonical update URLs
-    not ok 2 - rejects extra keys, add-ons, update entries, and noncanonical update URLs
+    ok 2 - rejects extra keys, add-ons, update entries, and noncanonical update URLs
       ---
-      duration_ms: 0.473167
+      duration_ms: 1.930599
       type: 'test'
-      location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:67:3'
-      failureType: 'testCodeFailure'
-      error: 'Invalid release file digest: manifest.json'
-      code: 'ERR_TEST_FAILURE'
-      stack: |-
-        assertReleaseMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/amo-client.js:116:45)
-        validateReleaseUpdateMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:25:3)
-        buildUpdateManifestDocument (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:55:3)
-        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:68:18)
-        Test.runInAsyncScope (node:async_hooks:214:14)
-        Test.run (node:internal/test_runner/test:1047:25)
-        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
-        Test.postRun (node:internal/test_runner/test:1173:19)
-        Test.run (node:internal/test_runner/test:1101:12)
-        async Promise.all (index 0)
       ...
     # Subtest: rejects a noncanonical signed XPI basename in direct path-based API use
-    not ok 3 - rejects a noncanonical signed XPI basename in direct path-based API use
+    ok 3 - rejects a noncanonical signed XPI basename in direct path-based API use
       ---
-      duration_ms: 1.977301
+      duration_ms: 0.673379
       type: 'test'
-      location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:106:3'
-      failureType: 'testCodeFailure'
-      error: |-
-        The input did not match the regular expression /canonical|signed XPI.*filename|basename/i. Input:
-        
-        'Error: Invalid release file digest: manifest.json'
-        
-      code: 'ERR_ASSERTION'
-      name: 'AssertionError'
-      expected:
-      actual:
-      error: 'Invalid release file digest: manifest.json'
-      stack: |-
-        assertReleaseMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/amo-client.js:116:45)
-        validateReleaseUpdateMetadata (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:25:3)
-        buildUpdateManifestDocument (file:///home/runner/work/CHZZK/CHZZK/scripts/lib/update-manifest.js:55:3)
-        file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:112:15
-        getActual (node:assert:609:5)
-        Function.throws (node:assert:757:24)
-        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:111:14)
-        Test.runInAsyncScope (node:async_hooks:214:14)
-        Test.run (node:internal/test_runner/test:1047:25)
-        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
-      operator: 'throws'
-      stack: |-
-        TestContext.<anonymous> (file:///home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:111:14)
-        Test.runInAsyncScope (node:async_hooks:214:14)
-        Test.run (node:internal/test_runner/test:1047:25)
-        Suite.processPendingSubtests (node:internal/test_runner/test:744:18)
-        Test.postRun (node:internal/test_runner/test:1173:19)
-        Test.run (node:internal/test_runner/test:1101:12)
-        async Suite.processPendingSubtests (node:internal/test_runner/test:744:7)
       ...
     1..3
-not ok 27 - strict Firefox update manifest
+ok 27 - strict Firefox update manifest
   ---
-  duration_ms: 6.864297
+  duration_ms: 8.031437
   type: 'suite'
-  location: '/home/runner/work/CHZZK/CHZZK/tests/unit/update-manifest.test.js:40:1'
-  failureType: 'subtestsFailed'
-  error: '3 subtests failed'
-  code: 'ERR_TEST_FAILURE'
   ...
 # Subtest: semantic workflow policy
     # Subtest: accepts an explicitly permissioned read-only workflow
     ok 1 - accepts an explicitly permissioned read-only workflow
       ---
-      duration_ms: 1.231283
+      duration_ms: 1.86687
       type: 'test'
       ...
     # Subtest: rejects package installation or project builds in a write-capable job
     ok 2 - rejects package installation or project builds in a write-capable job
       ---
-      duration_ms: 1.045129
+      duration_ms: 1.161532
       type: 'test'
       ...
     # Subtest: rejects checkout credentials and unpinned action references
     ok 3 - rejects checkout credentials and unpinned action references
       ---
-      duration_ms: 0.416132
+      duration_ms: 0.50756
       type: 'test'
       ...
     # Subtest: rejects secrets in jobs that also hold repository or OIDC write authority
     ok 4 - rejects secrets in jobs that also hold repository or OIDC write authority
       ---
-      duration_ms: 0.315584
+      duration_ms: 0.475329
       type: 'test'
       ...
     # Subtest: requires workflow concurrency and per-job timeout/permissions
     ok 5 - requires workflow concurrency and per-job timeout/permissions
       ---
-      duration_ms: 0.298099
+      duration_ms: 0.50299
       type: 'test'
       ...
     1..5
 ok 28 - semantic workflow policy
   ---
-  duration_ms: 4.396364
+  duration_ms: 6.41774
   type: 'suite'
   ...
 1..28
 # tests 282
 # suites 28
-# pass 257
-# fail 25
+# pass 279
+# fail 3
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 7892.540502
+# duration_ms 8124.145402
