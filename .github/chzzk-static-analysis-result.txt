@@ -1,4 +1,4 @@
-completed_at=2026-07-25T14:00:51Z
+completed_at=2026-07-25T14:03:31Z
 status=failure
 
 --- verification log (last 500 lines) ---
@@ -6,15 +6,179 @@ From https://github.com/solitude0429/CHZZK
  * branch            main       -> FETCH_HEAD
 Switched to a new branch 'agent/fix-static-analysis-findings'
 branch 'agent/fix-static-analysis-findings' set up to track 'origin/main'.
-file:///home/runner/work/_temp/chzzk-static-analysis-fix.mjs:32
-    throw new Error(`${relativePath}: expected at least ${minimum} replacements, found ${count}`);
-          ^
+Applied all static-analysis remediations and regression tests.
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
+npm warn deprecated @humanwhocodes/config-array@0.13.0: Use @eslint/config-array instead
+npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported
+npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
+npm warn deprecated glob@7.2.3: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+npm warn deprecated @humanwhocodes/object-schema@2.0.3: Use @eslint/object-schema instead
+npm warn deprecated eslint@8.57.1: This version is no longer supported. Please see https://eslint.org/version-support for other options.
 
-Error: docs/HARDENING.md: expected at least 2 replacements, found 1
-    at replaceAtLeast (file:///home/runner/work/_temp/chzzk-static-analysis-fix.mjs:32:11)
-    at file:///home/runner/work/_temp/chzzk-static-analysis-fix.mjs:1005:1
-    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
-    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)
-    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)
+added 364 packages, and audited 365 packages in 5s
 
-Node.js v22.23.1
+111 packages are looking for funding
+  run `npm fund` for details
+
+13 high severity vulnerabilities
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+[90m.github/dependabot.yml[39m 25ms (unchanged)
+[90m.github/PULL_REQUEST_TEMPLATE/hardening.md[39m 44ms (unchanged)
+[90m.github/workflows/ci.yml[39m 12ms (unchanged)
+[90m.github/workflows/codeql.yml[39m 5ms (unchanged)
+[90m.github/workflows/review-gate.yml[39m 23ms (unchanged)
+[90m.github/workflows/scorecard.yml[39m 5ms (unchanged)
+[90m.github/workflows/sign-unlisted.yml[39m 28ms (unchanged)
+[90m.prettierrc.json[39m 28ms (unchanged)
+[90mdocs/HARDENING.md[39m 84ms (unchanged)
+[90mdocs/OPERATIONS.md[39m 35ms (unchanged)
+[90mdocs/SECURITY.md[39m 34ms (unchanged)
+[90mdocs/SIGNING.md[39m 68ms (unchanged)
+[90mdocs/TESTING.md[39m 21ms (unchanged)
+[90mdocs/TROUBLESHOOTING.md[39m 23ms (unchanged)
+[90mdocs/UPDATES.md[39m 25ms (unchanged)
+manifest.json 6ms
+[90mpackage.json[39m 4ms (unchanged)
+policy/quality-policy.json 3ms
+[90mREADME.md[39m 25ms (unchanged)
+[90mscripts/admin-release-bootstrap.js[39m 107ms (unchanged)
+[90mscripts/analyze-diagnostics.js[39m 10ms (unchanged)
+[90mscripts/audit-fuzz.js[39m 154ms (unchanged)
+[90mscripts/build-runtime.js[39m 3ms (unchanged)
+[90mscripts/build-update-manifest.js[39m 8ms (unchanged)
+[90mscripts/check-generated.js[39m 4ms (unchanged)
+[90mscripts/check-review-gate.js[39m 26ms (unchanged)
+[90mscripts/configure-review-gate.js[39m 29ms (unchanged)
+[90mscripts/deploy-internal-updates.js[39m 8ms (unchanged)
+[90mscripts/finalize-release.js[39m 28ms (unchanged)
+[90mscripts/firefox-signed-smoke.js[39m 2ms (unchanged)
+[90mscripts/lib/amo-client.js[39m 34ms (unchanged)
+[90mscripts/lib/firefox-signed-smoke.js[39m 33ms (unchanged)
+[90mscripts/lib/github-release-state.js[39m 17ms (unchanged)
+[90mscripts/lib/release-artifacts.js[39m 50ms (unchanged)
+[90mscripts/lib/release-finalize-state.js[39m 105ms (unchanged)
+[90mscripts/lib/release-finalize.js[39m 26ms (unchanged)
+[90mscripts/lib/release-version.js[39m 3ms (unchanged)
+[90mscripts/lib/review-gate.js[39m 12ms (unchanged)
+[90mscripts/lib/update-deployment.js[39m 55ms (unchanged)
+[90mscripts/lib/update-manifest.js[39m 9ms (unchanged)
+[90mscripts/preflight-release-state.js[39m 3ms (unchanged)
+[90mscripts/prepare-release.js[39m 6ms (unchanged)
+[90mscripts/setup-firefox-e2e.js[39m 11ms (unchanged)
+[90mscripts/setup-firefox-signed-smoke.js[39m 9ms (unchanged)
+[90mscripts/sign-unlisted.js[39m 3ms (unchanged)
+[90mscripts/validate-manifest.js[39m 6ms (unchanged)
+[90mscripts/validate-project-cleanliness.js[39m 5ms (unchanged)
+[90mscripts/validate-update-manifest.js[39m 4ms (unchanged)
+[90mscripts/validate-workflows.js[39m 13ms (unchanged)
+[90mscripts/verify-package.js[39m 3ms (unchanged)
+[90mscripts/verify-signed-release-structure.js[39m 3ms (unchanged)
+[90msrc/runtime/diagnostics-page.js[39m 8ms (unchanged)
+src/shared/playlist-evidence.js 10ms
+[90msrc/shared/quality.js[39m 27ms (unchanged)
+[90msrc/shared/request-policy.js[39m 17ms (unchanged)
+[90mtests/e2e/firefox-update-playback.mjs[39m 37ms (unchanged)
+[90mtests/fixtures/update-deployment-crash.mjs[39m 2ms (unchanged)
+[90mtests/unit/audit-fuzz.test.js[39m 7ms (unchanged)
+[90mtests/unit/background-hardening-notes.test.js[39m 4ms (unchanged)
+[90mtests/unit/background-request-lifecycle.test.js[39m 7ms (unchanged)
+tests/unit/background-runtime.test.js 142ms
+[90mtests/unit/background-transition-regressions.test.js[39m 14ms (unchanged)
+[90mtests/unit/diagnostics-page.test.js[39m 5ms (unchanged)
+[90mtests/unit/diagnostics.test.js[39m 14ms (unchanged)
+[90mtests/unit/extension-policy.test.js[39m 7ms (unchanged)
+[90mtests/unit/firefox-signed-smoke.test.js[39m 15ms (unchanged)
+tests/unit/playlist-evidence.test.js 2ms
+[90mtests/unit/quality.test.js[39m 10ms (unchanged)
+[90mtests/unit/release-finalize.test.js[39m 89ms (unchanged)
+[90mtests/unit/release-metadata.test.js[39m 5ms (unchanged)
+tests/unit/release-package-notices.test.js 1ms
+[90mtests/unit/release-pipeline.test.js[39m 75ms (unchanged)
+[90mtests/unit/release-state.test.js[39m 9ms (unchanged)
+[90mtests/unit/release-workflow-shell.test.js[39m 14ms (unchanged)
+[90mtests/unit/review-gate-cli.test.js[39m 4ms (unchanged)
+[90mtests/unit/review-gate-settings.test.js[39m 11ms (unchanged)
+[90mtests/unit/review-gate.test.js[39m 10ms (unchanged)
+[90mtests/unit/security-remediation.test.js[39m 22ms (unchanged)
+[90mtests/unit/session-rules.test.js[39m 12ms (unchanged)
+[90mtests/unit/update-deployment.test.js[39m 23ms (unchanged)
+[90mtests/unit/update-manifest.test.js[39m 9ms (unchanged)
+[90mtests/unit/workflow-policy.test.js[39m 3ms (unchanged)
+
+> chzzk@0.1.11 build:runtime
+> node scripts/build-runtime.js
+
+
+  background.js  98.0kb
+
+⚡ Done in 10ms
+
+  diagnostics.js  16.9kb
+
+⚡ Done in 5ms
+
+  site-observer.js  482b 
+
+⚡ Done in 2ms
+
+> chzzk@0.1.11 verify
+> npm run format:check && npm run check:generated && npm run validate:manifest && npm run validate:project && npm run validate:workflows && npm run lint && npm run lint:webext && npm run test && npm run test:coverage && npm run test:audit-fuzz && npm run audit:deps && npm run build && npm run audit:package
+
+
+> chzzk@0.1.11 format:check
+> prettier --check "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
+
+Checking formatting...
+All matched files use Prettier code style!
+
+> chzzk@0.1.11 check:generated
+> node scripts/check-generated.js
+
+
+> chzzk@0.1.11 build:runtime
+> node scripts/build-runtime.js
+
+
+  background.js  98.0kb
+
+⚡ Done in 9ms
+
+  diagnostics.js  16.9kb
+
+⚡ Done in 5ms
+
+  site-observer.js  482b 
+
+⚡ Done in 2ms
+
+> chzzk@0.1.11 validate:manifest
+> node scripts/validate-manifest.js
+
+manifest and MV2 required-permission CHZZK redirect policy are valid
+
+> chzzk@0.1.11 validate:project
+> node scripts/validate-project-cleanliness.js
+
+project branding is clean
+
+> chzzk@0.1.11 validate:workflows
+> node scripts/validate-workflows.js
+
+Validated 5 workflow files semantically.
+
+> chzzk@0.1.11 lint
+> eslint .
+
+
+/home/runner/work/CHZZK/CHZZK/background.js
+  657:8  error  Unexpected control character(s) in regular expression: \x00, \x1f  no-control-regex
+
+/home/runner/work/CHZZK/CHZZK/src/shared/playlist-evidence.js
+  59:6  error  Unexpected control character(s) in regular expression: \x00, \x1f  no-control-regex
+
+✖ 2 problems (2 errors, 0 warnings)
+
