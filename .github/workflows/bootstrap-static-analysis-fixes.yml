@@ -1,0 +1,94 @@
+name: Bootstrap static-analysis fixes
+
+on:
+  push:
+    branches: ["agent/bootstrap-static-analysis-fixes-20260725"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-static-analysis-fixes-20260725
+  cancel-in-progress: true
+
+jobs:
+  apply-verify-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 22
+      - name: Apply, verify, and publish the clean remediation branch
+        env:
+          BOOTSTRAP_BRANCH: agent/bootstrap-static-analysis-fixes-20260725
+          TARGET_BRANCH: agent/fix-static-analysis-findings
+          TRANSFORM_SHA256: cc8bb1de10eeedeaefa8d61641bd03f629215dbc2f6d0fa401540d6e1b15591a
+        shell: bash
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          TRANSFORM="$RUNNER_TEMP/chzzk-static-analysis-fix.mjs"
+          LOG="$RUNNER_TEMP/chzzk-static-analysis-fix.log"
+          OUTCOME="$RUNNER_TEMP/chzzk-static-analysis-outcome.txt"
+          cat .github/chzzk-static-analysis-fix/part-00.b64 \
+              .github/chzzk-static-analysis-fix/part-01.b64 \
+              .github/chzzk-static-analysis-fix/part-02.b64 \
+              .github/chzzk-static-analysis-fix/part-03.b64 | base64 -d > "$TRANSFORM"
+          cat .github/chzzk-static-analysis-fix/tail.mjs >> "$TRANSFORM"
+          test "$(sha256sum "$TRANSFORM" | cut -d ' ' -f1)" = "$TRANSFORM_SHA256"
+          node --check "$TRANSFORM"
+          echo "status=failure" > "$OUTCOME"
+
+          set +e
+          (
+            set -euo pipefail
+            git fetch origin main
+            git switch --force-create "$TARGET_BRANCH" origin/main
+            node "$TRANSFORM"
+            npm ci
+            npx prettier --write "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
+            npm run build:runtime
+            npm run verify
+
+            git add -A
+            if git diff --cached --quiet; then
+              echo "Transformer produced no changes" >&2
+              exit 1
+            fi
+            git commit -m "Fix static analysis findings"
+            git fetch origin "$TARGET_BRANCH" || true
+            git push --force-with-lease origin "HEAD:refs/heads/$TARGET_BRANCH"
+            {
+              echo "status=success"
+              echo "target_branch=$TARGET_BRANCH"
+              echo "target_sha=$(git rev-parse HEAD)"
+            } > "$OUTCOME"
+          ) 2>&1 | tee "$LOG"
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          git reset --hard
+          git clean -fd
+          git fetch origin "$BOOTSTRAP_BRANCH"
+          git switch --force-create "$BOOTSTRAP_BRANCH" "origin/$BOOTSTRAP_BRANCH"
+          {
+            echo "completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            cat "$OUTCOME"
+            echo
+            echo "--- verification log (last 500 lines) ---"
+            tail -n 500 "$LOG"
+          } > .github/chzzk-static-analysis-result.txt
+          git add .github/chzzk-static-analysis-result.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Record static analysis remediation result"
+            git push origin "HEAD:refs/heads/$BOOTSTRAP_BRANCH"
+          fi
+
+          exit "$STATUS"
