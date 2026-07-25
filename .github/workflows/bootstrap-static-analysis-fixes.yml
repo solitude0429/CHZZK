@@ -92,6 +92,33 @@ jobs:
             }
             writeFileSync(fixturePath, fixtureSource.replace(digestBefore, digestAfter), "utf8");
           }
+
+          const runtimeTestPath = "tests/unit/background-runtime.test.js";
+          let runtimeTestSource = readFileSync(runtimeTestPath, "utf8");
+          const startupBefore =
+            'assert.deepEqual(plain(tabQueries), [{ url: ["https://*.chzzk.naver.com/live/*"] }]);';
+          const startupAfter = `assert.deepEqual(plain(tabQueries), [
+            {
+              url: [
+                "https://*.chzzk.naver.com/live",
+                "https://*.chzzk.naver.com/live/*",
+              ],
+            },
+          ]);`;
+          const startupCount = runtimeTestSource.split(startupBefore).length - 1;
+          if (startupCount !== 2) {
+            throw new Error(`Expected two startup query assertions, found ${startupCount}`);
+          }
+          runtimeTestSource = runtimeTestSource.split(startupBefore).join(startupAfter);
+
+          const bomBefore = String.raw`body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-VERSION:3\r\n",`;
+          const bomAfter = String.raw`body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-TARGETDURATION:6\r\n#EXTINF:6.0,\r\nsegment.ts\r\n",`;
+          const bomCount = runtimeTestSource.split(bomBefore).length - 1;
+          if (bomCount !== 1) {
+            throw new Error(`Expected one BOM playlist fixture, found ${bomCount}`);
+          }
+          runtimeTestSource = runtimeTestSource.replace(bomBefore, bomAfter);
+          writeFileSync(runtimeTestPath, runtimeTestSource, "utf8");
           NODE
             npm ci
             npx prettier --write "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
