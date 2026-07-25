@@ -3,6 +3,9 @@ name: Bootstrap static-analysis fixes
 on:
   push:
     branches: ["agent/bootstrap-static-analysis-fixes-20260725"]
+    paths:
+      - ".github/workflows/bootstrap-static-analysis-fixes.yml"
+      - ".github/chzzk-static-analysis-fix/**"
 
 permissions:
   contents: write
@@ -52,6 +55,25 @@ jobs:
             git fetch origin main
             git switch --force-create "$TARGET_BRANCH" origin/main
             node "$TRANSFORM"
+            node <<'NODE'
+          const { readFileSync, writeFileSync } = require("node:fs");
+          const path = "src/shared/playlist-evidence.js";
+          const source = readFileSync(path, "utf8");
+          const before = String.raw`function isPlaylistUri(value) {
+            return typeof value === "string" && value !== "" && !value.startsWith("#") && !/[\u0000-\u001f\u007f]/.test(value);
+          }`;
+          const after = `function isPlaylistUri(value) {
+            if (typeof value !== "string" || value === "" || value.startsWith("#")) return false;
+            for (let index = 0; index < value.length; index += 1) {
+              const codePoint = value.charCodeAt(index);
+              if (codePoint <= 0x1f || codePoint === 0x7f) return false;
+            }
+            return true;
+          }`;
+          const count = source.split(before).length - 1;
+          if (count !== 1) throw new Error(`Expected one playlist URI helper, found ${count}`);
+          writeFileSync(path, source.replace(before, after), "utf8");
+          NODE
             npm ci
             npx prettier --write "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
             npm run build:runtime
