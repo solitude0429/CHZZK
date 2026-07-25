@@ -42,6 +42,8 @@ export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk-updates.alpha-apple.de
 const TRUSTED_ASSET_UPLOADER = Object.freeze({ login: "github-actions[bot]", type: "Bot" });
 
 export const RELEASE_PACKAGE_FILES = Object.freeze([
+  "LICENSE",
+  "NOTICE",
   "background.js",
   "diagnostics.html",
   "diagnostics.js",

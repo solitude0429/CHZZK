@@ -79,7 +79,7 @@ async function makeExtensionXpi({
     content_scripts: [
       {
         js: ["site-observer.js"],
-        matches: ["https://*.chzzk.naver.com/live/*"],
+        matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
         run_at: "document_start",
       },
     ],
@@ -249,7 +249,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           }
           response.statusCode = 200;
           response.setHeader("content-type", "application/vnd.apple.mpegurl");
-          response.end(`#EXTM3U\n# fixture-quality=${quality}\n`);
+          response.end(
+            `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
+          );
         } else {
           response.statusCode = 404;
           response.end("not available");

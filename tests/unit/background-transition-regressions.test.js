@@ -11,7 +11,7 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function playlistResponse(url, body = "#EXTM3U\n#EXT-X-VERSION:3\n") {
+function playlistResponse(url, body = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n") {
   return {
     headers: { get: () => null },
     ok: true,

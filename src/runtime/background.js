@@ -6,7 +6,7 @@ import {
   updateRuntimeRedirectDiagnostics,
 } from "../shared/diagnostics.js";
 import {
-  isLikelyHlsPlaylist,
+  isUsableHlsPlaylist,
   isUtf8TextWithinByteLimit,
 } from "../shared/playlist-evidence.js";
 import {
@@ -26,7 +26,7 @@ import {
 } from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
-  chooseBestHlsVariant,
+  chooseBestHlsVariantFromVariants,
   normalizeQualityCandidates,
   parseHlsMasterPlaylistVariants,
   parseQualitiesFromUrl,
@@ -51,11 +51,14 @@ const resolutionBySession = new Map();
 const tabContextTokenByTab = new Map();
 const MAX_MARKER_EVIDENCE_TTL_MS = 30_000;
 const MAX_REDIRECT_FAILURE_BACKOFF_MS = 30_000;
+const HARD_MAX_SESSION_STATES = 1024;
+const HARD_MAX_SESSION_STATES_PER_TAB = 128;
 const MAX_TRACKED_REDIRECT_REQUESTS = 500;
 const MAX_VALIDATED_TARGET_URLS = 16;
 let diagnosticsMutationQueue = Promise.resolve();
 let diagnosticsMutationQueueDepth = 0;
 let redirectVerificationSequence = 0;
+let sessionAccessSequence = 0;
 
 async function loadDiagnostics() {
   const stored = await api.storage.local.get(STORAGE_KEY);
@@ -101,6 +104,7 @@ async function enqueueDiagnosticsMutation(mutator) {
 }
 
 function currentRedirectState(lastError = null) {
+  sweepExpiredSessionState();
   const targetsByTab = {};
   for (const state of activeTargetsBySession.values()) {
     if (state.expiresAt != null && state.expiresAt <= Date.now()) continue;
@@ -185,6 +189,156 @@ function redirectFailureBackoffMs() {
     : 10_000;
 }
 
+function maxSessionStates() {
+  const configured = Number(policy.maxSessionStates ?? 256);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(configured, HARD_MAX_SESSION_STATES)
+    : 256;
+}
+
+function maxSessionStatesPerTab() {
+  const configured = Number(policy.maxSessionStatesPerTab ?? 64);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(configured, HARD_MAX_SESSION_STATES_PER_TAB)
+    : 64;
+}
+
+function compareSessionAccess(left, right) {
+  if (left.lastTouchedOrder !== right.lastTouchedOrder) {
+    return left.lastTouchedOrder - right.lastTouchedOrder;
+  }
+  return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
+}
+
+function normalizeSessionAccessOrder() {
+  const groupsByKey = new Map();
+  for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
+    for (const [key, state] of map) {
+      const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
+      group.lastTouchedOrder = Math.max(
+        group.lastTouchedOrder,
+        Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
+      );
+      group.states.push(state);
+      groupsByKey.set(key, group);
+    }
+  }
+  sessionAccessSequence = 0;
+  for (const group of [...groupsByKey.values()].sort(compareSessionAccess)) {
+    sessionAccessSequence += 1;
+    for (const state of group.states) state.lastTouchedOrder = sessionAccessSequence;
+  }
+}
+
+function nextSessionAccessOrder() {
+  if (sessionAccessSequence >= Number.MAX_SAFE_INTEGER - HARD_MAX_SESSION_STATES) {
+    normalizeSessionAccessOrder();
+  }
+  sessionAccessSequence += 1;
+  return sessionAccessSequence;
+}
+
+function touchSessionState(state) {
+  if (!state || typeof state !== "object") return state;
+  state.lastTouchedOrder = nextSessionAccessOrder();
+  return state;
+}
+
+function forgetRedirectedRequestsForSession(sessionKey) {
+  for (const [requestId, record] of redirectedRequestsById) {
+    if (record.key !== sessionKey) continue;
+    record.settled = true;
+    redirectedRequestsById.delete(requestId);
+  }
+}
+
+function removeSessionState(sessionKey) {
+  const removedActiveTarget = activeTargetsBySession.delete(sessionKey);
+  failedTargetsBySession.delete(sessionKey);
+  const resolution = resolutionBySession.get(sessionKey);
+  resolution?.controller.abort();
+  resolutionBySession.delete(sessionKey);
+  forgetRedirectedRequestsForSession(sessionKey);
+  return removedActiveTarget;
+}
+
+function sweepExpiredSessionState(now = Date.now()) {
+  let removedActiveTarget = false;
+  for (const [key, state] of activeTargetsBySession) {
+    if (state.expiresAt == null || state.expiresAt > now) continue;
+    activeTargetsBySession.delete(key);
+    forgetRedirectedRequestsForSession(key);
+    removedActiveTarget = true;
+  }
+  for (const [key, state] of failedTargetsBySession) {
+    if (!(state.targets instanceof Map)) {
+      failedTargetsBySession.delete(key);
+      continue;
+    }
+    for (const [quality, expiresAt] of state.targets) {
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) state.targets.delete(quality);
+    }
+    if (state.targets.size === 0) failedTargetsBySession.delete(key);
+  }
+  for (const [key, state] of resolutionBySession) {
+    if (state.controller?.signal?.aborted) resolutionBySession.delete(key);
+  }
+  return removedActiveTarget;
+}
+
+function sessionStateEntries() {
+  const byKey = new Map();
+  for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
+    for (const [key, state] of map) {
+      const entry = byKey.get(key) ?? {
+        key,
+        lastTouchedOrder: 0,
+        tabId: state.tabId,
+      };
+      entry.lastTouchedOrder = Math.max(
+        entry.lastTouchedOrder,
+        Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
+      );
+      byKey.set(key, entry);
+    }
+  }
+  return [...byKey.values()];
+}
+
+function enforceSessionStateLimits(protectedKey = null) {
+  let removedActiveTarget = sweepExpiredSessionState();
+  const perTabLimit = maxSessionStatesPerTab();
+  const byTab = new Map();
+  for (const entry of sessionStateEntries()) {
+    const entries = byTab.get(entry.tabId) ?? [];
+    entries.push(entry);
+    byTab.set(entry.tabId, entries);
+  }
+  for (const entries of byTab.values()) {
+    entries.sort((left, right) => left.lastTouchedOrder - right.lastTouchedOrder);
+    let excess = entries.length - perTabLimit;
+    for (const entry of entries) {
+      if (excess <= 0) break;
+      if (entry.key === protectedKey) continue;
+      removedActiveTarget = removeSessionState(entry.key) || removedActiveTarget;
+      excess -= 1;
+    }
+  }
+
+  const entries = sessionStateEntries().sort(
+    (left, right) => left.lastTouchedOrder - right.lastTouchedOrder,
+  );
+  let excess = entries.length - maxSessionStates();
+  for (const entry of entries) {
+    if (excess <= 0) break;
+    if (entry.key === protectedKey) continue;
+    removedActiveTarget = removeSessionState(entry.key) || removedActiveTarget;
+    excess -= 1;
+  }
+  if (removedActiveTarget) scheduleRedirectDiagnostics();
+  return removedActiveTarget;
+}
+
 function responseHeader(response, name) {
   return response?.headers?.get?.(name) ?? null;
 }
@@ -262,7 +416,7 @@ async function fetchPlaylistEvidence(url, { signal = null } = {}) {
     const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
     if (!isTrustedRequestDomain(finalUrl, policy) || finalUrl !== url) return null;
     const text = await readResponseTextWithLimit(response, probeMaxBytes());
-    return isLikelyHlsPlaylist(text) ? { finalUrl, text } : null;
+    return isUsableHlsPlaylist(text) ? { finalUrl, text } : null;
   } catch {
     return null;
   } finally {
@@ -292,7 +446,7 @@ async function fetchSupportsExpectedQuality(url, expectedQuality, { signal = nul
 }
 
 function playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality) {
-  if (!evidence || !isLikelyHlsPlaylist(evidence.text)) return false;
+  if (!evidence || !isUsableHlsPlaylist(evidence.text)) return false;
   const variants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl);
   if (variants.length > 0 || /#EXT-X-STREAM-INF:/i.test(evidence.text)) {
     return variants.some((variant) => {
@@ -358,14 +512,23 @@ async function resolveBestVariantFromMaster(
   const evidence = await fetchPlaylistEvidence(details.url, { signal });
   if (!evidence || signal?.aborted) return null;
 
-  const variant = chooseBestHlsVariant(evidence.text, evidence.finalUrl, {
+  const eligibleVariants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl).filter(
+    (candidate) => {
+      const candidateQuality = bestVariantTargetQuality(candidate);
+      return Boolean(
+        candidateQuality &&
+          typeof candidate?.url === "string" &&
+          isTrustedRequestDomain(candidate.url, policy) &&
+          urlQualityMarkersMatch(candidate.url, candidateQuality),
+      );
+    },
+  );
+  const variant = chooseBestHlsVariantFromVariants(eligibleVariants, {
     excludedQualities: [...skipTargetQualities],
     minRedirectQuality: policy.minRedirectQuality,
   });
   const targetQuality = bestVariantTargetQuality(variant);
-  if (!variant?.url || !targetQuality || !isTrustedRequestDomain(variant.url, policy)) return null;
-  if (!urlQualityMarkersMatch(variant.url, targetQuality)) return null;
-  return { evidenceKind: "master", targetQuality };
+  return variant?.url && targetQuality ? { evidenceKind: "master", targetQuality } : null;
 }
 
 async function updateRedirectDiagnostics(lastError = null) {
@@ -445,10 +608,11 @@ function activeTargetForSession(session) {
   if (!state) return null;
   if (state.expiresAt != null && state.expiresAt <= Date.now()) {
     activeTargetsBySession.delete(session.key);
+    forgetRedirectedRequestsForSession(session.key);
     scheduleRedirectDiagnostics();
     return null;
   }
-  return state;
+  return touchSessionState(state);
 }
 
 function failedTargetsForSession(session) {
@@ -462,6 +626,7 @@ function failedTargetsForSession(session) {
     failedTargetsBySession.delete(session.key);
     return new Set();
   }
+  touchSessionState(state);
   return new Set(state.targets.keys());
 }
 
@@ -498,7 +663,7 @@ async function setSessionTarget(session, resolution, token) {
     (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
       ? "master"
       : resolution.evidenceKind;
-  const state = {
+  const state = touchSessionState({
     ...session,
     evidenceKind,
     expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
@@ -509,11 +674,13 @@ async function setSessionTarget(session, resolution, token) {
     targetEpoch,
     targetQuality,
     validatedNetworkUrls,
-  };
+  });
   activeTargetsBySession.set(session.key, state);
+  enforceSessionStateLimits(session.key);
   if (previous?.targetQuality !== targetQuality || !previous?.resolved) scheduleRedirectDiagnostics();
   return true;
 }
+
 function invalidateSessionResolution(sessionKey) {
   const activeResolution = resolutionBySession.get(sessionKey);
   activeResolution?.controller.abort();
@@ -536,6 +703,7 @@ function startSessionResolution(details, resolver, resolverKind) {
   const token = currentTabContextToken(session.tabId);
   const existing = resolutionBySession.get(session.key);
   if (existing?.token === token) {
+    touchSessionState(existing);
     if (resolverKind !== "master" || existing.resolverKind === "master") return existing.promise;
     invalidateSessionResolution(session.key);
   } else {
@@ -544,7 +712,7 @@ function startSessionResolution(details, resolver, resolverKind) {
 
   const controller = new AbortController();
   const resolutionTimeout = setTimeout(() => controller.abort(), probeResolutionBudgetMs());
-  const state = { ...session, controller, promise: null, resolverKind, token };
+  const state = touchSessionState({ ...session, controller, promise: null, resolverKind, token });
   state.promise = Promise.resolve()
     .then(() =>
       resolver({
@@ -570,6 +738,7 @@ function startSessionResolution(details, resolver, resolverKind) {
       if (resolutionBySession.get(state.key) === state) resolutionBySession.delete(state.key);
     });
   resolutionBySession.set(session.key, state);
+  enforceSessionStateLimits(session.key);
   return state.promise;
 }
 
@@ -690,7 +859,7 @@ function migrateFailedTargetsAcrossContext(
     // Never combine suppression from multiple source contexts into one destination family.
     if (group.length !== 1) continue;
     const [{ key, state }] = group;
-    failedTargetsBySession.set(key, state);
+    failedTargetsBySession.set(key, touchSessionState(state));
   }
 }
 
@@ -737,7 +906,7 @@ function migrateTabQualityState(
     state.contextKey = destinationContextKey;
     state.key = key;
     state.token = transitionToken;
-    resolutionBySession.set(key, state);
+    resolutionBySession.set(key, touchSessionState(state));
   }
   migrateFailedTargetsAcrossContext(tabId, destinationContextKey, sourceContextKey, now);
   for (const [oldKey, state] of tabTargets) {
@@ -749,7 +918,7 @@ function migrateTabQualityState(
       continue;
     }
     const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
-    const target = { ...state, contextKey: destinationContextKey, key };
+    const target = touchSessionState({ ...state, contextKey: destinationContextKey, key });
     const group = targetGroups.get(key) ?? [];
     group.push({ oldKey, target });
     targetGroups.set(key, group);
@@ -774,6 +943,7 @@ function migrateTabQualityState(
     redirectedRequestsById.delete(requestId);
   }
   tabContextTokenByTab.set(tabId, transitionToken);
+  enforceSessionStateLimits();
   return tabTargets.length > 0;
 }
 
@@ -1122,9 +1292,10 @@ function rememberRedirectedRequest(details, session, targetState, responseUrl) {
 
 function currentTargetMatchesRecord(record) {
   const current = activeTargetsBySession.get(record.key);
-  return current?.targetQuality === record.targetQuality && current.targetEpoch === record.targetEpoch
-    ? current
-    : null;
+  if (current?.targetQuality !== record.targetQuality || current.targetEpoch !== record.targetEpoch) {
+    return null;
+  }
+  return touchSessionState(current);
 }
 
 function targetPreviouslyValidatedNetworkUrl(record) {
@@ -1159,12 +1330,18 @@ function invalidateRedirectedTarget(record) {
   }
   activeTargetsBySession.delete(record.key);
   invalidateSessionResolution(record.key);
+  const now = Date.now();
   const failures = failedTargetsBySession.get(record.key) ?? {
-    ...record,
+    contextKey: record.contextKey,
+    dedicatedHls: record.dedicatedHls,
+    familyKey: record.familyKey,
+    key: record.key,
+    tabId: record.tabId,
     targets: new Map(),
   };
-  failures.targets.set(record.targetQuality, Date.now() + redirectFailureBackoffMs());
-  failedTargetsBySession.set(record.key, failures);
+  failures.targets.set(record.targetQuality, now + redirectFailureBackoffMs());
+  failedTargetsBySession.set(record.key, touchSessionState(failures));
+  enforceSessionStateLimits(record.key);
   for (const [requestId, pending] of redirectedRequestsById) {
     if (
       pending.key === record.key &&
@@ -1361,6 +1538,7 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
 }
 
 function handleRequest(details) {
+  if (sweepExpiredSessionState()) scheduleRedirectDiagnostics();
   if (!isHlsPlaylistUrl(details?.url)) return undefined;
   // Firefox keeps requestId stable across redirects and invokes onBeforeRequest
   // again for the target URL. Attach there so the filter sees the HLS response,
@@ -1434,7 +1612,7 @@ api.runtime.onMessage?.addListener((message, sender) => {
 
 function liveTabQueryUrls() {
   return (policy.trustedInitiatorDomains?.length ? policy.trustedInitiatorDomains : ["chzzk.naver.com"])
-    .map((domain) => `https://*.${domain}/live/*`)
+    .flatMap((domain) => [`https://*.${domain}/live`, `https://*.${domain}/live/*`])
     .sort();
 }
 

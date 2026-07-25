@@ -5,6 +5,8 @@ const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMEN
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
 const PACKAGED_RUNTIME_PATHS = new Set([
+  "LICENSE",
+  "NOTICE",
   "background.js",
   "diagnostics.html",
   "diagnostics.js",
