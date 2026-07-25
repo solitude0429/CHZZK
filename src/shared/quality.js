@@ -412,9 +412,8 @@ function variantScore(variant) {
   };
 }
 
-export function chooseBestHlsVariant(
-  playlistText,
-  baseUrl = "",
+export function chooseBestHlsVariantFromVariants(
+  variants,
   { excludedQualities = [], minRedirectQuality = "100p" } = {},
 ) {
   const min = qualityNumber(minRedirectQuality) ?? 0;
@@ -422,7 +421,7 @@ export function chooseBestHlsVariant(
     (Array.isArray(excludedQualities) ? excludedQualities : []).map(normalizeQualityLabel).filter(Boolean),
   );
   return (
-    parseHlsMasterPlaylistVariants(playlistText, baseUrl)
+    (Array.isArray(variants) ? variants : [])
       .filter((variant) => (variantScore(variant).height || 0) >= min)
       .filter((variant) => {
         const quality =
@@ -440,6 +439,10 @@ export function chooseBestHlsVariant(
           left.index - right.index,
       )[0]?.variant ?? null
   );
+}
+
+export function chooseBestHlsVariant(playlistText, baseUrl = "", options = {}) {
+  return chooseBestHlsVariantFromVariants(parseHlsMasterPlaylistVariants(playlistText, baseUrl), options);
 }
 
 export function buildHighestQualityRedirectUrl(url, { targetQuality, minRedirectQuality = "100p" } = {}) {

@@ -59,7 +59,7 @@ function syntheticMetadata(sourceArchiveSha256, sourceArchiveSize) {
     addOnId: "chzzk@solitude0429.local",
     files: RELEASE_PACKAGE_FILES.map((path, index) => ({
       path,
-      sha256: String(index + 1).repeat(64),
+      sha256: (index + 1).toString(16).padStart(2, "0").repeat(32),
       size: index + 1,
     })),
     schemaVersion: 1,

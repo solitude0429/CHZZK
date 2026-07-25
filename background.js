@@ -12,6 +12,8 @@
     mediaExtensions: ["m3u8"],
     maxDiagnosticsSamples: 200,
     maxPendingDiagnosticsMutations: 50,
+    maxSessionStates: 256,
+    maxSessionStatesPerTab: 64,
     blockingProbeBudgetMs: 50,
     markerEvidenceTtlMs: 3e4,
     probeMaxBytes: 256e3,
@@ -22,7 +24,7 @@
       "Firefox MV2 declares the CHZZK origin and trusted HLS CDN origins as required permissions so webRequest can observe dedicated livecloud playlists initiated by the site's same-origin small-player pages instead of exposing core access as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
       "The persistent background page limits blocking webRequest URL filters to case-complete .m3u8 path patterns so media segments bypass extension code; cached playlist redirects return synchronously, while tab-trust validation and unresolved candidate search share one request-level blockingProbeBudgetMs deadline before failing open as one shared per-tab/live-context/playlist-family resolution continues in the background.",
-      "A trusted HLS master playlist starts non-blocking scoring by resolution, frame rate, then bitrate; the resolved target is cached only while the tab/context token and secret-free playlist family are current.",
+      "A trusted HLS master playlist validates each candidate URL against the request-domain and quality-marker policy before scoring eligible variants by resolution, frame rate, then bitrate; one malformed or untrusted high-ranked entry cannot hide a lower valid variant.",
       "Numeric quality replacement and response renewal use one safe pathname-marker grammar: they preserve the observed 360p-directory/chunklist_480p legacy shape, reject other marker contradictions, and preserve signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
       "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation; status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
@@ -30,9 +32,10 @@
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. A URL-only live-to-list/search or later mini-player SPA transition re-keys a verified dedicated-host target, one whose response verifier actually attached and remains pending/valid, or the single unambiguous still-running dedicated-host candidate scan per playlist family under the new context token; unattached/failed verification, generic-CDN work, aborted work, and conflicting source contexts are discarded. Firefox's stale original live documentUrl cannot re-adopt the old context or authorize a generic CDN, including during URL-less reload validation. Full document loads, new live-page state, foreign navigation, and tab close invalidate the target and pending work. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
       "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup and content-message prewarming re-read the current tab under an unchanged per-tab transition token before migrating reusable verified contextless target/response state into an authoritatively confirmed live context, so delayed snapshots cannot erase a target established by an earlier playlist request or overwrite newer mini-player/navigation state. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
-      "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
+      "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line plus a usable master variant or media segment/part structure, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; full document loads, new live contexts, foreign navigation, and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target, while bounded same-document mini-player transitions may re-key only eligible dedicated-host work under a fresh token.",
       "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports.",
+      "Active targets, failed-target suppression, and in-flight resolutions are expiry-swept and LRU-bounded per tab and globally; failed-target entries retain only secret-free session identity and quality-expiry data.",
     ],
   };
 
@@ -337,9 +340,8 @@
       peakBandwidth: variant?.bandwidth ?? 0,
     };
   }
-  function chooseBestHlsVariant(
-    playlistText,
-    baseUrl = "",
+  function chooseBestHlsVariantFromVariants(
+    variants,
     { excludedQualities = [], minRedirectQuality = "100p" } = {},
   ) {
     const min = qualityNumber(minRedirectQuality) ?? 0;
@@ -347,7 +349,7 @@
       (Array.isArray(excludedQualities) ? excludedQualities : []).map(normalizeQualityLabel).filter(Boolean),
     );
     return (
-      parseHlsMasterPlaylistVariants(playlistText, baseUrl)
+      (Array.isArray(variants) ? variants : [])
         .filter((variant) => (variantScore(variant).height || 0) >= min)
         .filter((variant) => {
           const quality =
@@ -599,15 +601,165 @@
   }
 
   // src/shared/playlist-evidence.js
-  function isLikelyHlsPlaylist(text) {
+  function normalizedPlaylistLines(text) {
     let source = String(text ?? "");
     if (source.charCodeAt(0) === 65279) source = source.slice(1);
-    for (const line of source.split(/\r\n|[\r\n]/)) {
-      const candidate = line.replace(/^[\t ]+|[\t ]+$/g, "");
-      if (candidate === "") continue;
-      return candidate === "#EXTM3U";
+    return source.split(/\r\n|[\r\n]/).map((line) => line.replace(/^[\t ]+|[\t ]+$/g, ""));
+  }
+  function firstMeaningfulLineIsHeader(lines) {
+    for (const line of lines) {
+      if (line === "") continue;
+      return line === "#EXTM3U";
     }
     return false;
+  }
+  function splitHlsAttributeList2(value) {
+    const entries = [];
+    let current = "";
+    let quoted = false;
+    for (const character of String(value ?? "")) {
+      if (character === '"') quoted = !quoted;
+      if (character === "," && !quoted) {
+        entries.push(current);
+        current = "";
+        continue;
+      }
+      current += character;
+    }
+    if (quoted) return null;
+    if (current) entries.push(current);
+    return entries;
+  }
+  function parseHlsAttributeList2(value) {
+    const entries = splitHlsAttributeList2(value);
+    if (!entries) return null;
+    const attributes = {};
+    for (const entry of entries) {
+      const separator = entry.indexOf("=");
+      if (separator <= 0) return null;
+      const key = entry.slice(0, separator).trim().toUpperCase();
+      if (!/^[A-Z0-9-]+$/.test(key) || Object.hasOwn(attributes, key)) return null;
+      let rawValue = entry.slice(separator + 1).trim();
+      if (rawValue.startsWith('"')) {
+        if (rawValue.length < 2 || !rawValue.endsWith('"')) return null;
+        rawValue = rawValue.slice(1, -1);
+      } else if (rawValue.includes('"')) {
+        return null;
+      }
+      attributes[key] = rawValue;
+    }
+    return attributes;
+  }
+  function hasUnsafePlaylistUriCharacter(value) {
+    for (const character of value) {
+      const codePoint = character.codePointAt(0);
+      if (codePoint <= 32 || codePoint === 127 || character === "<" || character === ">") {
+        return true;
+      }
+    }
+    return false;
+  }
+  function isPlausiblePlaylistUri(value) {
+    if (typeof value !== "string" || value === "" || value.startsWith("#")) return false;
+    if (hasUnsafePlaylistUriCharacter(value)) return false;
+    try {
+      const parsed = new URL(value, "https://hls.invalid/base/");
+      return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+    } catch {
+      return false;
+    }
+  }
+  function nextMeaningfulLine(lines, startIndex) {
+    for (let index = startIndex; index < lines.length; index += 1) {
+      if (lines[index] !== "") return lines[index];
+    }
+    return null;
+  }
+  function hasUsableMasterVariant(lines) {
+    for (let index = 0; index < lines.length; index += 1) {
+      if (!lines[index].toUpperCase().startsWith("#EXT-X-STREAM-INF:")) continue;
+      const uri = nextMeaningfulLine(lines, index + 1);
+      if (uri && !uri.startsWith("#") && isPlausiblePlaylistUri(uri)) return true;
+    }
+    return false;
+  }
+  function hasPositiveTargetDuration(lines) {
+    return lines.some((line) => {
+      if (!line.toUpperCase().startsWith("#EXT-X-TARGETDURATION:")) return false;
+      const value = line.slice(line.indexOf(":") + 1).trim();
+      const duration = Number(value);
+      return /^\d+$/.test(value) && Number.isSafeInteger(duration) && duration > 0;
+    });
+  }
+  function isValidByteRangeTag(line) {
+    if (!line.toUpperCase().startsWith("#EXT-X-BYTERANGE:")) return false;
+    const value = line.slice(line.indexOf(":") + 1).trim();
+    const match = value.match(/^([1-9]\d*)(?:@(0|[1-9]\d*))?$/);
+    if (!match) return false;
+    return [match[1], match[2]]
+      .filter((entry) => entry !== void 0)
+      .every((entry) => Number.isSafeInteger(Number(entry)));
+  }
+  function nextMediaSegmentUri(lines, startIndex) {
+    let sawByteRange = false;
+    for (let index = startIndex; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line === "" || (line.startsWith("#") && !line.toUpperCase().startsWith("#EXT"))) continue;
+      if (!sawByteRange && isValidByteRangeTag(line)) {
+        sawByteRange = true;
+        continue;
+      }
+      return isPlausiblePlaylistUri(line) ? line : null;
+    }
+    return null;
+  }
+  function hasUsableMediaSegment(lines) {
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (!line.toUpperCase().startsWith("#EXTINF:")) continue;
+      const durationText = line
+        .slice(line.indexOf(":") + 1)
+        .split(",", 1)[0]
+        .trim();
+      const duration = Number(durationText);
+      if (!/^\d+(?:\.\d+)?$/.test(durationText) || !Number.isFinite(duration) || duration <= 0) {
+        continue;
+      }
+      if (nextMediaSegmentUri(lines, index + 1)) return true;
+    }
+    return false;
+  }
+  function hasUsableLowLatencyPart(lines) {
+    for (const line of lines) {
+      const upper = line.toUpperCase();
+      if (upper.startsWith("#EXT-X-PART:")) {
+        const attributes = parseHlsAttributeList2(line.slice(line.indexOf(":") + 1));
+        const duration = Number(attributes?.DURATION);
+        if (
+          attributes &&
+          /^\d+(?:\.\d+)?$/.test(attributes.DURATION ?? "") &&
+          Number.isFinite(duration) &&
+          duration > 0 &&
+          isPlausiblePlaylistUri(attributes.URI)
+        ) {
+          return true;
+        }
+      }
+      if (upper.startsWith("#EXT-X-PRELOAD-HINT:")) {
+        const attributes = parseHlsAttributeList2(line.slice(line.indexOf(":") + 1));
+        if (attributes?.TYPE?.toUpperCase() === "PART" && isPlausiblePlaylistUri(attributes.URI)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  function isUsableHlsPlaylist(text) {
+    const lines = normalizedPlaylistLines(text);
+    if (!firstMeaningfulLineIsHeader(lines)) return false;
+    if (hasUsableMasterVariant(lines)) return true;
+    if (!hasPositiveTargetDuration(lines)) return false;
+    return hasUsableMediaSegment(lines) || hasUsableLowLatencyPart(lines);
   }
   function isUtf8TextWithinByteLimit(text, maxBytes) {
     if (!Number.isFinite(maxBytes) || maxBytes < 0) return false;
@@ -910,11 +1062,14 @@
   var tabContextTokenByTab = /* @__PURE__ */ new Map();
   var MAX_MARKER_EVIDENCE_TTL_MS = 3e4;
   var MAX_REDIRECT_FAILURE_BACKOFF_MS = 3e4;
+  var HARD_MAX_SESSION_STATES = 1024;
+  var HARD_MAX_SESSION_STATES_PER_TAB = 128;
   var MAX_TRACKED_REDIRECT_REQUESTS = 500;
   var MAX_VALIDATED_TARGET_URLS = 16;
   var diagnosticsMutationQueue = Promise.resolve();
   var diagnosticsMutationQueueDepth = 0;
   var redirectVerificationSequence = 0;
+  var sessionAccessSequence = 0;
   async function loadDiagnostics() {
     const stored = await api.storage.local.get(STORAGE_KEY);
     return normalizeDiagnostics(stored?.[STORAGE_KEY], {
@@ -954,6 +1109,7 @@
     return operation;
   }
   function currentRedirectState(lastError = null) {
+    sweepExpiredSessionState();
     const targetsByTab = {};
     for (const state of activeTargetsBySession.values()) {
       if (state.expiresAt != null && state.expiresAt <= Date.now()) continue;
@@ -1027,6 +1183,144 @@
       ? Math.min(configured, MAX_REDIRECT_FAILURE_BACKOFF_MS)
       : 1e4;
   }
+  function maxSessionStates() {
+    const configured = Number(quality_policy_default.maxSessionStates ?? 256);
+    return Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(configured, HARD_MAX_SESSION_STATES)
+      : 256;
+  }
+  function maxSessionStatesPerTab() {
+    const configured = Number(quality_policy_default.maxSessionStatesPerTab ?? 64);
+    return Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(configured, HARD_MAX_SESSION_STATES_PER_TAB)
+      : 64;
+  }
+  function compareSessionAccess(left, right) {
+    if (left.lastTouchedOrder !== right.lastTouchedOrder) {
+      return left.lastTouchedOrder - right.lastTouchedOrder;
+    }
+    return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
+  }
+  function normalizeSessionAccessOrder() {
+    const groupsByKey = /* @__PURE__ */ new Map();
+    for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
+      for (const [key, state] of map) {
+        const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
+        group.lastTouchedOrder = Math.max(
+          group.lastTouchedOrder,
+          Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
+        );
+        group.states.push(state);
+        groupsByKey.set(key, group);
+      }
+    }
+    sessionAccessSequence = 0;
+    for (const group of [...groupsByKey.values()].sort(compareSessionAccess)) {
+      sessionAccessSequence += 1;
+      for (const state of group.states) state.lastTouchedOrder = sessionAccessSequence;
+    }
+  }
+  function nextSessionAccessOrder() {
+    if (sessionAccessSequence >= Number.MAX_SAFE_INTEGER - HARD_MAX_SESSION_STATES) {
+      normalizeSessionAccessOrder();
+    }
+    sessionAccessSequence += 1;
+    return sessionAccessSequence;
+  }
+  function touchSessionState(state) {
+    if (!state || typeof state !== "object") return state;
+    state.lastTouchedOrder = nextSessionAccessOrder();
+    return state;
+  }
+  function forgetRedirectedRequestsForSession(sessionKey) {
+    for (const [requestId, record] of redirectedRequestsById) {
+      if (record.key !== sessionKey) continue;
+      record.settled = true;
+      redirectedRequestsById.delete(requestId);
+    }
+  }
+  function removeSessionState(sessionKey) {
+    const removedActiveTarget = activeTargetsBySession.delete(sessionKey);
+    failedTargetsBySession.delete(sessionKey);
+    const resolution = resolutionBySession.get(sessionKey);
+    resolution?.controller.abort();
+    resolutionBySession.delete(sessionKey);
+    forgetRedirectedRequestsForSession(sessionKey);
+    return removedActiveTarget;
+  }
+  function sweepExpiredSessionState(now = Date.now()) {
+    let removedActiveTarget = false;
+    for (const [key, state] of activeTargetsBySession) {
+      if (state.expiresAt == null || state.expiresAt > now) continue;
+      activeTargetsBySession.delete(key);
+      forgetRedirectedRequestsForSession(key);
+      removedActiveTarget = true;
+    }
+    for (const [key, state] of failedTargetsBySession) {
+      if (!(state.targets instanceof Map)) {
+        failedTargetsBySession.delete(key);
+        continue;
+      }
+      for (const [quality, expiresAt] of state.targets) {
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) state.targets.delete(quality);
+      }
+      if (state.targets.size === 0) failedTargetsBySession.delete(key);
+    }
+    for (const [key, state] of resolutionBySession) {
+      if (state.controller?.signal?.aborted) resolutionBySession.delete(key);
+    }
+    return removedActiveTarget;
+  }
+  function sessionStateEntries() {
+    const byKey = /* @__PURE__ */ new Map();
+    for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
+      for (const [key, state] of map) {
+        const entry = byKey.get(key) ?? {
+          key,
+          lastTouchedOrder: 0,
+          tabId: state.tabId,
+        };
+        entry.lastTouchedOrder = Math.max(
+          entry.lastTouchedOrder,
+          Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
+        );
+        byKey.set(key, entry);
+      }
+    }
+    return [...byKey.values()];
+  }
+  function enforceSessionStateLimits(protectedKey = null) {
+    let removedActiveTarget = sweepExpiredSessionState();
+    const perTabLimit = maxSessionStatesPerTab();
+    const byTab = /* @__PURE__ */ new Map();
+    for (const entry of sessionStateEntries()) {
+      const entries2 = byTab.get(entry.tabId) ?? [];
+      entries2.push(entry);
+      byTab.set(entry.tabId, entries2);
+    }
+    for (const entries2 of byTab.values()) {
+      entries2.sort((left, right) => left.lastTouchedOrder - right.lastTouchedOrder);
+      let excess2 = entries2.length - perTabLimit;
+      for (const entry of entries2) {
+        if (excess2 <= 0) break;
+        if (entry.key === protectedKey) continue;
+        removedActiveTarget = removeSessionState(entry.key) || removedActiveTarget;
+        excess2 -= 1;
+      }
+    }
+    const entries = sessionStateEntries().sort(
+      (left, right) => left.lastTouchedOrder - right.lastTouchedOrder,
+    );
+    let excess = entries.length - maxSessionStates();
+    for (const entry of entries) {
+      if (excess <= 0) break;
+      if (entry.key === protectedKey) continue;
+      removedActiveTarget = removeSessionState(entry.key) || removedActiveTarget;
+      excess -= 1;
+    }
+    if (removedActiveTarget) scheduleRedirectDiagnostics();
+    return removedActiveTarget;
+  }
   function responseHeader(response, name) {
     return response?.headers?.get?.(name) ?? null;
   }
@@ -1097,7 +1391,7 @@
       const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
       if (!isTrustedRequestDomain(finalUrl, quality_policy_default) || finalUrl !== url) return null;
       const text = await readResponseTextWithLimit(response, probeMaxBytes());
-      return isLikelyHlsPlaylist(text) ? { finalUrl, text } : null;
+      return isUsableHlsPlaylist(text) ? { finalUrl, text } : null;
     } catch {
       return null;
     } finally {
@@ -1121,7 +1415,7 @@
     return playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality);
   }
   function playlistEvidenceSupportsExpectedQuality(evidence, expectedQuality) {
-    if (!evidence || !isLikelyHlsPlaylist(evidence.text)) return false;
+    if (!evidence || !isUsableHlsPlaylist(evidence.text)) return false;
     const variants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl);
     if (variants.length > 0 || /#EXT-X-STREAM-INF:/i.test(evidence.text)) {
       return variants.some((variant) => {
@@ -1176,15 +1470,23 @@
   ) {
     const evidence = await fetchPlaylistEvidence(details.url, { signal });
     if (!evidence || signal?.aborted) return null;
-    const variant = chooseBestHlsVariant(evidence.text, evidence.finalUrl, {
+    const eligibleVariants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl).filter(
+      (candidate) => {
+        const candidateQuality = bestVariantTargetQuality(candidate);
+        return Boolean(
+          candidateQuality &&
+          typeof candidate?.url === "string" &&
+          isTrustedRequestDomain(candidate.url, quality_policy_default) &&
+          urlQualityMarkersMatch(candidate.url, candidateQuality),
+        );
+      },
+    );
+    const variant = chooseBestHlsVariantFromVariants(eligibleVariants, {
       excludedQualities: [...skipTargetQualities],
       minRedirectQuality: quality_policy_default.minRedirectQuality,
     });
     const targetQuality = bestVariantTargetQuality(variant);
-    if (!variant?.url || !targetQuality || !isTrustedRequestDomain(variant.url, quality_policy_default))
-      return null;
-    if (!urlQualityMarkersMatch(variant.url, targetQuality)) return null;
-    return { evidenceKind: "master", targetQuality };
+    return variant?.url && targetQuality ? { evidenceKind: "master", targetQuality } : null;
   }
   async function updateRedirectDiagnostics(lastError = null) {
     await enqueueDiagnosticsMutation((diagnostics) => {
@@ -1253,10 +1555,11 @@
     if (!state) return null;
     if (state.expiresAt != null && state.expiresAt <= Date.now()) {
       activeTargetsBySession.delete(session.key);
+      forgetRedirectedRequestsForSession(session.key);
       scheduleRedirectDiagnostics();
       return null;
     }
-    return state;
+    return touchSessionState(state);
   }
   function failedTargetsForSession(session) {
     const state = failedTargetsBySession.get(session.key);
@@ -1269,6 +1572,7 @@
       failedTargetsBySession.delete(session.key);
       return /* @__PURE__ */ new Set();
     }
+    touchSessionState(state);
     return new Set(state.targets.keys());
   }
   function canReuseSessionTarget(previous, targetQuality, now) {
@@ -1301,7 +1605,7 @@
       reusePrevious && (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
         ? "master"
         : resolution.evidenceKind;
-    const state = {
+    const state = touchSessionState({
       ...session,
       evidenceKind,
       expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
@@ -1310,8 +1614,9 @@
       targetEpoch,
       targetQuality,
       validatedNetworkUrls,
-    };
+    });
     activeTargetsBySession.set(session.key, state);
+    enforceSessionStateLimits(session.key);
     if (previous?.targetQuality !== targetQuality || !previous?.resolved) scheduleRedirectDiagnostics();
     return true;
   }
@@ -1335,6 +1640,7 @@
     const token = currentTabContextToken(session.tabId);
     const existing = resolutionBySession.get(session.key);
     if (existing?.token === token) {
+      touchSessionState(existing);
       if (resolverKind !== "master" || existing.resolverKind === "master") return existing.promise;
       invalidateSessionResolution(session.key);
     } else {
@@ -1342,7 +1648,7 @@
     }
     const controller = new AbortController();
     const resolutionTimeout = setTimeout(() => controller.abort(), probeResolutionBudgetMs());
-    const state = { ...session, controller, promise: null, resolverKind, token };
+    const state = touchSessionState({ ...session, controller, promise: null, resolverKind, token });
     state.promise = Promise.resolve()
       .then(() =>
         resolver({
@@ -1364,6 +1670,7 @@
         if (resolutionBySession.get(state.key) === state) resolutionBySession.delete(state.key);
       });
     resolutionBySession.set(session.key, state);
+    enforceSessionStateLimits(session.key);
     return state.promise;
   }
   async function waitForBlockingResolution(promise, budget) {
@@ -1470,7 +1777,7 @@
     for (const group of failureGroups.values()) {
       if (group.length !== 1) continue;
       const [{ key, state }] = group;
-      failedTargetsBySession.set(key, state);
+      failedTargetsBySession.set(key, touchSessionState(state));
     }
   }
   function migrateTabQualityState(
@@ -1510,7 +1817,7 @@
       state.contextKey = destinationContextKey;
       state.key = key;
       state.token = transitionToken;
-      resolutionBySession.set(key, state);
+      resolutionBySession.set(key, touchSessionState(state));
     }
     migrateFailedTargetsAcrossContext(tabId, destinationContextKey, sourceContextKey, now);
     for (const [oldKey, state] of tabTargets) {
@@ -1522,7 +1829,7 @@
         continue;
       }
       const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
-      const target = { ...state, contextKey: destinationContextKey, key };
+      const target = touchSessionState({ ...state, contextKey: destinationContextKey, key });
       const group = targetGroups.get(key) ?? [];
       group.push({ oldKey, target });
       targetGroups.set(key, group);
@@ -1545,6 +1852,7 @@
       redirectedRequestsById.delete(requestId);
     }
     tabContextTokenByTab.set(tabId, transitionToken);
+    enforceSessionStateLimits();
     return tabTargets.length > 0;
   }
   function migrateTabQualityStateToMiniPlayer(tabId) {
@@ -1851,9 +2159,10 @@
   }
   function currentTargetMatchesRecord(record) {
     const current = activeTargetsBySession.get(record.key);
-    return current?.targetQuality === record.targetQuality && current.targetEpoch === record.targetEpoch
-      ? current
-      : null;
+    if (current?.targetQuality !== record.targetQuality || current.targetEpoch !== record.targetEpoch) {
+      return null;
+    }
+    return touchSessionState(current);
   }
   function targetPreviouslyValidatedNetworkUrl(record) {
     const current = currentTargetMatchesRecord(record);
@@ -1882,12 +2191,18 @@
     }
     activeTargetsBySession.delete(record.key);
     invalidateSessionResolution(record.key);
+    const now = Date.now();
     const failures = failedTargetsBySession.get(record.key) ?? {
-      ...record,
+      contextKey: record.contextKey,
+      dedicatedHls: record.dedicatedHls,
+      familyKey: record.familyKey,
+      key: record.key,
+      tabId: record.tabId,
       targets: /* @__PURE__ */ new Map(),
     };
-    failures.targets.set(record.targetQuality, Date.now() + redirectFailureBackoffMs());
-    failedTargetsBySession.set(record.key, failures);
+    failures.targets.set(record.targetQuality, now + redirectFailureBackoffMs());
+    failedTargetsBySession.set(record.key, touchSessionState(failures));
+    enforceSessionStateLimits(record.key);
     for (const [requestId, pending] of redirectedRequestsById) {
       if (
         pending.key === record.key &&
@@ -2070,6 +2385,7 @@
     return void 0;
   }
   function handleRequest(details) {
+    if (sweepExpiredSessionState()) scheduleRedirectDiagnostics();
     if (!isHlsPlaylistUrl(details?.url)) return void 0;
     const attachedRedirectVerifier = attachPendingRedirectBodyVerifier(details);
     if (!registerRequestContext(details)) return void 0;
@@ -2134,7 +2450,7 @@
         ? quality_policy_default.trustedInitiatorDomains
         : ["chzzk.naver.com"]
     )
-      .map((domain) => `https://*.${domain}/live/*`)
+      .flatMap((domain) => [`https://*.${domain}/live`, `https://*.${domain}/live/*`])
       .sort();
   }
   async function prewarmExistingLiveTabs() {

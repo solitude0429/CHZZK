@@ -89,7 +89,8 @@ async function loadBackground({
         headers: { get: () => null },
         ok,
         status: ok ? 200 : 404,
-        text: async () => (ok ? "#EXTM3U\n#EXT-X-VERSION:3\n" : "not found"),
+        text: async () =>
+          ok ? "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n" : "not found",
         url: stringUrl,
       };
     },
@@ -199,10 +200,27 @@ async function loadBackground({
     },
   };
 
-  vm.createContext(context);
-  vm.runInContext(readFileSync(new URL("../../background.js", import.meta.url), "utf8"), context, {
-    filename: "background.js",
+  const source = readFileSync(new URL("../../background.js", import.meta.url), "utf8");
+  const closureEnd = source.lastIndexOf("})();");
+  assert.notEqual(closureEnd, -1, "generated background bundle must end with an IIFE");
+  const instrumented = `${source.slice(0, closureEnd)}
+  globalThis.__chzzkSessionState = () => ({
+    active: [...activeTargetsBySession.values()].map((state) => ({
+      familyKey: state.familyKey,
+      tabId: state.tabId,
+    })),
+    failed: [...failedTargetsBySession.values()].map((state) => ({
+      familyKey: state.familyKey,
+      keys: Object.keys(state).sort(),
+      tabId: state.tabId,
+      targetCount: state.targets instanceof Map ? state.targets.size : 0,
+    })),
+    resolving: resolutionBySession.size,
   });
+${source.slice(closureEnd)}`;
+
+  vm.createContext(context);
+  vm.runInContext(instrumented, context, { filename: "background.js" });
 
   return {
     advanceClock(ms) {
@@ -212,6 +230,7 @@ async function loadBackground({
     fetchOptions,
     listeners,
     responseFilters,
+    sessionState: () => plain(context.__chzzkSessionState()),
     storage,
     tabQueries,
     timerDelays,
@@ -232,7 +251,7 @@ function deferred() {
   return { promise, reject, resolve };
 }
 
-function playlistResponse(url, body = "#EXTM3U\n#EXT-X-VERSION:3\n") {
+function playlistResponse(url, body = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n") {
   return {
     headers: { get: () => null },
     ok: true,
@@ -1538,7 +1557,7 @@ describe("background runtime quality resolution", () => {
         [
           mismatched1440,
           {
-            body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+            body: "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n",
             url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/1080p/segment/chunklist_1080p.m3u8?Policy=redacted",
           },
         ],
@@ -1878,7 +1897,9 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     listeners.onInstalled();
     await waitForDiagnosticsQueue();
 
-    assert.deepEqual(plain(tabQueries), [{ url: ["https://*.chzzk.naver.com/live/*"] }]);
+    assert.deepEqual(plain(tabQueries), [
+      { url: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"] },
+    ]);
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [88]);
 
     const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(88)));
@@ -1994,7 +2015,9 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     listeners.onStartup();
     await waitForDiagnosticsQueue();
 
-    assert.deepEqual(plain(tabQueries), [{ url: ["https://*.chzzk.naver.com/live/*"] }]);
+    assert.deepEqual(plain(tabQueries), [
+      { url: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"] },
+    ]);
     const redirect = plain(
       await listeners.onBeforeRequest({
         ...firstLowQualityRequest(89),
@@ -2363,11 +2386,11 @@ chunklist_1080p.m3u8?Policy=redacted
     const deceptiveResponses = [
       { body: "<!doctype html>\n#EXTM3U\n#EXT-X-VERSION:3\n" },
       {
-        body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+        body: "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n",
         headers: { "content-type": "text/html; charset=utf-8" },
       },
       {
-        body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+        body: "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n",
         headers: { "content-type": "application/problem+json" },
       },
     ];
@@ -2389,14 +2412,17 @@ chunklist_1080p.m3u8?Policy=redacted
         [
           requested2160,
           {
-            body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-VERSION:3\r\n",
+            body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-TARGETDURATION:6\r\n#EXTINF:6.0,\r\nsegment-1.ts\r\n",
             headers: { "content-type": "application/vnd.apple.mpegurl; charset=utf-8" },
           },
         ],
       ]),
     });
 
-    const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(704)));
+    const request = firstLowQualityRequest(704);
+    const firstDecision = await listeners.onBeforeRequest(request);
+    if (!firstDecision) await waitForDiagnosticsQueue();
+    const redirect = plain(firstDecision ?? (await listeners.onBeforeRequest(request)));
     assert.match(redirect.redirectUrl, /2160p/);
   });
 
@@ -2422,7 +2448,7 @@ chunklist_1080p.m3u8?Policy=redacted
         [
           redirected1080,
           {
-            body: "#EXTM3U\n#EXT-X-VERSION:3\n",
+            body: "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n",
             url: "https://untrusted.example.invalid/chunklist_1080p.m3u8",
           },
         ],
@@ -2449,7 +2475,7 @@ chunklist_1080p.m3u8?Policy=redacted
             status: 302,
           },
         ],
-        [redirected2160, { body: "#EXTM3U\n#EXT-X-VERSION:3\n" }],
+        [redirected2160, { body: "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n" }],
       ]),
     });
 
@@ -2556,5 +2582,139 @@ chunklist_1080p.m3u8?Policy=redacted
       normalized.decisions.some((entry) => "unknown" in entry),
       false,
     );
+  });
+});
+
+describe("static-analysis remediation regressions", () => {
+  it("falls back to the highest valid trusted variant in a master playlist", async () => {
+    const masterUrl = "https://edge.pstatic.net/chzzk/master-fallback/master.m3u8?Policy=synthetic";
+    const masterBody = [
+      "#EXTM3U",
+      "#EXT-X-STREAM-INF:BANDWIDTH=20000000,RESOLUTION=3840x2160,FRAME-RATE=60.0",
+      "https://untrusted.example.invalid/chunklist_2160p.m3u8",
+      "#EXT-X-STREAM-INF:BANDWIDTH=12000000,RESOLUTION=2560x1440,FRAME-RATE=60.0",
+      "chunklist_1440p.m3u8?Policy=synthetic",
+      "",
+    ].join("\n");
+    const { fetches, listeners } = await loadBackground({
+      responsesByUrl: new Map([[masterUrl, { body: masterBody }]]),
+    });
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        documentUrl: "https://chzzk.naver.com/live/example-channel",
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        requestId: "master-fallback",
+        tabId: 811,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    await waitForDiagnosticsQueue(20);
+
+    const redirect = plain(
+      await listeners.onBeforeRequest(familyRequest(811, "master-fallback", "master-low")),
+    );
+    assert.match(redirect.redirectUrl, /master-fallback\/chunklist_1440p\.m3u8/);
+    assert.deepEqual(fetches, [masterUrl]);
+  });
+
+  it("rejects an EXTM3U-only candidate and downgrades to usable evidence", async () => {
+    const requested2160 =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunklist_2160p.m3u8?Policy=redacted";
+    const { listeners } = await loadBackground({
+      availableQualities: new Set(["1080p"]),
+      responsesByUrl: new Map([[requested2160, { body: "#EXTM3U\n#EXT-X-VERSION:3\n" }]]),
+    });
+
+    const redirect = plain(await listeners.onBeforeRequest(firstLowQualityRequest(812)));
+    assert.match(redirect.redirectUrl, /chunklist_1080p\.m3u8/);
+  });
+
+  it("prewarms the exact /live route during startup scans", async () => {
+    const { listeners, storage, tabQueries } = await loadBackground({
+      existingLiveTabs: [{ id: 813, url: "https://chzzk.naver.com/live" }],
+    });
+
+    listeners.onStartup();
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(
+      new Set(tabQueries[0].url),
+      new Set(["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"]),
+    );
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.activeTabIds), [813]);
+  });
+
+  it("evicts the least-recently-used family while retaining a recently reused target", async () => {
+    const runtime = await loadBackground({ availableQualities: new Set(["2160p"]) });
+    const tabId = 814;
+    for (let index = 0; index < 64; index += 1) {
+      await runtime.listeners.onBeforeRequest(familyRequest(tabId, `lru-${index}`));
+    }
+
+    await runtime.listeners.onBeforeRequest(familyRequest(tabId, "lru-0"));
+    await runtime.listeners.onBeforeRequest(familyRequest(tabId, "lru-64"));
+
+    const active = runtime.sessionState().active.filter((state) => state.tabId === tabId);
+    assert.equal(active.length, 64);
+    assert.equal(
+      active.some((state) => state.familyKey.includes('"lru-0"')),
+      true,
+    );
+    assert.equal(
+      active.some((state) => state.familyKey.includes('"lru-1"')),
+      false,
+    );
+    assert.equal(
+      active.some((state) => state.familyKey.includes('"lru-64"')),
+      true,
+    );
+  });
+
+  it("bounds session families and keeps failure suppression free of signed request URLs", async () => {
+    const runtime = await loadBackground({ availableQualities: new Set(["2160p"]) });
+    const counts = [80, 50, 50, 50, 50];
+    for (const [offset, count] of counts.entries()) {
+      for (let index = 0; index < count; index += 1) {
+        await runtime.listeners.onBeforeRequest(
+          familyRequest(900 + offset, "bounded-" + offset + "-" + index),
+        );
+      }
+    }
+
+    let snapshot = runtime.sessionState();
+    assert.equal(snapshot.active.length, 256);
+    const activeCounts = new Map();
+    for (const state of snapshot.active) {
+      activeCounts.set(state.tabId, (activeCounts.get(state.tabId) ?? 0) + 1);
+    }
+    assert.equal(
+      [...activeCounts.values()].every((count) => count <= 64),
+      true,
+    );
+
+    const failureRequest = familyRequest(999, "failure-minimal", "failure-minimal-request");
+    const first = plain(await runtime.listeners.onBeforeRequest(failureRequest));
+    runtime.listeners.onCompleted({
+      requestId: failureRequest.requestId,
+      statusCode: 404,
+      tabId: failureRequest.tabId,
+      url: first.redirectUrl,
+    });
+    snapshot = runtime.sessionState();
+    const failure = snapshot.failed.find((state) => state.familyKey.includes("failure-minimal"));
+    assert.ok(failure);
+    assert.equal(failure.targetCount, 1);
+    for (const forbidden of [
+      "bodyEvidence",
+      "redirectNetworkUrl",
+      "redirectUrl",
+      "requestId",
+      "statusCode",
+    ]) {
+      assert.equal(failure.keys.includes(forbidden), false, forbidden);
+    }
   });
 });

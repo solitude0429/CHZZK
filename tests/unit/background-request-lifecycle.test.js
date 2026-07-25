@@ -6,7 +6,7 @@ import vm from "node:vm";
 const BACKGROUND_URL = new URL("../../background.js", import.meta.url);
 // The isolated VM exposes internal request bookkeeping only to assert terminal-record cleanup.
 
-function playlistResponse(url, body = "#EXTM3U\n#EXT-X-VERSION:3\n") {
+function playlistResponse(url, body = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n") {
   return {
     headers: { get: () => null },
     ok: true,
