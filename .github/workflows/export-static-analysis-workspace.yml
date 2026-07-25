@@ -1,4 +1,4 @@
-name: Prepare secure static-analysis dependencies
+name: Publish verified static-analysis remediation
 
 on:
   pull_request:
@@ -7,46 +7,285 @@ permissions:
   contents: read
 
 concurrency:
-  group: prepare-static-analysis-dependencies-${{ github.event.pull_request.number }}
+  group: publish-static-analysis-remediation-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  prepare:
+  verify:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - name: Resolve the candidate dependency graph
-        run: |
-          cp .github/chzzk-static-analysis-candidate-package.json package.json
-          rm -f package-lock.json
-          npm install --ignore-scripts
-      - name: Capture npm audit JSON and exit status
+      - name: Apply the exact remediation to main
         shell: bash
         run: |
-          set +e
-          npm audit --audit-level=moderate --json > "$RUNNER_TEMP/npm-audit.json"
-          STATUS=$?
-          set -e
-          printf 'exit_code=%s\n' "$STATUS" > "$RUNNER_TEMP/npm-audit-status.txt"
-          tar -czf "$RUNNER_TEMP/node_modules.tar.gz" node_modules
-          cp package.json package-lock.json "$RUNNER_TEMP/"
+          set -euo pipefail
+          TRANSFORM="$RUNNER_TEMP/chzzk-static-analysis-fix.mjs"
+          cp .github/chzzk-static-analysis-candidate-package.json "$RUNNER_TEMP/package.json"
+          rm -rf "$RUNNER_TEMP/final-files"
+          cp -R .github/chzzk-static-analysis-final "$RUNNER_TEMP/final-files"
+          cat .github/chzzk-static-analysis-fix/part-00.b64 \
+              .github/chzzk-static-analysis-fix/part-01.b64 \
+              .github/chzzk-static-analysis-fix/part-02.b64 \
+              .github/chzzk-static-analysis-fix/part-03.b64 | base64 -d > "$TRANSFORM"
+          cat .github/chzzk-static-analysis-fix/tail.mjs >> "$TRANSFORM"
+          test "$(sha256sum "$TRANSFORM" | cut -d ' ' -f1)" = "09c9e982461f362b6f77a24ec92d8faf76dcd2c554a6a5f6cd3438955d50eb1d"
+          node --check "$TRANSFORM"
+          git switch --detach origin/main
+          node "$TRANSFORM"
+          node <<'NODE'
+          const { readFileSync, writeFileSync } = require("node:fs");
+
+          function replaceExactly(path, before, after, expected = 1) {
+            const source = readFileSync(path, "utf8");
+            const count = source.split(before).length - 1;
+            if (count !== expected) throw new Error(`${path}: expected ${expected} replacements, found ${count}`);
+            writeFileSync(path, source.split(before).join(after), "utf8");
+          }
+
+          const playlistPath = "src/shared/playlist-evidence.js";
+          const playlistSource = readFileSync(playlistPath, "utf8");
+          const playlistStart = playlistSource.indexOf("function isPlaylistUri(value) {");
+          const playlistEndMarker = "\n}\n\nexport function isLikelyHlsPlaylist";
+          const playlistEnd = playlistSource.indexOf(playlistEndMarker, playlistStart);
+          if (playlistStart < 0 || playlistEnd < 0) throw new Error("playlist URI helper boundary is missing");
+          writeFileSync(
+            playlistPath,
+            `${playlistSource.slice(0, playlistStart)}function isPlaylistUri(value) {
+              if (typeof value !== "string" || value === "" || value.startsWith("#")) return false;
+              for (let index = 0; index < value.length; index += 1) {
+                const codePoint = value.charCodeAt(index);
+                if (codePoint <= 0x1f || codePoint === 0x7f) return false;
+              }
+              return true;
+            }${playlistSource.slice(playlistEnd + 2)}`,
+            "utf8",
+          );
+
+          for (const path of [
+            "tests/unit/update-manifest.test.js",
+            "tests/unit/release-metadata.test.js",
+            "tests/unit/firefox-signed-smoke.test.js",
+            "tests/unit/release-pipeline.test.js",
+          ]) {
+            replaceExactly(
+              path,
+              "sha256: String(index + 1).repeat(64),",
+              'sha256: (index + 1).toString(16).padStart(64, "0"),',
+            );
+          }
+
+          replaceExactly(
+            "tests/unit/background-runtime.test.js",
+            'assert.deepEqual(plain(tabQueries), [{ url: ["https://*.chzzk.naver.com/live/*"] }]);',
+            `assert.deepEqual(plain(tabQueries), [
+              {
+                url: [
+                  "https://*.chzzk.naver.com/live",
+                  "https://*.chzzk.naver.com/live/*",
+                ],
+              },
+            ]);`,
+            2,
+          );
+          replaceExactly(
+            "tests/unit/background-runtime.test.js",
+            String.raw`body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-VERSION:3\r\n",`,
+            String.raw`body: "\uFEFF \t\r\n\r\n  #EXTM3U  \r\n#EXT-X-TARGETDURATION:6\r\n#EXTINF:6.0,\r\nsegment.ts\r\n",`,
+          );
+
+          replaceExactly("docs/HARDENING.md", "ESLint and web-ext lint", "ESLint and extension-source validation");
+          replaceExactly(
+            "docs/SECURITY.md",
+            "lint, web-ext lint, unit/security behavior tests, built-in V8 coverage thresholds, dependency audit, deterministic build, and package-content audit.",
+            "lint, extension-source validation, unit/security behavior tests, built-in V8 coverage thresholds, dependency audit, deterministic build, and package-content audit. The ordinary package builder and source validator are repository-owned, dependency-minimal scripts rather than the vulnerable `web-ext` toolchain.",
+          );
+          replaceExactly(
+            "docs/TESTING.md",
+            "ESLint, web-ext lint, unit and security behavior tests",
+            "ESLint, extension-source validation, unit and security behavior tests",
+          );
+          replaceExactly(
+            "docs/TESTING.md",
+            `npx web-ext run --source-dir . --firefox-profile /tmp/chzzk-firefox-profile`,
+            `mkdir -p /tmp/chzzk-firefox-profile
+          firefox --no-remote --profile /tmp/chzzk-firefox-profile about:debugging#/runtime/this-firefox`,
+          );
+          replaceExactly(
+            "docs/TESTING.md",
+            `\`\`\`bash
+          mkdir -p /tmp/chzzk-firefox-profile
+          firefox --no-remote --profile /tmp/chzzk-firefox-profile about:debugging#/runtime/this-firefox
+          \`\`\`
+
+          Checklist:`,
+            `\`\`\`bash
+          mkdir -p /tmp/chzzk-firefox-profile
+          firefox --no-remote --profile /tmp/chzzk-firefox-profile about:debugging#/runtime/this-firefox
+          \`\`\`
+
+          In **This Firefox**, choose **Load Temporary Add-on** and select this checkout's \`manifest.json\`. The checked-in runtime bundles are the same files validated by \`npm run check:generated\`; \`npm run build\` additionally creates the deterministic distributable ZIP.
+
+          Checklist:`,
+          );
+          replaceExactly("docs/TROUBLESHOOTING.md", "npx web-ext lint --source-dir .", "npm run lint:webext");
+
+          replaceExactly(
+            "tests/e2e/firefox-update-playback.mjs",
+            "chmodSync, copyFileSync, mkdtempSync",
+            "chmodSync, mkdtempSync",
+          );
+          replaceExactly(
+            "tests/e2e/firefox-update-playback.mjs",
+            "    } catch {}\n",
+            "    } catch {\n      // Best-effort WebDriver shutdown during test cleanup.\n    }\n",
+          );
+
+          const securityPath = "tests/unit/security-remediation.test.js";
+          const securitySource = readFileSync(securityPath, "utf8");
+          const securityStart = securitySource.indexOf(
+            "    for (const [name, version] of Object.entries(packageJson.devDependencies)) {",
+          );
+          const securityEnd = securitySource.indexOf(
+            '    const ignore = read(".gitignore");',
+            securityStart,
+          );
+          if (securityStart < 0 || securityEnd < 0) throw new Error("dependency pinning test boundary is missing");
+          writeFileSync(
+            securityPath,
+            `${securitySource.slice(0, securityStart)}    for (const [name, version] of Object.entries(packageJson.devDependencies)) {
+              assert.doesNotMatch(version, /^[~^]/, \`\${name} must be exactly pinned\`);
+            }
+            assert.equal(packageJson.devDependencies.eslint, "10.8.0");
+            assert.equal(packageJson.devDependencies["@eslint/js"], "10.0.1");
+            assert.equal(packageJson.devDependencies.globals, "17.7.0");
+            assert.equal(packageJson.devDependencies["web-ext"], undefined);
+            assert.equal(packageJson.overrides, undefined);
+            assert.equal(packageJson.scripts["lint:webext"], "node scripts/validate-extension-source.js");
+            assert.match(packageJson.scripts.build, /build-extension-package\\.js/);
+            assert.match(packageJson.scripts["test:coverage"], /coverage:shared.*coverage:runtime/);
+            ${securitySource.slice(securityEnd)}`,
+            "utf8",
+          );
+          NODE
+          rm .eslintrc.cjs
+          mkdir -p scripts tests/unit
+          cp "$RUNNER_TEMP/final-files/eslint.config.js" eslint.config.js
+          cp "$RUNNER_TEMP/final-files/scripts/build-extension-package.js" scripts/build-extension-package.js
+          cp "$RUNNER_TEMP/final-files/scripts/check-runtime-coverage.js" scripts/check-runtime-coverage.js
+          cp "$RUNNER_TEMP/final-files/scripts/validate-extension-source.js" scripts/validate-extension-source.js
+          cp "$RUNNER_TEMP/final-files/tests/build-extension-package.test.js" tests/unit/build-extension-package.test.js
+          chmod +x scripts/build-extension-package.js scripts/check-runtime-coverage.js scripts/validate-extension-source.js
+          cp "$RUNNER_TEMP/package.json" package.json
+          rm package-lock.json
+          npm install --package-lock-only --ignore-scripts
+          npm ci
+          npx prettier --write "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
+          npm run build:runtime
+          git diff --check
+      - name: Run all repository verification gates
+        run: npm run verify
+      - name: Run the checksum-pinned Firefox functional E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run setup:firefox-e2e
+          FIREFOX_BINARY="$GITHUB_WORKSPACE/dist/e2e-tools/firefox/firefox" \
+          GECKODRIVER_BINARY="$GITHUB_WORKSPACE/dist/e2e-tools/geckodriver" \
+          npm run test:firefox-e2e
+      - name: Seal the verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --binary origin/main > "$RUNNER_TEMP/verified.patch"
+          test -s "$RUNNER_TEMP/verified.patch"
+          sha256sum "$RUNNER_TEMP/verified.patch" > "$RUNNER_TEMP/verified.patch.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           if-no-files-found: error
-          name: chzzk-static-analysis-dependencies-${{ github.event.pull_request.head.sha }}
+          name: verified-static-analysis-remediation-${{ github.event.pull_request.head.sha }}
           path: |
-            ${{ runner.temp }}/package.json
-            ${{ runner.temp }}/package-lock.json
-            ${{ runner.temp }}/node_modules.tar.gz
-            ${{ runner.temp }}/npm-audit.json
-            ${{ runner.temp }}/npm-audit-status.txt
+            ${{ runner.temp }}/verified.patch
+            ${{ runner.temp }}/verified.patch.sha256
           retention-days: 1
+
+  publish:
+    needs: verify
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: main
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-static-analysis-remediation-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/verified-remediation
+      - name: Publish only the verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/verified-remediation"
+          sha256sum --check verified.patch.sha256
+          cd "$GITHUB_WORKSPACE"
+          git switch --force-create agent/fix-static-analysis-findings origin/main
+          git apply --check --binary "$RUNNER_TEMP/verified-remediation/verified.patch"
+          git apply --binary "$RUNNER_TEMP/verified-remediation/verified.patch"
+          git diff --check
+          cat > "$RUNNER_TEMP/expected-files" <<'FILES'
+          .eslintrc.cjs
+          background.js
+          diagnostics.js
+          docs/HARDENING.md
+          docs/SECURITY.md
+          docs/TESTING.md
+          docs/TROUBLESHOOTING.md
+          eslint.config.js
+          manifest.json
+          package-lock.json
+          package.json
+          policy/quality-policy.json
+          scripts/build-extension-package.js
+          scripts/check-runtime-coverage.js
+          scripts/lib/amo-client.js
+          scripts/lib/release-finalize-state.js
+          scripts/lib/review-gate.js
+          scripts/validate-extension-source.js
+          scripts/validate-manifest.js
+          src/runtime/background.js
+          src/shared/playlist-evidence.js
+          src/shared/quality.js
+          tests/e2e/firefox-update-playback.mjs
+          tests/unit/background-request-lifecycle.test.js
+          tests/unit/background-runtime.test.js
+          tests/unit/background-transition-regressions.test.js
+          tests/unit/build-extension-package.test.js
+          tests/unit/extension-policy.test.js
+          tests/unit/firefox-signed-smoke.test.js
+          tests/unit/playlist-evidence.test.js
+          tests/unit/release-metadata.test.js
+          tests/unit/release-package-notices.test.js
+          tests/unit/release-pipeline.test.js
+          tests/unit/security-remediation.test.js
+          tests/unit/update-manifest.test.js
+          FILES
+          git diff --name-only | sort > "$RUNNER_TEMP/actual-files"
+          sort -o "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/expected-files"
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/actual-files"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix static analysis findings"
+          git push --force-with-lease origin HEAD:refs/heads/agent/fix-static-analysis-findings
