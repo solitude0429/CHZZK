@@ -28,10 +28,10 @@ jobs:
           node-version: 22
       - run: npm ci
       - name: Archive source, Git metadata, and installed dependencies
-        run: tar --exclude=chzzk-workspace.tar.gz -czf chzzk-workspace.tar.gz .
+        run: tar -czf "$RUNNER_TEMP/chzzk-workspace.tar.gz" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           if-no-files-found: error
           name: chzzk-static-analysis-workspace-${{ github.event.pull_request.head.sha }}
-          path: chzzk-workspace.tar.gz
+          path: ${{ runner.temp }}/chzzk-workspace.tar.gz
           retention-days: 1
