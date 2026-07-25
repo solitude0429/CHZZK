@@ -1,4 +1,4 @@
-name: Export current main workspace
+name: Verify remediated current main
 
 on:
   pull_request:
@@ -7,31 +7,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: export-current-main-${{ github.event.pull_request.number }}
+  group: verify-remediated-main-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  export:
+  verify:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: main
+          ref: b66c806b69f44d0a3a6c22e5f1a3ec727b5adc9e
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Archive current main with dependencies
-        run: tar -czf "$RUNNER_TEMP/chzzk-current-main.tar.gz" .
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          if-no-files-found: error
-          name: chzzk-current-main-${{ github.sha }}
-          path: ${{ runner.temp }}/chzzk-current-main.tar.gz
-          retention-days: 1
+      - name: Run every repository verification gate
+        run: npm run verify
+      - name: Run the checksum-pinned Firefox functional E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run setup:firefox-e2e
+          FIREFOX_BINARY="$GITHUB_WORKSPACE/dist/e2e-tools/firefox/firefox" \
+          GECKODRIVER_BINARY="$GITHUB_WORKSPACE/dist/e2e-tools/geckodriver" \
+          npm run test:firefox-e2e
