@@ -119,6 +119,12 @@ jobs:
           }
           runtimeTestSource = runtimeTestSource.replace(bomBefore, bomAfter);
           writeFileSync(runtimeTestPath, runtimeTestSource, "utf8");
+
+          const packagePath = "package.json";
+          const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+          packageJson.scripts["test:coverage"] =
+            "node --test --experimental-test-coverage --test-coverage-include=background.js --test-coverage-include=src/shared/**/*.js --test-coverage-lines=80 --test-coverage-functions=75 --test-coverage-branches=65 tests/unit/background-*.test.js tests/unit/diagnostics.test.js tests/unit/extension-policy.test.js tests/unit/playlist-evidence.test.js tests/unit/quality.test.js tests/unit/session-rules.test.js";
+          writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
           NODE
             npm ci
             npx prettier --write "**/*.{js,mjs,json,md,yml}" --ignore-path .prettierignore
@@ -151,7 +157,15 @@ jobs:
             cat "$OUTCOME"
             echo
             echo "--- failure summary ---"
-            grep -nE "not ok|failureType:|error:|ERR_" "$LOG" | tail -n 1000 || true
+            grep -nE "not ok|failureType:|error:|ERR_|vulnerabilit|npm error" "$LOG" | tail -n 1000 || true
+            echo
+            echo "--- failure context ---"
+            grep -n "not ok" "$LOG" | cut -d: -f1 | while read -r line; do
+              start=$((line > 12 ? line - 12 : 1))
+              end=$((line + 30))
+              echo "--- log lines ${start}-${end} ---"
+              sed -n "${start},${end}p" "$LOG"
+            done
             echo
             echo "--- verification log (last 800 lines) ---"
             tail -n 800 "$LOG"
