@@ -1,4 +1,4 @@
-name: Export static-analysis workspace
+name: Capture static-analysis dependency audit
 
 on:
   pull_request:
@@ -7,19 +7,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: export-static-analysis-workspace-${{ github.event.pull_request.number }}
+  group: capture-static-analysis-audit-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  export:
+  audit:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -27,11 +26,19 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Archive source, Git metadata, and installed dependencies
-        run: tar -czf "$RUNNER_TEMP/chzzk-workspace.tar.gz" .
+      - name: Capture npm audit JSON and exit status
+        shell: bash
+        run: |
+          set +e
+          npm audit --audit-level=moderate --json > "$RUNNER_TEMP/npm-audit.json"
+          STATUS=$?
+          set -e
+          printf 'exit_code=%s\n' "$STATUS" > "$RUNNER_TEMP/npm-audit-status.txt"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           if-no-files-found: error
-          name: chzzk-static-analysis-workspace-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/chzzk-workspace.tar.gz
+          name: chzzk-static-analysis-audit-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/npm-audit.json
+            ${{ runner.temp }}/npm-audit-status.txt
           retention-days: 1
