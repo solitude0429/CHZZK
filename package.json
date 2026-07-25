@@ -49,7 +49,7 @@
   },
   "devDependencies": {
     "esbuild": "0.28.1",
-    "eslint": "8.57.1",
+    "eslint": "10.8.0",
     "jszip": "3.10.1",
     "prettier": "3.9.4",
     "web-ext": "10.4.0",
