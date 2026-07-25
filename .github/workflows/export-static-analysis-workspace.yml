@@ -1,0 +1,37 @@
+name: Export static-analysis workspace
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-static-analysis-workspace-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - name: Archive source, Git metadata, and installed dependencies
+        run: tar --exclude=chzzk-workspace.tar.gz -czf chzzk-workspace.tar.gz .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          if-no-files-found: error
+          name: chzzk-static-analysis-workspace-${{ github.event.pull_request.head.sha }}
+          path: chzzk-workspace.tar.gz
+          retention-days: 1
