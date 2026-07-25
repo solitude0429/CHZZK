@@ -244,11 +244,15 @@ appendText(
 );
 
 // Documentation now matches the hardened behavior.
-replaceAtLeast(
+replaceOnce(
   "docs/HARDENING.md",
   "`https://*.chzzk.naver.com/live/*`",
   "`https://*.chzzk.naver.com/live` and `https://*.chzzk.naver.com/live/*`",
-  2,
+);
+replaceOnce(
+  "docs/HARDENING.md",
+  "`https://chzzk.naver.com/live/*`",
+  "`https://chzzk.naver.com/live` and `https://chzzk.naver.com/live/*`",
 );
 replaceOnce(
   "docs/HARDENING.md",
