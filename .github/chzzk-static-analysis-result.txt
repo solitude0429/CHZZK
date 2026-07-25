@@ -1,0 +1,20 @@
+completed_at=2026-07-25T14:00:51Z
+status=failure
+
+--- verification log (last 500 lines) ---
+From https://github.com/solitude0429/CHZZK
+ * branch            main       -> FETCH_HEAD
+Switched to a new branch 'agent/fix-static-analysis-findings'
+branch 'agent/fix-static-analysis-findings' set up to track 'origin/main'.
+file:///home/runner/work/_temp/chzzk-static-analysis-fix.mjs:32
+    throw new Error(`${relativePath}: expected at least ${minimum} replacements, found ${count}`);
+          ^
+
+Error: docs/HARDENING.md: expected at least 2 replacements, found 1
+    at replaceAtLeast (file:///home/runner/work/_temp/chzzk-static-analysis-fix.mjs:32:11)
+    at file:///home/runner/work/_temp/chzzk-static-analysis-fix.mjs:1005:1
+    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)
+
+Node.js v22.23.1
