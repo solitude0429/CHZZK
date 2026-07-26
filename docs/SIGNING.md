@@ -84,19 +84,9 @@ Release에는 정확히 다음 세 파일만 존재합니다.
 
 검증기는 canonical 이름, 크기, entry 수, compression ratio, ZIP64/multi-disk, path, comment, signature metadata를 제한합니다. `manifest.json`은 lossless semantic JSON으로, 나머지 runtime 파일은 prepared ZIP과 byte 단위로 비교합니다. Mozilla 서명 authenticity는 자체 암호 구현이 아니라 stock Firefox의 `SIGNEDSTATE_SIGNED` 판정으로 확인합니다.
 
-## PR 검토 게이트
+## PR 검토
 
-Release/security 경로는 exact-head 자동 검토와 unresolved thread 0개를 요구합니다. 검토 event는 즉시 다시 평가됩니다. 게이트는 exact-head `APPROVED` review 또는 full-SHA를 포함한 unedited operator `@codex review` command 뒤에 trusted GitHub App이 남긴 최신 unedited clean-review comment를 인식합니다. Clean response 전체는 알려진 표준 template/footer와 일치해야 하며 같은 초의 request/response는 issue-comment ID로 순서를 판정합니다. Comment-bound `+1` fallback만 발생했다면 GitHub에는 reaction 전용 Actions event가 없으므로 한 번 수동 재평가합니다.
-
-```bash
-gh workflow run review-gate.yml \
-  --repo solitude0429/CHZZK \
-  --ref main \
-  -f force_review=false \
-  -f pr_number="<PR number>"
-```
-
-열린 PR 전체를 반복 실행하는 periodic reconciliation은 사용하지 않습니다.
+Release/security 변경도 다른 변경과 같은 protected-branch 검증을 사용합니다. 마지막 push 뒤 active Codex task에서 final diff를 직접 검토하고, 고위험 영향과 검토 결과를 PR body에 기록합니다. Sole-owner가 자기 PR을 승인할 수 없으므로 approval count는 요구하지 않으며, 별도 GitHub bot review도 중복 실행하지 않습니다. 대신 `verify`, Firefox E2E, dependency review, CodeQL을 모두 exact head에서 통과시키고 unresolved conversation을 0개로 유지합니다.
 
 ## 배포 후
 

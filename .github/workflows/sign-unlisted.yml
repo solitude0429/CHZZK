@@ -118,10 +118,10 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       version_policy_sha256: ${{ steps.release.outputs.version_policy_sha256 }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           cache: npm
           node-version: 22
@@ -176,7 +176,7 @@ jobs:
             echo "version=${VERSION}"
             echo "version_policy_sha256=${VERSION_POLICY_SHA}"
           } >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           if-no-files-found: error
           name: chzzk-signing-input-${{ github.sha }}
@@ -188,7 +188,7 @@ jobs:
             scripts/sign-unlisted.js
           retention-days: 7
       - if: steps.release.outputs.reuse_existing == 'true' || steps.release.outputs.draft_signed_ready == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           if-no-files-found: error
           name: chzzk-signed-${{ github.sha }}
@@ -204,7 +204,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: chzzk-signing-input-${{ github.sha }}
           path: prepared
@@ -226,7 +226,7 @@ jobs:
           CHZZK_SIGNED_OUTPUT_DIR: signed
           CHZZK_UNSIGNED_XPI: prepared/dist/release/chzzk-${{ needs.prepare.outputs.version }}.zip
         run: node prepared/scripts/sign-unlisted.js
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           if-no-files-found: error
           name: chzzk-signed-${{ github.sha }}
@@ -244,19 +244,19 @@ jobs:
     outputs:
       signed_sha256: ${{ steps.verify.outputs.signed_sha256 }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           cache: npm
           node-version: 22
       - run: npm ci
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: chzzk-signing-input-${{ github.sha }}
           path: prepared
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: chzzk-signed-${{ github.sha }}
           path: signed
@@ -290,7 +290,7 @@ jobs:
           FIREFOX_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools/firefox/firefox
           GECKODRIVER_BINARY: ${{ github.workspace }}/dist/signed-smoke-tools/geckodriver
         run: npm run test:firefox-signed-smoke
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           if-no-files-found: error
           name: chzzk-release-assets-${{ github.sha }}
@@ -308,7 +308,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: chzzk-release-assets-${{ github.sha }}
           path: release-assets
@@ -319,7 +319,7 @@ jobs:
           test "$(sha256sum "release-assets/chzzk-${VERSION}.zip" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.source_sha256 }}"
           test "$(sha256sum "release-assets/chzzk-${VERSION}-release-metadata.json" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.metadata_sha256 }}"
           test "$(sha256sum "release-assets/chzzk-${VERSION}-signed.xpi" | cut -d ' ' -f1)" = "${{ needs.verify-signed.outputs.signed_sha256 }}"
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: release-assets/*
 
@@ -332,7 +332,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: chzzk-release-assets-${{ github.sha }}
           path: release-assets

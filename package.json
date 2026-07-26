@@ -17,16 +17,16 @@
   "scripts": {
     "audit:deps": "npm audit --audit-level=moderate",
     "audit:package": "node scripts/verify-package.js",
-    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs node_modules package-lock.json package.json policy reg scripts src tests",
+    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
     "build:update-manifest": "node scripts/build-update-manifest.js",
     "check:generated": "node scripts/check-generated.js",
-    "configure:review-gate": "node scripts/configure-review-gate.js",
+    "configure:repository": "node scripts/configure-repository.js",
     "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check \"**/*.{js,mjs,json,md,yml}\" --ignore-path .prettierignore",
     "lint": "eslint .",
-    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs node_modules package-lock.json package.json policy reg scripts src tests",
+    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests",
     "prepare:release": "node scripts/prepare-release.js",
     "setup:firefox-e2e": "node scripts/setup-firefox-e2e.js",
     "setup:firefox-signed-smoke": "node scripts/setup-firefox-signed-smoke.js",
@@ -48,11 +48,13 @@
     "verify:signed-release-structure": "node scripts/verify-signed-release-structure.js"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "esbuild": "0.28.1",
-    "eslint": "8.57.1",
+    "eslint": "10.8.0",
+    "globals": "17.7.0",
     "jszip": "3.10.1",
-    "prettier": "3.9.4",
-    "web-ext": "10.4.0",
+    "prettier": "3.9.6",
+    "web-ext": "10.5.0",
     "yaml": "2.9.0"
   }
 }
