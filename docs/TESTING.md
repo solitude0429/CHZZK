@@ -23,7 +23,7 @@ npm run build
 npm run audit:package
 ```
 
-The unit suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment (no validated-path reread), exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and exact-head review completion. Review-gate cases cover exact/stale reviews, trusted GitHub App clean-review comment binding, whole-template/footer enforcement, explicit operator command binding, edited/prefixed/wrong-App rejection, same-second issue-comment ordering, rejection of unbound PR-level reactions, wrong actors, malformed dates, unresolved threads, ordinary paths, full-SHA operator-comment reaction binding, and stubbed dry-run/idempotent sole-owner protection configuration. That configuration source-binds CI, Firefox E2E, dependency review, CodeQL, and review completion to the GitHub Actions app. Workflow-policy tests also require SHA-pinned actions and separated secret/write authority.
+The unit suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment (no validated-path reread), exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and idempotent sole-owner repository protection. The repository-settings tests source-bind CI, Firefox E2E, dependency review, and CodeQL to the GitHub Actions app, remove the retired bot-review state, restrict Actions to GitHub-owned code, and keep workflows read-only by default. Workflow-policy tests also require SHA-pinned actions and separated secret/write authority.
 
 ## Functional-only Firefox E2E
 
@@ -58,6 +58,8 @@ The release workflow downloads checksum-pinned stock Firefox and geckodriver wit
 ```bash
 npm run setup:firefox-signed-smoke
 ```
+
+The required release runner is Linux x64; the setup also has checksum-pinned Linux arm64 inputs. Windows, macOS, and Android are not required gates: the shipped WebExtension payload is platform-independent, and unattended unlisted-extension installation on those runners would add a large, fragile toolchain without replacing the stock-Firefox signature check. Residual operating-system integration risk is handled by the disposable post-deployment update smoke on the actual Firefox client, without weakening signature or update trust.
 
 Install mode requires a real final AMO-signed XPI and canonical release metadata:
 

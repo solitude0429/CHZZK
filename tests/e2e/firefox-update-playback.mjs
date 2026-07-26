@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import https from "node:https";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -668,7 +668,9 @@ async function main() {
   } finally {
     try {
       await driver.close();
-    } catch {}
+    } catch {
+      // Cleanup continues even when the disposable browser is already gone.
+    }
     if (geckodriverProcess && geckodriverProcess.exitCode === null) {
       geckodriverProcess.kill("SIGTERM");
       await Promise.race([new Promise((resolve) => geckodriverProcess.once("exit", resolve)), delay(3000)]);

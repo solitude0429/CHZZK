@@ -15,8 +15,8 @@ GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
 npm run test:firefox-functional-e2e
 ```
 
-4. Open a PR. The protected branch requires GitHub-Actions-bound `verify`, `firefox-e2e`, `dependency-review`, `analyze` (CodeQL), and `CHZZK review completion` checks plus zero unresolved review threads.
-5. Release/security changes additionally require exact-head reviewer evidence. Exact-head approvals and whole-template trusted GitHub App clean-review comments following an unedited full-SHA operator `@codex review` command re-evaluate immediately; after a comment-bound reaction-only approval, manually dispatch `review-gate.yml` once for that PR. There is no periodic reconciliation.
+4. Open a PR. The protected branch requires GitHub-Actions-bound `verify`, `firefox-e2e`, `dependency-review`, and `analyze` (CodeQL) checks plus zero unresolved review threads.
+5. Review the final diff directly in the active Codex task after the last push. Record any high-risk release, permissions, deployment, or security-policy impact in the PR body. A second GitHub bot-review round and a self-approval are not required for this sole-owner repository.
 6. Merge through protected `main`.
 7. Refresh the external operator bootstrap from the protected exact `main` blob as described in `docs/SIGNING.md`.
 8. From the clean exact-`main` checkout, run the fully sanitized, bounded `release` command in `docs/SIGNING.md` once. Do not replace it with a checkout script, npm command, or ambient `gh workflow run`.
@@ -40,6 +40,18 @@ npm run deploy:updates:internal
 12. Verify live `updates.json` and XPI MIME type, SHA-256, version, add-on ID, minimum Firefox version, source commit, and stable symlink targets.
 13. Run the old-signed-to-new-signed stock-Firefox update smoke from `docs/TESTING.md`.
 14. Ask the user to trigger Firefox AddonManager update checking. Do not stop Firefox or overwrite an installed profile XPI.
+
+## Repository settings
+
+Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound checks above, enforces protection for administrators, and requires resolved conversations without a self-approval rule.
+
+```bash
+CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
+CHZZK_RELEASE_OPERATOR_LOGIN="<exact owner login>" \
+npm run configure:repository
+```
+
+Add `-- --apply` only from a trusted administrator session after reviewing the dry-run JSON. Version-only dependency bot PRs are disabled; the operating agent consolidates current tooling updates into one tested maintenance PR while `npm audit`, dependency review, CodeQL, and GitHub vulnerability alerts remain active.
 
 ## Patch response
 
