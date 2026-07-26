@@ -73,7 +73,7 @@ async function loadBackground({
             ok: response.ok ?? true,
             status: response.status ?? (response.ok === false ? 404 : 200),
             text: async () => response.body ?? response.text ?? "",
-            url: response.url ?? stringUrl,
+            url: response.url ?? stringUrl.split("#", 1)[0],
           };
         }
         return {
@@ -81,7 +81,7 @@ async function loadBackground({
           ok: true,
           status: 200,
           text: async () => response,
-          url: stringUrl,
+          url: stringUrl.split("#", 1)[0],
         };
       }
       const ok = [...availableQualities].some((quality) => stringUrl.includes(quality));
@@ -91,7 +91,7 @@ async function loadBackground({
         status: ok ? 200 : 404,
         text: async () =>
           ok ? "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-1.ts\n" : "not found",
-        url: stringUrl,
+        url: stringUrl.split("#", 1)[0],
       };
     },
     globalThis: null,

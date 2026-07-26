@@ -210,7 +210,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 (async () => {
   try {
     const mediaUrl =
-      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F";
+      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F#client-only-fragment";
     let finalBody = "";
     let finalStatus = 0;
     for (let index = 0; index < 4; index += 1) {
@@ -645,6 +645,7 @@ async function main() {
     console.log(
       JSON.stringify({
         cacheRevalidation: "304",
+        clientFragmentNormalized: true,
         firefox: basename(firefoxBinary),
         functionalOnly: true,
         hostPermissionUpgrade: "/live/* -> /*",
