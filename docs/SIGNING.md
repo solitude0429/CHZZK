@@ -53,7 +53,7 @@ Bootstrap은 실행할 때 caller의 GitHub CLI config, proxy/CA/Node injection 
 1. 인증 주체, configured operator, protected remote default head, clean local head/branch, canonical version을 확인합니다.
 2. Admin-only API에서 immutable releases가 `enabled: true`인지 확인합니다.
 3. 예측 불가능한 128-bit dispatch nonce와 preflight timestamp를 포함한 제한된 `repository_dispatch`를 보냅니다.
-4. Exact actor, source SHA, branch, workflow path/name, nonce-bound run title이 모두 일치하는 단 하나의 staging run을 bounded polling합니다. 실패, 중복, malformed state, timeout은 finalization 전에 중단합니다.
+4. Exact actor, source SHA, branch, workflow path/name, nonce-bound run title이 모두 일치하는 단 하나의 staging run을 bounded polling합니다. 대기 예산은 순차 job timeout 100분과 queue/environment approval 여유 80분을 합친 180분이며, 실패, 중복, malformed state, timeout은 finalization 전에 중단합니다.
 5. 성공 뒤 remote head와 clean checkout을 처음부터 다시 확인하고, protected head에서 finalizer entrypoint를 API로 가져와 Git blob identity를 검증한 memory-only module로 실행합니다.
 6. Finalizer는 모든 exact-source staging run이 완료됐고 최신 attempt가 성공했는지, 세 draft snapshot과 asset bytes/uploader/content type, deterministic local artifacts, build attestations가 모두 일치하는지 확인합니다.
 7. 공개 직전에 admin-only API에서 immutable 설정을 다시 확인하고, 검증한 exact release ID만 `draft=false`로 전환한 뒤 exact immutable post-state를 요구합니다.

@@ -46,8 +46,13 @@ const AMBIENT_EXECUTION_ENVIRONMENT_NAMES = new Set([
   "no_proxy",
 ]);
 const MAX_ENTRYPOINT_BYTES = 256 * 1024;
-const MAX_STAGING_WAIT_ATTEMPTS = 900;
 const STAGING_WAIT_INTERVAL_MS = 5_000;
+const STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES = 100;
+const STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES = 80;
+const MAX_STAGING_WAIT_ATTEMPTS = Math.ceil(
+  ((STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES + STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES) * 60_000) /
+    STAGING_WAIT_INTERVAL_MS,
+);
 const TRUSTED_EXECUTABLE_CANDIDATES = Object.freeze({
   gh: Object.freeze(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"]),
   git: Object.freeze(["/usr/bin/git", "/bin/git"]),

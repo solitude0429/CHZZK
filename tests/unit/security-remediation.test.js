@@ -146,6 +146,26 @@ describe("release and repository security guardrails", () => {
     assert.match(bootstrap, /randomBytes\(16\)/);
     assert.match(bootstrap, /dispatch_nonce/);
     assert.match(bootstrap, /MAX_STAGING_WAIT_ATTEMPTS/);
+    const workflowTimeoutBudget = [...bootstrap.matchAll(/STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES = (\d+)/g)];
+    const queueAndApprovalMargin = [
+      ...bootstrap.matchAll(/STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES = (\d+)/g),
+    ];
+    assert.equal(workflowTimeoutBudget.length, 1);
+    assert.equal(queueAndApprovalMargin.length, 1);
+    assert.equal(
+      Number(workflowTimeoutBudget[0][1]),
+      Object.values(release.jobs).reduce((total, job) => total + job["timeout-minutes"], 0),
+      "bootstrap workflow timeout budget must cover every sequential release job timeout",
+    );
+    assert.equal(
+      Number(queueAndApprovalMargin[0][1]) >= 60,
+      true,
+      "bootstrap needs at least one hour of queue and approval margin",
+    );
+    assert.match(
+      bootstrap,
+      /\(STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES \+ STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES\)/,
+    );
     assert.match(bootstrap, /--paginate/);
     assert.match(bootstrap, /--slurp/);
     assert.match(bootstrap, /run\.display_title === expectedTitle/);
