@@ -1,4 +1,5 @@
-name: Sign and stage unlisted Firefox release
+name: Stage unlisted Firefox release
+run-name: Release staging ${{ github.event.client_payload.dispatch_nonce || 'invalid' }}
 
 on:
   repository_dispatch:
@@ -30,6 +31,7 @@ jobs:
           const payload = event.client_payload;
           const expectedKeys = [
             "default_branch",
+            "dispatch_nonce",
             "immutable_releases_verified",
             "operator_login",
             "source_sha",
@@ -40,13 +42,19 @@ jobs:
           if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
             throw new Error("release dispatch payload keys are invalid");
           }
-          if (process.env.GITHUB_EVENT_NAME !== "repository_dispatch" || event.action !== "chzzk-release-preflight-v1") {
+          if (
+            process.env.GITHUB_EVENT_NAME !== "repository_dispatch" ||
+            event.action !== "chzzk-release-preflight-v1"
+          ) {
             throw new Error("release dispatch event type is invalid");
           }
           if (!process.env.EXPECTED_OPERATOR || event.sender?.login !== process.env.EXPECTED_OPERATOR) {
             throw new Error("release dispatch sender is not the configured operator");
           }
-          if (payload.operator_login !== process.env.EXPECTED_OPERATOR || process.env.GITHUB_ACTOR !== process.env.EXPECTED_OPERATOR) {
+          if (
+            payload.operator_login !== process.env.EXPECTED_OPERATOR ||
+            process.env.GITHUB_ACTOR !== process.env.EXPECTED_OPERATOR
+          ) {
             throw new Error("release dispatch operator identity is inconsistent");
           }
           if (event.repository?.full_name !== process.env.GITHUB_REPOSITORY) {
@@ -55,11 +63,20 @@ jobs:
           if (payload.default_branch !== event.repository?.default_branch) {
             throw new Error("release dispatch default branch is invalid");
           }
-          if (process.env.GITHUB_REF !== `refs/heads/${payload.default_branch}` || process.env.REF_PROTECTED !== "true") {
+          if (
+            process.env.GITHUB_REF !== `refs/heads/${payload.default_branch}` ||
+            process.env.REF_PROTECTED !== "true"
+          ) {
             throw new Error("release dispatch ref is not the protected default branch");
           }
-          if (!/^[a-f0-9]{40}$/.test(payload.source_sha) || payload.source_sha !== process.env.GITHUB_SHA) {
+          if (
+            !/^[a-f0-9]{40}$/.test(payload.source_sha) ||
+            payload.source_sha !== process.env.GITHUB_SHA
+          ) {
             throw new Error("release dispatch source commit is not the exact default-branch head");
+          }
+          if (!/^[a-f0-9]{32}$/.test(payload.dispatch_nonce)) {
+            throw new Error("release dispatch nonce is invalid");
           }
           if (!/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(payload.version)) {
             throw new Error("release dispatch version is not canonical");

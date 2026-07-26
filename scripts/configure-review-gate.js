@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 
-const STATUS_CONTEXT = "CHZZK review completion";
+const MANAGED_GITHUB_ACTIONS_STATUS_CONTEXTS = [
+  "analyze",
+  "CHZZK review completion",
+  "dependency-review",
+  "firefox-e2e",
+  "verify",
+];
 const GH_COMMAND = process.env.CHZZK_GH_COMMAND || "gh";
 const GH_COMMAND_PREFIX = process.env.CHZZK_GH_COMMAND_PREFIX ? [process.env.CHZZK_GH_COMMAND_PREFIX] : [];
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -125,10 +131,14 @@ function sameChecks(left, right) {
   return right.every((check) => leftKeys.has(checkKey(check)));
 }
 
-function expectedChecks(statusProtection, gateAppId) {
+function expectedChecks(statusProtection, githubActionsAppId) {
+  const managedContexts = new Set(MANAGED_GITHUB_ACTIONS_STATUS_CONTEXTS);
   return [
-    ...normalizeChecks(statusProtection).filter((check) => check.context !== STATUS_CONTEXT),
-    { app_id: gateAppId, context: STATUS_CONTEXT },
+    ...normalizeChecks(statusProtection).filter((check) => !managedContexts.has(check.context)),
+    ...MANAGED_GITHUB_ACTIONS_STATUS_CONTEXTS.map((context) => ({
+      app_id: githubActionsAppId,
+      context,
+    })),
   ];
 }
 
@@ -239,7 +249,7 @@ function readManagedState(repository, statusEndpoint, adminsEndpoint, protection
   };
 }
 
-function planChanges(state, desiredVariables, gateAppId) {
+function planChanges(state, desiredVariables, githubActionsAppId) {
   const changes = [];
   const variables = new Map(state.variables.map((variable) => [variable.name, variable.value]));
   if (variables.size !== state.variables.length) throw new Error("Repository variables contain duplicates");
@@ -262,7 +272,7 @@ function planChanges(state, desiredVariables, gateAppId) {
   }
 
   const currentChecks = normalizeChecks(state.statusProtection);
-  const checks = expectedChecks(state.statusProtection, gateAppId);
+  const checks = expectedChecks(state.statusProtection, githubActionsAppId);
   if (state.statusProtection.strict !== true || !sameChecks(currentChecks, checks)) {
     changes.push({ action: "update", checks, kind: "status-checks", strict: true });
   }
@@ -355,20 +365,20 @@ try {
   ) {
     throw new Error("GitHub Actions App identity is missing or malformed");
   }
-  const gateAppId = githubActionsApp.id;
+  const githubActionsAppId = githubActionsApp.id;
   const desiredVariables = [
     ["AUTOMATED_REVIEW_LOGIN", automatedReviewLogin],
     ["RELEASE_OPERATOR_LOGIN", releaseOperatorLogin],
   ];
   let state = readManagedState(repository, statusEndpoint, adminsEndpoint, protectionEndpoint);
-  const plannedChanges = planChanges(state, desiredVariables, gateAppId);
+  const plannedChanges = planChanges(state, desiredVariables, githubActionsAppId);
 
   if (apply) {
     for (const change of plannedChanges) {
       applyChange(change, repository, statusEndpoint, adminsEndpoint, protectionEndpoint);
     }
     state = readManagedState(repository, statusEndpoint, adminsEndpoint, protectionEndpoint);
-    const remainingChanges = planChanges(state, desiredVariables, gateAppId);
+    const remainingChanges = planChanges(state, desiredVariables, githubActionsAppId);
     if (remainingChanges.length > 0) {
       throw new Error(`Review gate settings did not converge: ${JSON.stringify(remainingChanges)}`);
     }
@@ -380,11 +390,11 @@ try {
       automatedReviewLogin,
       branch,
       exact: apply || plannedChanges.length === 0,
-      gateAppId,
+      githubActionsAppId,
       plannedChanges,
       releaseOperatorLogin,
       repository,
-      statusContext: STATUS_CONTEXT,
+      statusContexts: MANAGED_GITHUB_ACTIONS_STATUS_CONTEXTS,
     }),
   );
 } catch (error) {
