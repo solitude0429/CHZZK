@@ -109,6 +109,8 @@ export function createPlaylistProbe({
 
   async function fetchPlaylistEvidence(url, { signal = null } = {}) {
     if (!isTrustedRequestDomain(url, policy)) return null;
+    const requestedNetworkUrl = networkRequestUrl(url);
+    if (!requestedNetworkUrl) return null;
     const controller = new AbortController();
     const abortFromParent = () => controller.abort();
     if (signal?.aborted) controller.abort();
@@ -123,8 +125,12 @@ export function createPlaylistProbe({
         signal: controller.signal,
       });
       if (!response.ok || hasRejectedPlaylistContentType(response)) return null;
-      const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
-      if (!isTrustedRequestDomain(finalUrl, policy) || finalUrl !== url) return null;
+      const responseUrl =
+        typeof response?.url === "string" && response.url ? response.url : requestedNetworkUrl;
+      const finalUrl = networkRequestUrl(responseUrl);
+      if (!finalUrl || !isTrustedRequestDomain(finalUrl, policy) || finalUrl !== requestedNetworkUrl) {
+        return null;
+      }
       const text = await readResponseTextWithLimit(response, probeMaxBytes);
       return isUsableHlsPlaylist(text) ? { finalUrl, text } : null;
     } catch {

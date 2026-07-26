@@ -47,8 +47,8 @@ describe("runtime playlist probe", () => {
     const probe = createPlaylistProbe({
       fetchImpl: async (url) => {
         requested.push(url);
-        if (url.includes("2160p")) return playlistResponse(url, "#EXTM3U\n");
-        if (url.includes("1440p")) return playlistResponse(url, mediaPlaylist());
+        if (url.includes("2160p")) return playlistResponse(networkRequestUrl(url), "#EXTM3U\n");
+        if (url.includes("1440p")) return playlistResponse(networkRequestUrl(url), mediaPlaylist());
         throw new Error(`unexpected candidate ${url}`);
       },
       policy,
@@ -70,6 +70,33 @@ describe("runtime playlist probe", () => {
       requested.some((url) => url.includes("1440p")),
       true,
     );
+    assert.equal(
+      requested.every((url) => url.endsWith("#tail")),
+      true,
+      "the probe input should retain the client fragment while Fetch response URLs omit it",
+    );
+  });
+
+  it("compares exact network URLs after removing only the client-side fragment", async () => {
+    const url = "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8?Policy=synthetic#tail";
+    const accepted = createPlaylistProbe({
+      fetchImpl: async () => playlistResponse(networkRequestUrl(url), mediaPlaylist()),
+      policy,
+    });
+    assert.deepEqual(await accepted.fetchPlaylistEvidence(url), {
+      finalUrl: "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8?Policy=synthetic",
+      text: mediaPlaylist(),
+    });
+
+    const changedQuery = createPlaylistProbe({
+      fetchImpl: async () =>
+        playlistResponse(
+          "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8?Policy=changed",
+          mediaPlaylist(),
+        ),
+      policy,
+    });
+    assert.equal(await changedQuery.fetchPlaylistEvidence(url), null);
   });
 
   it("ranks only trusted, quality-consistent master variants", async () => {

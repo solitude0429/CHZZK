@@ -32,7 +32,7 @@
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
       "Request URL, initiator, method, resource type, trusted request domain, and CHZZK context constrain redirects; explicit foreign metadata vetoes cache, and a same-site non-live CHZZK document may continue small-player playback only on the two dedicated CHZZK livecloud host suffixes. A URL-only live-to-list/search or later mini-player SPA transition re-keys a verified dedicated-host target, one whose response verifier actually attached and remains pending/valid, or the single unambiguous still-running dedicated-host candidate scan per playlist family under the new context token; unattached/failed verification, generic-CDN work, aborted work, and conflicting source contexts are discarded. Firefox's stale original live documentUrl cannot re-adopt the old context or authorize a generic CDN, including during URL-less reload validation. Full document loads, new live-page state, foreign navigation, and tab close invalidate the target and pending work. Origin-only CHZZK metadata also requires a dedicated host unless the tab was authoritatively prewarmed as live; metadata-free contextless compatibility is limited to those same suffixes rather than generic CDN path markers.",
       "Prewarm marks the CHZZK live tab only; it is a supporting signal, not the sole gate. Install/startup and content-message prewarming re-read the current tab under an unchanged per-tab transition token before migrating reusable verified contextless target/response state into an authoritatively confirmed live context, so delayed snapshots cannot erase a target established by an earlier playlist request or overwrite newer mini-player/navigation state. The runtime resolves the best actually available HLS variant from trusted playlist evidence instead of seeding a fixed startup quality.",
-      "Candidate probes reject redirects because Firefox does not expose manual redirect hops; bodies require an exact first meaningful EXTM3U line plus a usable master variant or media segment/part structure, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
+      "Candidate probes reject redirects because Firefox does not expose manual redirect hops; they compare the exact requested and final network URLs after stripping only a client-side fragment that Fetch does not send or retain in Response.url. Bodies require an exact first meaningful EXTM3U line plus a usable master variant or media segment/part structure, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; full document loads, new live contexts, foreign navigation, and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target, while bounded same-document mini-player transitions may re-key only eligible dedicated-host work under a fresh token.",
       "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports.",
       "Active targets, failed-target suppression, and in-flight resolutions are expiry-swept and LRU-bounded per tab and globally; failed-target entries retain only secret-free session identity and quality-expiry data.",
@@ -1134,6 +1134,8 @@
     }
     async function fetchPlaylistEvidence(url, { signal = null } = {}) {
       if (!isTrustedRequestDomain(url, policy)) return null;
+      const requestedNetworkUrl = networkRequestUrl(url);
+      if (!requestedNetworkUrl) return null;
       const controller = new AbortController();
       const abortFromParent = () => controller.abort();
       if (signal?.aborted) controller.abort();
@@ -1147,8 +1149,12 @@
           signal: controller.signal,
         });
         if (!response.ok || hasRejectedPlaylistContentType(response)) return null;
-        const finalUrl = typeof response?.url === "string" && response.url ? response.url : url;
-        if (!isTrustedRequestDomain(finalUrl, policy) || finalUrl !== url) return null;
+        const responseUrl =
+          typeof response?.url === "string" && response.url ? response.url : requestedNetworkUrl;
+        const finalUrl = networkRequestUrl(responseUrl);
+        if (!finalUrl || !isTrustedRequestDomain(finalUrl, policy) || finalUrl !== requestedNetworkUrl) {
+          return null;
+        }
         const text = await readResponseTextWithLimit(response, probeMaxBytes2);
         return isUsableHlsPlaylist(text) ? { finalUrl, text } : null;
       } catch {
