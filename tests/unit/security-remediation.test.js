@@ -71,6 +71,7 @@ describe("release and repository security guardrails", () => {
     const text = read(".github/workflows/sign-unlisted.yml");
     const bootstrap = read("scripts/admin-release-bootstrap.js");
     const finalizer = read("scripts/lib/release-finalize.js");
+    const updateRunbook = read("docs/UPDATES.md");
     assert.deepEqual(release.on, {
       repository_dispatch: { types: ["chzzk-release-preflight-v1"] },
     });
@@ -83,9 +84,13 @@ describe("release and repository security guardrails", () => {
     assert.match(bootstrap, /repos\/\$\{repository\}\/immutable-releases/);
     assert.match(bootstrap, /randomBytes\(16\)/);
     assert.match(bootstrap, /run\.display_title === expectedTitle/);
+    assert.match(bootstrap, /run\?\.workflow_id !== workflowId/);
+    assert.doesNotMatch(bootstrap, /run\.name === "Stage unlisted Firefox release"/);
     assert.match(finalizer, /immutableReleasesEnabled/);
     assert.match(finalizer, /"draft=false"/);
     assert.doesNotMatch(finalizer, /GITHUB_TOKEN/);
+    assert.match(updateRunbook, /CHZZK_OLD_SIGNED_XPI=/);
+    assert.doesNotMatch(updateRunbook, /CHZZK_PREVIOUS_SIGNED_XPI|CHZZK_UPDATE_BASE_URL/);
   });
 
   it("runs the final signed XPI in stock Firefox before attestation and staging", () => {

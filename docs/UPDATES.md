@@ -75,14 +75,13 @@ Deploy client는 local `package.json`이나 `manifest.json`에서 `updates.json`
 
 ```bash
 npm run setup:firefox-signed-smoke
-CHZZK_PREVIOUS_SIGNED_XPI="/absolute/path/to/previous-signed.xpi" \
+CHZZK_OLD_SIGNED_XPI="/absolute/path/to/previous-signed.xpi" \
 CHZZK_RELEASE_METADATA="/absolute/path/to/chzzk-<version>-release-metadata.json" \
 CHZZK_SIGNED_SMOKE_MODE=update \
 CHZZK_SIGNED_XPI="/absolute/path/to/chzzk-<version>-signed.xpi" \
-CHZZK_UPDATE_BASE_URL="https://<internal-update-host>" \
 FIREFOX_BINARY="$PWD/dist/signed-smoke-tools/firefox/firefox" \
 GECKODRIVER_BINARY="$PWD/dist/signed-smoke-tools/geckodriver" \
 npm run test:firefox-signed-smoke
 ```
 
-Signature/update trust preference를 낮추지 않으며 profile, cookies, identifiers, complete signed media URLs를 artifact나 log에 남기지 않습니다.
+Update mode는 이전 signed XPI에 이미 고정된 production `update_url`을 사용하므로 별도 base-URL override를 받지 않습니다. Signature/update trust preference를 낮추지 않으며 profile, cookies, identifiers, complete signed media URLs를 artifact나 log에 남기지 않습니다.

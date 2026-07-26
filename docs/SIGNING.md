@@ -27,7 +27,7 @@ Mozilla Add-ons Developer Hub의 API key 화면에서 받은 값은 다음 repos
 4. `$HOME/.local/libexec/chzzk-release-bootstrap.mjs` 같은 checkout 밖의 owner-only 경로에 mode `0500`으로 원자적으로 설치합니다.
 5. 임시 `GH_CONFIG_DIR`, cache, content record와 token 변수를 제거합니다.
 
-Bootstrap은 실행할 때 caller의 GitHub CLI config, proxy/CA/Node injection 변수, Git config/hook/fsmonitor, caller-controlled `PATH`를 신뢰하지 않습니다. Root-owned `gh`/`git`, 실행마다 생성한 mode `0700` private GitHub CLI home, system-only `PATH`만 자식 프로세스에 전달합니다. Checkout의 `.git/config`나 `/nonexistent` 권한은 바꾸지 않습니다.
+Bootstrap은 실행할 때 caller의 GitHub CLI config, proxy/CA/Node injection 변수, Git config/hook/fsmonitor, caller-controlled `PATH`를 신뢰하지 않습니다. Root-owned `gh`/`git`, 실행마다 생성한 mode `0700` private tool home, system-only `PATH`만 자식 프로세스에 전달합니다. Git과 GitHub CLI가 같은 readable private home을 사용하므로 service-account home이 없거나 접근 불가능해도 checkout의 `.git/config`나 `/nonexistent` 권한을 바꾸지 않습니다. Unit regression은 inaccessible caller home에서 실제 system Git의 stderr가 비어 있고 status가 성공하는지 확인합니다.
 
 ## 한 번의 릴리스 명령
 
@@ -53,7 +53,7 @@ Bootstrap은 실행할 때 caller의 GitHub CLI config, proxy/CA/Node injection 
 1. 인증 주체, configured operator, protected remote default head, clean local head/branch, canonical version을 확인합니다.
 2. Admin-only API에서 immutable releases가 `enabled: true`인지 확인합니다.
 3. 예측 불가능한 128-bit dispatch nonce와 preflight timestamp를 포함한 제한된 `repository_dispatch`를 보냅니다.
-4. Exact actor, source SHA, branch, workflow path/name, nonce-bound run title이 모두 일치하는 단 하나의 staging run을 bounded polling합니다. 대기 예산은 순차 job timeout 100분과 queue/environment approval 여유 80분을 합친 180분이며, 실패, 중복, malformed state, timeout은 finalization 전에 중단합니다.
+4. Active workflow metadata의 고정 ID/name/path를 먼저 결박한 뒤 exact actor, source SHA, branch, workflow ID/path, nonce-bound run title이 모두 일치하는 단 하나의 staging run을 bounded polling합니다. 개별 run의 `name`은 GitHub가 동적 `run-name`으로 반환할 수 있으므로 신뢰 경계에 사용하지 않습니다. 대기 예산은 순차 job timeout 100분과 queue/environment 여유 80분을 합친 180분이며, 실패, 중복, malformed state, timeout은 finalization 전에 중단합니다.
 5. 성공 뒤 remote head와 clean checkout을 처음부터 다시 확인하고, protected head에서 finalizer entrypoint를 API로 가져와 Git blob identity를 검증한 memory-only module로 실행합니다.
 6. Finalizer는 모든 exact-source staging run이 완료됐고 최신 attempt가 성공했는지, 세 draft snapshot과 asset bytes/uploader/content type, deterministic local artifacts, build attestations가 모두 일치하는지 확인합니다.
 7. 공개 직전에 admin-only API에서 immutable 설정을 다시 확인하고, 검증한 exact release ID만 `draft=false`로 전환한 뒤 exact immutable post-state를 요구합니다.
