@@ -86,6 +86,8 @@ npm run test:firefox-signed-smoke
 
 Update mode deliberately uses the older XPI's canonical production `update_url`; run it only after the versioned final XPI and `updates.json` are deployed. The test clicks both the per-extension `[action="update-check"]`/`[action="install-update"]` controls and the global `[action="check-for-updates"]` control in stock Firefox rather than calling `AddonManager.findUpdates` directly. Missing binaries, metadata, or required signed artifacts are hard failures, never skips. Fake or cryptographically tampered metadata that can satisfy the structural ZIP bounds is rejected by Firefox installation/signed-state enforcement rather than by home-grown cryptography.
 
+The Linux authenticity gate does not replace the client-network boundary. Release readiness also requires an operator-automated disposable profile on the actual current Windows client using its installed Firefox ESR, normal DNS, and production TLS path. Drive the same visible, interactability-enforcing `about:addons` controls from an older Mozilla-signed XPI to the intended version, then require a second visible `none-found` result. Keep results enum-only and leave the user's running profile untouched.
+
 ## Manual Firefox smoke test
 
 Use a temporary profile instead of the user's main profile:

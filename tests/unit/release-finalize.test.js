@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
+import { createTrustedEnvironments } from "../../scripts/admin-release-bootstrap.js";
 import { finalizeStagedReleaseFromAdminPreflight } from "../../scripts/lib/release-finalize.js";
 import {
   RELEASE_ADD_ON_ID,
@@ -23,6 +24,7 @@ const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 const repository = "solitude0429/CHZZK";
 const sourceSha = "a".repeat(40);
+const stagingWorkflowId = 304465962;
 const version = RELEASE_VERSION;
 
 function makeSourceTree() {
@@ -615,6 +617,57 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
     }
   });
 
+  it("uses a private readable Git home when the caller home is inaccessible", () => {
+    const checkout = mkdtempSync(join(tmpdir(), "chzzk-bootstrap-git-home-checkout-"));
+    const inaccessibleHome = mkdtempSync(join(tmpdir(), "chzzk-bootstrap-inaccessible-home-"));
+    const trustedHome = mkdtempSync(join(tmpdir(), "chzzk-bootstrap-trusted-home-"));
+    const originalHome = process.env.HOME;
+    try {
+      mkdirSync(join(trustedHome, "cache"), { mode: 0o700 });
+      mkdirSync(join(trustedHome, "config"), { mode: 0o700 });
+      chmodSync(inaccessibleHome, 0o000);
+      process.env.HOME = inaccessibleHome;
+      const environments = createTrustedEnvironments("synthetic-release-token", trustedHome);
+      assert.equal(environments.git.HOME, trustedHome);
+      assert.equal(environments.git.XDG_CONFIG_HOME, join(trustedHome, "config"));
+      assert.equal(environments.git.GH_TOKEN, undefined);
+      assert.equal(environments.gh.HOME, trustedHome);
+      assert.equal(environments.gh.GH_CONFIG_DIR, join(trustedHome, "config"));
+
+      const initialized = spawnSync("/usr/bin/git", ["init", "-q", "-b", "main"], {
+        cwd: checkout,
+        encoding: "utf8",
+      });
+      assert.equal(initialized.status, 0, initialized.stderr);
+      const status = spawnSync(
+        "/usr/bin/git",
+        [
+          "--no-optional-locks",
+          "-c",
+          "core.fsmonitor=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "status",
+          "--porcelain",
+        ],
+        {
+          cwd: checkout,
+          encoding: "utf8",
+          env: environments.git,
+        },
+      );
+      assert.equal(status.status, 0, status.stderr);
+      assert.equal(status.stderr, "");
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      chmodSync(inaccessibleHome, 0o700);
+      rmSync(checkout, { force: true, recursive: true });
+      rmSync(inaccessibleHome, { force: true, recursive: true });
+      rmSync(trustedHome, { force: true, recursive: true });
+    }
+  });
+
   it("dispatches staging directly from the installed protected bootstrap without repository JavaScript", async () => {
     const checkout = mkdtempSync(join(tmpdir(), "chzzk-bootstrap-dispatch-"));
     const localMarker = join(checkout, "local-dispatch-executed");
@@ -640,6 +693,14 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       }
       if (endpoint === `repos/${repository}/immutable-releases`) {
         return `${JSON.stringify({ enabled: true })}\n`;
+      }
+      if (endpoint === `repos/${repository}/actions/workflows/sign-unlisted.yml`) {
+        return `${JSON.stringify({
+          id: stagingWorkflowId,
+          name: "Stage unlisted Firefox release",
+          path: ".github/workflows/sign-unlisted.yml",
+          state: "active",
+        })}\n`;
       }
       if (endpoint === `repos/${repository}/dispatches` && args.includes("POST")) return "";
       throw new Error(`unexpected bootstrap endpoint: ${endpoint}`);
@@ -724,6 +785,14 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       if (endpoint === `repos/${repository}/immutable-releases`) {
         return `${JSON.stringify({ enabled: true })}\n`;
       }
+      if (endpoint === `repos/${repository}/actions/workflows/sign-unlisted.yml`) {
+        return `${JSON.stringify({
+          id: stagingWorkflowId,
+          name: "Stage unlisted Firefox release",
+          path: ".github/workflows/sign-unlisted.yml",
+          state: "active",
+        })}\n`;
+      }
       if (endpoint === `repos/${repository}/dispatches` && args.includes("POST")) return "";
       if (
         endpoint ===
@@ -742,11 +811,12 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
                 head_branch: "main",
                 head_sha: sourceSha,
                 id: 9001,
-                name: "Stage unlisted Firefox release",
+                name: `Release staging ${dispatchNonce}`,
                 path: ".github/workflows/sign-unlisted.yml",
                 run_attempt: 1,
                 run_number: 42,
                 status: workflowLookups === 1 ? "in_progress" : "completed",
+                workflow_id: stagingWorkflowId,
               },
             ],
           },
@@ -790,6 +860,34 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       assert.deepEqual(waits, [5_000]);
       assert.equal(workflowLookups, 2);
       assert.equal(readFileSync(remoteMarker, "utf8"), sourceSha);
+      const mismatchedWorkflowRunCommand = (command, args, options = {}) => {
+        const response = runCommand(command, args, options);
+        if (
+          command === "gh" &&
+          args.some((argument) => argument.includes("/actions/workflows/sign-unlisted.yml/runs"))
+        ) {
+          const pages = JSON.parse(response);
+          for (const page of pages) {
+            for (const run of page.workflow_runs) run.workflow_id = stagingWorkflowId + 1;
+          }
+          return `${JSON.stringify(pages)}\n`;
+        }
+        return response;
+      };
+      await assert.rejects(
+        outsideGitHubActions(() =>
+          runProtectedReleaseEntrypoint({
+            checkout,
+            createDispatchNonce: () => dispatchNonce,
+            now: () => new Date("2026-07-16T22:00:00.000Z"),
+            operation: "release",
+            repository,
+            runCommand: mismatchedWorkflowRunCommand,
+            wait: async () => {},
+          }),
+        ),
+        /mismatched workflow identity/i,
+      );
       const dispatchIndex = calls.findIndex(({ args }) => args.includes(`repos/${repository}/dispatches`));
       const workflowIndex = calls.findIndex(({ args }) =>
         args.some((argument) => argument.includes("/actions/workflows/sign-unlisted.yml/runs")),
@@ -1276,6 +1374,7 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
     const scriptRepository = mkdtempSync(join(dirname(repoRoot), "chzzk-finalizer-child-env-"));
     const trustedBin = mkdtempSync(join(dirname(repoRoot), "chzzk-finalizer-child-bin-"));
     const attackerHome = mkdtempSync(join(dirname(repoRoot), "chzzk-finalizer-attacker-home-"));
+    const trustedHome = mkdtempSync(join(dirname(repoRoot), "chzzk-finalizer-trusted-home-"));
     const gitEnvironmentLog = join(trustedBin, "git.env");
     const ghEnvironmentLog = join(trustedBin, "gh.env");
     const fakeGit = join(trustedBin, "git");
@@ -1335,11 +1434,14 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       chmodSync(fakeGh, 0o755);
       mkdirSync(join(attackerHome, ".config/gh"), { recursive: true });
       writeFileSync(join(attackerHome, ".config/gh/config.yml"), "http_unix_socket: /tmp/evil.sock\n");
+      mkdirSync(join(trustedHome, "cache"), { mode: 0o700 });
+      mkdirSync(join(trustedHome, "config"), { mode: 0o700 });
 
       const env = {
         ...process.env,
         CHZZK_GITHUB_REPOSITORY: repository,
         CHZZK_RELEASE_TRUSTED_GH: fakeGh,
+        CHZZK_RELEASE_TRUSTED_GH_HOME: trustedHome,
         CHZZK_RELEASE_TRUSTED_GIT: fakeGit,
         GH_TOKEN: "synthetic-release-admin-token",
         HOME: attackerHome,
@@ -1357,27 +1459,22 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       const gitEnvironment = parseEnvironment(gitEnvironmentLog);
       const ghEnvironment = parseEnvironment(ghEnvironmentLog);
       for (const name of ambientNames) {
+        if (name === "XDG_CONFIG_HOME") continue;
         assert.equal(gitEnvironment[name], undefined, `${name} leaked into git`);
         assert.equal(ghEnvironment[name], undefined, `${name} leaked into gh`);
       }
       assert.equal(gitEnvironment.GH_TOKEN, undefined, "git must not receive the GitHub release token");
+      assert.equal(gitEnvironment.HOME, trustedHome, "git must use the bootstrap-owned home");
+      assert.equal(gitEnvironment.XDG_CONFIG_HOME, join(trustedHome, "config"));
       assert.equal(ghEnvironment.GH_TOKEN, "synthetic-release-admin-token");
-      assert.notEqual(gitEnvironment.HOME, attackerHome, "git must not inherit the caller HOME");
-      assert.notEqual(ghEnvironment.HOME, attackerHome, "gh must not inherit the caller HOME");
-      assert.equal(
-        ghEnvironment.GH_CONFIG_DIR?.startsWith(attackerHome),
-        false,
-        "gh must use an operator-bootstrap-owned config directory",
-      );
-      assert.equal(
-        ghEnvironment.XDG_CACHE_HOME?.startsWith(attackerHome),
-        false,
-        "gh must use an operator-bootstrap-owned cache directory",
-      );
+      assert.equal(ghEnvironment.HOME, trustedHome, "gh must use the bootstrap-owned home");
+      assert.equal(ghEnvironment.GH_CONFIG_DIR, join(trustedHome, "config"));
+      assert.equal(ghEnvironment.XDG_CACHE_HOME, join(trustedHome, "cache"));
     } finally {
       rmSync(attackerHome, { force: true, recursive: true });
       rmSync(scriptRepository, { force: true, recursive: true });
       rmSync(trustedBin, { force: true, recursive: true });
+      rmSync(trustedHome, { force: true, recursive: true });
     }
   });
 

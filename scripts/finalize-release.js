@@ -126,7 +126,8 @@ function createTrustedChildEnvironments() {
     GIT_OPTIONAL_LOCKS: "0",
     GIT_PAGER: "cat",
     GIT_TERMINAL_PROMPT: "0",
-    HOME: "/nonexistent",
+    HOME: TRUSTED_GH_HOME,
+    XDG_CONFIG_HOME: join(TRUSTED_GH_HOME, "config"),
   });
   const token = process.env.GH_TOKEN;
   const gh = Object.freeze({

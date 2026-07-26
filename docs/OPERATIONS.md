@@ -39,7 +39,7 @@ npm run deploy:updates:internal
 
 12. Verify live `updates.json` and XPI MIME type, SHA-256, version, add-on ID, minimum Firefox version, source commit, and stable symlink targets.
 13. Run the old-signed-to-new-signed stock-Firefox update smoke from `docs/TESTING.md`.
-14. Ask the user to trigger Firefox AddonManager update checking. Do not stop Firefox or overwrite an installed profile XPI.
+14. From the actual current Windows client, automate the same visible `about:addons` controls through its installed Firefox ESR, normal DNS, and production TLS path. Require both the installed state and a second `none-found` result. Do not ask the user to perform this gate, stop their Firefox, or overwrite an installed profile XPI.
 
 ## Repository settings
 

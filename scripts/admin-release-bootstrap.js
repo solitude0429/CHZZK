@@ -8,6 +8,8 @@ import { pathToFileURL } from "node:url";
 const BOOTSTRAP_ENTRYPOINT_PATH = "scripts/finalize-release.js";
 const RELEASE_DISPATCH_EVENT_TYPE = "chzzk-release-preflight-v1";
 const RELEASE_OPERATIONS = new Set(["dispatch", "finalize", "release"]);
+const STAGING_WORKFLOW_NAME = "Stage unlisted Firefox release";
+const STAGING_WORKFLOW_PATH = ".github/workflows/sign-unlisted.yml";
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/;
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -182,7 +184,7 @@ function createTrustedGhHome() {
   }
 }
 
-function createTrustedEnvironments(token, ghHome) {
+export function createTrustedEnvironments(token, ghHome) {
   if (typeof token !== "string" || !token.trim()) {
     throw new Error("Administrator release bootstrap requires an explicit narrow GH_TOKEN");
   }
@@ -199,7 +201,8 @@ function createTrustedEnvironments(token, ghHome) {
     GIT_OPTIONAL_LOCKS: "0",
     GIT_PAGER: "cat",
     GIT_TERMINAL_PROMPT: "0",
-    HOME: "/nonexistent",
+    HOME: privateGhHome,
+    XDG_CONFIG_HOME: join(privateGhHome, "config"),
   });
   const gh = Object.freeze({
     ...git,
@@ -331,6 +334,25 @@ function stagingRuns(response) {
   return pages.flatMap((page) => page.workflow_runs);
 }
 
+function stagingWorkflowIdentity({ checkoutRoot, repository, runCommand }) {
+  const workflow = parseJson(
+    runCommand("gh", apiArgs(`repos/${repository}/actions/workflows/sign-unlisted.yml`), {
+      cwd: checkoutRoot,
+    }),
+    "Release staging workflow identity lookup",
+  );
+  if (
+    !Number.isSafeInteger(workflow?.id) ||
+    workflow.id <= 0 ||
+    workflow.name !== STAGING_WORKFLOW_NAME ||
+    workflow.path !== STAGING_WORKFLOW_PATH ||
+    workflow.state !== "active"
+  ) {
+    throw new Error("Release staging workflow identity is missing, inactive, or mismatched");
+  }
+  return workflow.id;
+}
+
 async function waitForDispatchedStagingWorkflow({
   checkoutRoot,
   defaultBranch,
@@ -339,6 +361,7 @@ async function waitForDispatchedStagingWorkflow({
   repository,
   runCommand,
   sourceSha,
+  workflowId,
   wait,
 }) {
   const expectedTitle = `Release staging ${dispatchNonce}`;
@@ -346,19 +369,22 @@ async function waitForDispatchedStagingWorkflow({
     `repos/${repository}/actions/workflows/sign-unlisted.yml/runs` +
     `?event=repository_dispatch&head_sha=${sourceSha}&per_page=100`;
   for (let attempt = 1; attempt <= MAX_STAGING_WAIT_ATTEMPTS; attempt += 1) {
-    const matches = stagingRuns(
+    const runs = stagingRuns(
       runCommand("gh", paginatedApiArgs(endpoint), {
         cwd: checkoutRoot,
       }),
-    ).filter(
+    );
+    if (runs.some((run) => run?.workflow_id !== workflowId || run.path !== STAGING_WORKFLOW_PATH)) {
+      throw new Error("Release staging workflow lookup returned a mismatched workflow identity");
+    }
+    const matches = runs.filter(
       (run) =>
         run?.actor?.login === operatorLogin &&
         run.display_title === expectedTitle &&
         run.event === "repository_dispatch" &&
         run.head_branch === defaultBranch &&
         String(run.head_sha ?? "").toLowerCase() === sourceSha &&
-        run.name === "Stage unlisted Firefox release" &&
-        run.path === ".github/workflows/sign-unlisted.yml",
+        run.path === STAGING_WORKFLOW_PATH,
     );
     if (matches.length > 1) {
       throw new Error("Release staging dispatch resolved to duplicate workflow runs");
@@ -474,6 +500,11 @@ export async function runProtectedReleaseEntrypoint({
   }
 
   if (operation === "dispatch" || operation === "release") {
+    const workflowId = stagingWorkflowIdentity({
+      checkoutRoot,
+      repository,
+      runCommand,
+    });
     const dispatched = dispatchStagingWorkflow({
       checkoutRoot,
       createDispatchNonce,
@@ -493,6 +524,7 @@ export async function runProtectedReleaseEntrypoint({
       repository,
       runCommand,
       sourceSha,
+      workflowId,
       wait,
     });
     return runProtectedReleaseEntrypoint({
