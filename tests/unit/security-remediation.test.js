@@ -477,9 +477,10 @@ describe("release and repository security guardrails", () => {
     );
     const gateLibrary = read("scripts/lib/review-gate.js");
     assert.match(gateLibrary, /pullRequest\?\.updated_at/);
-    assert.doesNotMatch(gateLibrary, /performed_via_github_app/);
+    assert.match(gateLibrary, /performed_via_github_app/);
+    assert.match(gateLibrary, /Didn't find any major issues/);
+    assert.match(gateLibrary, /cleanReview\.id !== maximumCommentId/);
     assert.doesNotMatch(gateLibrary, /resolved_commit_sha/);
-    assert.doesNotMatch(gateLibrary, /Didn't find any major issues/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
     assert.match(settings, /required_conversation_resolution/);

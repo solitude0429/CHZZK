@@ -139,6 +139,13 @@ function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLog
         created_at: comment.created_at,
         id: comment.id,
         updated_at: comment.updated_at,
+        performed_via_github_app:
+          comment.performed_via_github_app === null
+            ? null
+            : {
+                id: comment.performed_via_github_app?.id,
+                slug: comment.performed_via_github_app?.slug,
+              },
         user: {
           id: comment.user?.id,
           login: comment.user?.login,
@@ -307,6 +314,7 @@ async function main() {
       const forceReview = process.env.CHZZK_FORCE_REVIEW === "true";
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
       let evidence = {
+        commentSnapshot: undefined,
         reviewRequestComments: undefined,
         reviews: [],
         reviewThreads: [],
@@ -353,6 +361,7 @@ async function main() {
         forceReview,
         labels,
         pullRequest,
+        pullRequestComments: evidence.commentSnapshot,
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
         reviews: evidence.reviews,
         reviewRequestComments: evidence.reviewRequestComments,

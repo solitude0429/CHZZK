@@ -4,6 +4,8 @@ const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
+const CLEAN_REVIEW_COMMENT_RE =
+  /^Codex Review: Didn't find any major issues\.[^\r\n]*\r?\n\r?\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`(?:\r?\n|$)/;
 const PACKAGED_RUNTIME_PATHS = new Set([
   "LICENSE",
   "NOTICE",
@@ -171,6 +173,74 @@ function pullRequestActivityTimestamp(pullRequest) {
   return timestampMilliseconds(pullRequest?.updated_at, "Pull request activity timestamp");
 }
 
+function hasTrustedExactHeadCleanReview({
+  automatedReviewLogin,
+  headSha,
+  pullRequest,
+  pullRequestComments,
+  releaseOperatorLogin,
+  reviewEvidence,
+  reviewRequestComments,
+}) {
+  const reviewerLogin = normalizeLogin(automatedReviewLogin, "Automated reviewer login");
+  const operatorLogin = normalizeLogin(releaseOperatorLogin, "Release operator login");
+  if (!reviewerLogin.endsWith("[bot]")) return false;
+  if (!Array.isArray(pullRequestComments)) {
+    throw new Error("Pull request comment response is missing");
+  }
+  if (!Array.isArray(reviewRequestComments)) {
+    throw new Error("Operator review-request comment response is missing");
+  }
+
+  let latestRequestTimestamp = 0;
+  for (const comment of reviewRequestComments) {
+    const authorLogin = normalizeLogin(comment?.user?.login, "Review-request comment author identity");
+    if (authorLogin !== operatorLogin || !fullShaAppearsInComment(comment.body, headSha)) continue;
+    const createdAt = timestampMilliseconds(comment.created_at, "Review-request comment creation timestamp");
+    const updatedAt = timestampMilliseconds(comment.updated_at, "Review-request comment update timestamp");
+    if (updatedAt < createdAt) throw new Error("Review-request comment timestamps are malformed");
+    latestRequestTimestamp = Math.max(latestRequestTimestamp, updatedAt);
+  }
+  if (latestRequestTimestamp === 0) return false;
+
+  let maximumCommentId = 0;
+  let cleanReview = null;
+  for (const comment of pullRequestComments) {
+    if (!Number.isSafeInteger(comment?.id) || comment.id < 1) {
+      throw new Error("Pull request comment identity is missing or malformed");
+    }
+    maximumCommentId = Math.max(maximumCommentId, comment.id);
+    if (String(comment?.user?.login ?? "").toLowerCase() !== reviewerLogin) continue;
+    normalizeLogin(comment.user.login, "Clean-review comment author identity");
+    const match = CLEAN_REVIEW_COMMENT_RE.exec(String(comment.body ?? ""));
+    if (!match) continue;
+    if (comment.user?.type !== "Bot" || !Number.isSafeInteger(comment.user?.id) || comment.user.id < 1) {
+      throw new Error("Clean-review comment actor metadata is missing or malformed");
+    }
+    const expectedAppSlug = reviewerLogin.slice(0, -"[bot]".length);
+    const app = comment.performed_via_github_app;
+    if (!Number.isSafeInteger(app?.id) || app.id < 1 || app.slug !== expectedAppSlug) {
+      throw new Error("Clean-review comment GitHub App identity is missing or mismatched");
+    }
+    const createdAt = timestampMilliseconds(comment.created_at, "Clean-review comment creation timestamp");
+    const updatedAt = timestampMilliseconds(comment.updated_at, "Clean-review comment update timestamp");
+    if (createdAt !== updatedAt) throw new Error("Clean-review comment was edited");
+    if (!headSha.startsWith(match[1])) continue;
+    if (
+      cleanReview === null ||
+      createdAt > cleanReview.createdAt ||
+      (createdAt === cleanReview.createdAt && comment.id > cleanReview.id)
+    ) {
+      cleanReview = { createdAt, id: comment.id };
+    }
+  }
+  if (cleanReview === null || cleanReview.id !== maximumCommentId) return false;
+
+  if (reviewEvidence !== null && cleanReview.createdAt <= reviewEvidence.submittedAt) return false;
+  const requiredAfter = Math.max(latestRequestTimestamp, pullRequestActivityTimestamp(pullRequest));
+  return cleanReview.createdAt >= requiredAfter && cleanReview.createdAt > latestRequestTimestamp;
+}
+
 function fullShaAppearsInComment(body, headSha) {
   if (typeof body !== "string") return false;
   const lowerBody = body.toLowerCase();
@@ -237,6 +307,7 @@ export function evaluateReviewCompletion({
   forceReview = false,
   labels,
   pullRequest,
+  pullRequestComments,
   releaseOperatorLogin,
   reviews,
   reviewRequestComments,
@@ -267,6 +338,25 @@ export function evaluateReviewCompletion({
     };
   }
 
+  if (
+    hasTrustedExactHeadCleanReview({
+      automatedReviewLogin,
+      headSha,
+      pullRequest,
+      pullRequestComments,
+      releaseOperatorLogin,
+      reviewEvidence,
+      reviewRequestComments,
+    })
+  ) {
+    return {
+      description: "Trusted reviewer reported no major issues for the exact PR head; no unresolved threads",
+      headSha,
+      required: true,
+      state: "success",
+    };
+  }
+
   const evidenceTimestamp = Math.max(
     pullRequestActivityTimestamp(pullRequest),
     reviewEvidence?.submittedAt ?? 0,
@@ -287,5 +377,7 @@ export function evaluateReviewCompletion({
       state: "success",
     };
   }
-  pending("Automated reviewer has no exact-head approval or exact-head operator-request +1 reaction");
+  pending(
+    "Automated reviewer has no exact-head approval, trusted clean-review comment, or exact-head operator-request +1 reaction",
+  );
 }

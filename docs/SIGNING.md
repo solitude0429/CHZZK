@@ -86,7 +86,7 @@ Release에는 정확히 다음 세 파일만 존재합니다.
 
 ## PR 검토 게이트
 
-Release/security 경로는 exact-head 자동 검토와 unresolved thread 0개를 요구합니다. 검토 event는 즉시 다시 평가됩니다. GitHub에는 reaction 전용 Actions event가 없으므로 operator comment의 exact-head `+1`을 사용했다면 한 번 수동 재평가합니다.
+Release/security 경로는 exact-head 자동 검토와 unresolved thread 0개를 요구합니다. 검토 event는 즉시 다시 평가됩니다. 게이트는 exact-head `APPROVED` review 또는 full-SHA operator request 뒤에 trusted GitHub App이 남긴 최신 unedited clean-review comment를 인식합니다. Comment-bound `+1` fallback만 발생했다면 GitHub에는 reaction 전용 Actions event가 없으므로 한 번 수동 재평가합니다.
 
 ```bash
 gh workflow run review-gate.yml \

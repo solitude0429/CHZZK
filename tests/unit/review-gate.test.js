@@ -39,7 +39,21 @@ function reviewRequest(overrides = {}) {
     id: 100,
     reactions: [plusOne()],
     updated_at: "2026-07-15T10:00:30Z",
-    user: { login: operatorLogin },
+    user: { id: 2, login: operatorLogin, type: "User" },
+    ...overrides,
+  };
+}
+
+function cleanReviewComment(overrides = {}) {
+  return {
+    body:
+      "Codex Review: Didn't find any major issues. Nice work!\n\n" +
+      `**Reviewed commit:** \`${headSha.slice(0, 10)}\`\n`,
+    created_at: "2026-07-15T10:02:00Z",
+    id: 200,
+    performed_via_github_app: { id: 3, slug: "chatgpt-codex-connector" },
+    updated_at: "2026-07-15T10:02:00Z",
+    user: { id: 1, login: reviewerLogin, type: "Bot" },
     ...overrides,
   };
 }
@@ -58,6 +72,7 @@ function sensitiveEvaluation(overrides = {}) {
       state: "open",
       updated_at: headTimestamp,
     },
+    pullRequestComments: [],
     releaseOperatorLogin: operatorLogin,
     reviews: [exactReview()],
     reviewRequestComments: [],
@@ -266,24 +281,111 @@ describe("exact-head release and security review completion", () => {
     );
   });
 
-  it("does not treat an issue-level clean-review comment as completion evidence", () => {
-    assert.throws(
-      () =>
-        evaluateReviewCompletion(
-          sensitiveEvaluation({
-            cleanReviewComments: [
-              {
-                body:
-                  "Codex Review: Didn't find any major issues.\n\n" +
-                  `**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
-                user: { login: reviewerLogin, type: "Bot" },
-              },
-            ],
-            reviews: [],
-          }),
-        ),
-      /no exact-head approval|exact-head operator request/i,
+  it("accepts only an unedited latest clean-review comment bound to the exact-head operator request", () => {
+    const request = reviewRequest({ reactions: [] });
+    assert.deepEqual(
+      evaluateReviewCompletion(
+        sensitiveEvaluation({
+          pullRequest: {
+            draft: false,
+            head: { sha: headSha },
+            number: 42,
+            state: "open",
+            updated_at: "2026-07-15T10:02:00Z",
+          },
+          pullRequestComments: [request, cleanReviewComment()],
+          reviewRequestComments: [request],
+          reviews: [],
+        }),
+      ),
+      {
+        description: "Trusted reviewer reported no major issues for the exact PR head; no unresolved threads",
+        headSha,
+        required: true,
+        state: "success",
+      },
     );
+
+    const rejected = [
+      {
+        pullRequestComments: [
+          request,
+          cleanReviewComment({
+            body:
+              "Codex Review: Didn't find any major issues.\n\n" +
+              `**Reviewed commit:** \`${staleSha.slice(0, 10)}\`\n`,
+          }),
+        ],
+      },
+      {
+        pullRequestComments: [
+          request,
+          cleanReviewComment({
+            body:
+              "Untrusted preamble\n\nCodex Review: Didn't find any major issues.\n\n" +
+              `**Reviewed commit:** \`${headSha.slice(0, 10)}\`\n`,
+          }),
+        ],
+      },
+      {
+        pullRequestComments: [
+          request,
+          cleanReviewComment({ performed_via_github_app: { id: 3, slug: "different-app" } }),
+        ],
+      },
+      {
+        pullRequestComments: [
+          request,
+          cleanReviewComment({ user: { id: 1, login: reviewerLogin, type: "User" } }),
+        ],
+      },
+      {
+        pullRequestComments: [request, cleanReviewComment({ updated_at: "2026-07-15T10:02:01Z" })],
+      },
+      {
+        pullRequestComments: [
+          request,
+          cleanReviewComment(),
+          {
+            body: "later activity",
+            created_at: "2026-07-15T10:03:00Z",
+            id: 201,
+            performed_via_github_app: null,
+            updated_at: "2026-07-15T10:03:00Z",
+            user: { id: 4, login: "later-writer", type: "User" },
+          },
+        ],
+      },
+      {
+        pullRequestComments: [cleanReviewComment()],
+        reviewRequestComments: [],
+      },
+      {
+        pullRequestComments: [request, cleanReviewComment()],
+        reviews: [exactReview({ state: "COMMENTED", submitted_at: "2026-07-15T10:02:00Z" })],
+      },
+    ];
+    for (const overrides of rejected) {
+      assert.throws(
+        () =>
+          evaluateReviewCompletion(
+            sensitiveEvaluation({
+              pullRequest: {
+                draft: false,
+                head: { sha: headSha },
+                number: 42,
+                state: "open",
+                updated_at: "2026-07-15T10:02:00Z",
+              },
+              pullRequestComments: [request, cleanReviewComment()],
+              reviewRequestComments: [request],
+              reviews: [],
+              ...overrides,
+            }),
+          ),
+        /no exact-head|clean-review|missing|mismatch|edited|actor metadata/i,
+      );
+    }
   });
 
   it("requires a clean reaction to postdate an exact-head findings review", () => {
@@ -391,6 +493,7 @@ describe("exact-head release and security review completion", () => {
           automatedReviewLogin: "",
           files: ["notes/ordinary.txt"],
           issueReactions: null,
+          pullRequestComments: null,
           releaseOperatorLogin: "",
           reviews: null,
           reviewRequestComments: null,
