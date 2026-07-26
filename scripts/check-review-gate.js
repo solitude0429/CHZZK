@@ -6,6 +6,7 @@ import {
   changedFilePaths,
   evaluateReviewCompletion,
   hasExactHeadReviewerApproval,
+  isExactHeadReviewRequest,
   isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "./lib/review-gate.js";
@@ -96,16 +97,6 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
   throw new Error("Review-thread query exceeded the pagination limit");
 }
 
-function containsFullSha(body, headSha) {
-  if (typeof body !== "string") return false;
-  const lowerBody = body.toLowerCase();
-  const index = lowerBody.indexOf(headSha);
-  if (index < 0) return false;
-  return (
-    !/[a-f0-9]/.test(lowerBody[index - 1] ?? "") && !/[a-f0-9]/.test(lowerBody[index + headSha.length] ?? "")
-  );
-}
-
 function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLogin) {
   const comments = paginatedArrays(
     `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
@@ -121,7 +112,7 @@ function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLog
     .filter(
       (comment) =>
         String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
-        containsFullSha(comment?.body, headSha),
+        isExactHeadReviewRequest(comment?.body, headSha),
     )
     .map((comment) => {
       return {

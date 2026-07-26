@@ -16,7 +16,7 @@ npm run test:firefox-functional-e2e
 ```
 
 4. Open a PR. The protected branch requires GitHub-Actions-bound `verify`, `firefox-e2e`, `dependency-review`, `analyze` (CodeQL), and `CHZZK review completion` checks plus zero unresolved review threads.
-5. Release/security changes additionally require exact-head reviewer evidence. Exact-head approvals and trusted GitHub App clean-review comments re-evaluate immediately; after a comment-bound reaction-only approval, manually dispatch `review-gate.yml` once for that PR. There is no periodic reconciliation.
+5. Release/security changes additionally require exact-head reviewer evidence. Exact-head approvals and whole-template trusted GitHub App clean-review comments following an unedited full-SHA operator `@codex review` command re-evaluate immediately; after a comment-bound reaction-only approval, manually dispatch `review-gate.yml` once for that PR. There is no periodic reconciliation.
 6. Merge through protected `main`.
 7. Refresh the external operator bootstrap from the protected exact `main` blob as described in `docs/SIGNING.md`.
 8. From the clean exact-`main` checkout, run the fully sanitized, bounded `release` command in `docs/SIGNING.md` once. Do not replace it with a checkout script, npm command, or ambient `gh workflow run`.

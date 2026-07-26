@@ -4,8 +4,38 @@ const GITHUB_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const DECISIVE_REVIEW_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]);
 const KNOWN_REVIEW_STATES = new Set([...DECISIVE_REVIEW_STATES, "DISMISSED", "PENDING"]);
 const EXPLICIT_REVIEW_LABELS = new Set(["release-review-required", "security-review-required"]);
+const CLEAN_REVIEW_TAGLINES = new Set([
+  "",
+  ":+1:",
+  ":tada:",
+  "Already looking forward to the next diff.",
+  "Bravo.",
+  "Breezy!",
+  "Chef's kiss.",
+  "Hooray!",
+  "More of your lovely PRs please.",
+  "Nice work!",
+  "Swish!",
+  "You're on a roll.",
+]);
+const CLEAN_REVIEW_FOOTER = `<details> <summary>ℹ️ About Codex in GitHub</summary>
+<br/>
+
+[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you
+- Open a pull request for review
+- Mark a draft as ready
+- Comment "@codex review".
+
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+
+
+
+
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+
+</details>`;
 const CLEAN_REVIEW_COMMENT_RE =
-  /^Codex Review: Didn't find any major issues\.[^\r\n]*\r?\n\r?\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`(?:\r?\n|$)/;
+  /^Codex Review: Didn't find any major issues\.(?: ([^\n]+))?\n\n\*\*Reviewed commit:\*\* `([a-f0-9]{10,40})`(?:\n\n([\s\S]+))?$/;
 const PACKAGED_RUNTIME_PATHS = new Set([
   "LICENSE",
   "NOTICE",
@@ -173,6 +203,29 @@ function pullRequestActivityTimestamp(pullRequest) {
   return timestampMilliseconds(pullRequest?.updated_at, "Pull request activity timestamp");
 }
 
+function trustedCleanReviewCommitPrefix(body) {
+  if (typeof body !== "string") return null;
+  const normalized = body.replace(/\r\n/g, "\n");
+  if (normalized.includes("\r")) return null;
+  const canonical = normalized
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n$/, "");
+  const match = CLEAN_REVIEW_COMMENT_RE.exec(canonical);
+  if (!match || !CLEAN_REVIEW_TAGLINES.has(match[1] ?? "")) return null;
+  if (match[3] !== undefined && match[3] !== CLEAN_REVIEW_FOOTER) return null;
+  return match[2];
+}
+
+export function isExactHeadReviewRequest(body, headSha) {
+  return (
+    typeof body === "string" &&
+    /^@codex[ \t]+review(?=[ \t\r\n]|$)/i.test(body) &&
+    fullShaAppearsInComment(body, headSha)
+  );
+}
+
 function hasTrustedExactHeadCleanReview({
   automatedReviewLogin,
   headSha,
@@ -192,16 +245,26 @@ function hasTrustedExactHeadCleanReview({
     throw new Error("Operator review-request comment response is missing");
   }
 
-  let latestRequestTimestamp = 0;
+  let latestRequest = null;
   for (const comment of reviewRequestComments) {
     const authorLogin = normalizeLogin(comment?.user?.login, "Review-request comment author identity");
-    if (authorLogin !== operatorLogin || !fullShaAppearsInComment(comment.body, headSha)) continue;
+    if (authorLogin !== operatorLogin || !isExactHeadReviewRequest(comment.body, headSha)) continue;
+    if (!Number.isSafeInteger(comment?.id) || comment.id < 1) {
+      throw new Error("Review-request comment identity is missing or malformed");
+    }
     const createdAt = timestampMilliseconds(comment.created_at, "Review-request comment creation timestamp");
     const updatedAt = timestampMilliseconds(comment.updated_at, "Review-request comment update timestamp");
     if (updatedAt < createdAt) throw new Error("Review-request comment timestamps are malformed");
-    latestRequestTimestamp = Math.max(latestRequestTimestamp, updatedAt);
+    if (updatedAt !== createdAt) continue;
+    if (
+      latestRequest === null ||
+      createdAt > latestRequest.createdAt ||
+      (createdAt === latestRequest.createdAt && comment.id > latestRequest.id)
+    ) {
+      latestRequest = { createdAt, id: comment.id };
+    }
   }
-  if (latestRequestTimestamp === 0) return false;
+  if (latestRequest === null) return false;
 
   let maximumCommentId = 0;
   let cleanReview = null;
@@ -212,8 +275,8 @@ function hasTrustedExactHeadCleanReview({
     maximumCommentId = Math.max(maximumCommentId, comment.id);
     if (String(comment?.user?.login ?? "").toLowerCase() !== reviewerLogin) continue;
     normalizeLogin(comment.user.login, "Clean-review comment author identity");
-    const match = CLEAN_REVIEW_COMMENT_RE.exec(String(comment.body ?? ""));
-    if (!match) continue;
+    const reviewedCommitPrefix = trustedCleanReviewCommitPrefix(comment.body);
+    if (reviewedCommitPrefix === null) continue;
     if (comment.user?.type !== "Bot" || !Number.isSafeInteger(comment.user?.id) || comment.user.id < 1) {
       throw new Error("Clean-review comment actor metadata is missing or malformed");
     }
@@ -225,7 +288,7 @@ function hasTrustedExactHeadCleanReview({
     const createdAt = timestampMilliseconds(comment.created_at, "Clean-review comment creation timestamp");
     const updatedAt = timestampMilliseconds(comment.updated_at, "Clean-review comment update timestamp");
     if (createdAt !== updatedAt) throw new Error("Clean-review comment was edited");
-    if (!headSha.startsWith(match[1])) continue;
+    if (!headSha.startsWith(reviewedCommitPrefix)) continue;
     if (
       cleanReview === null ||
       createdAt > cleanReview.createdAt ||
@@ -236,9 +299,12 @@ function hasTrustedExactHeadCleanReview({
   }
   if (cleanReview === null || cleanReview.id !== maximumCommentId) return false;
 
-  if (reviewEvidence !== null && cleanReview.createdAt <= reviewEvidence.submittedAt) return false;
-  const requiredAfter = Math.max(latestRequestTimestamp, pullRequestActivityTimestamp(pullRequest));
-  return cleanReview.createdAt >= requiredAfter && cleanReview.createdAt > latestRequestTimestamp;
+  if (reviewEvidence !== null && cleanReview.createdAt < reviewEvidence.submittedAt) return false;
+  if (cleanReview.createdAt < pullRequestActivityTimestamp(pullRequest)) return false;
+  return (
+    cleanReview.createdAt > latestRequest.createdAt ||
+    (cleanReview.createdAt === latestRequest.createdAt && cleanReview.id > latestRequest.id)
+  );
 }
 
 function fullShaAppearsInComment(body, headSha) {
@@ -272,7 +338,7 @@ function hasBoundRequestReaction({
 
   for (const comment of reviewRequestComments) {
     const authorLogin = normalizeLogin(comment?.user?.login, "Review-request comment author identity");
-    if (authorLogin !== operatorLogin || !fullShaAppearsInComment(comment.body, headSha)) continue;
+    if (authorLogin !== operatorLogin || !isExactHeadReviewRequest(comment.body, headSha)) continue;
     const commentCreatedTimestamp = timestampMilliseconds(
       comment.created_at,
       "Review-request comment creation timestamp",
