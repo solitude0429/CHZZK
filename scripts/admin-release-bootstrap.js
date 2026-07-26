@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const BOOTSTRAP_ENTRYPOINT_PATH = "scripts/finalize-release.js";
 const RELEASE_DISPATCH_EVENT_TYPE = "chzzk-release-preflight-v1";
-const RELEASE_OPERATIONS = new Set(["dispatch", "finalize"]);
+const RELEASE_OPERATIONS = new Set(["dispatch", "finalize", "release"]);
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/;
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -46,6 +46,13 @@ const AMBIENT_EXECUTION_ENVIRONMENT_NAMES = new Set([
   "no_proxy",
 ]);
 const MAX_ENTRYPOINT_BYTES = 256 * 1024;
+const STAGING_WAIT_INTERVAL_MS = 5_000;
+const STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES = 100;
+const STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES = 80;
+const MAX_STAGING_WAIT_ATTEMPTS = Math.ceil(
+  ((STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES + STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES) * 60_000) /
+    STAGING_WAIT_INTERVAL_MS,
+);
 const TRUSTED_EXECUTABLE_CANDIDATES = Object.freeze({
   gh: Object.freeze(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"]),
   git: Object.freeze(["/usr/bin/git", "/bin/git"]),
@@ -264,6 +271,7 @@ function capture(runCommand, command, args, cwd) {
 
 function dispatchStagingWorkflow({
   checkoutRoot,
+  createDispatchNonce,
   defaultBranch,
   now,
   operatorLogin,
@@ -288,9 +296,14 @@ function dispatchStagingWorkflow({
     throw new Error("Immutable release preflight timestamp is invalid");
   }
   const version = readBoundVersion(checkoutRoot);
+  const dispatchNonce = createDispatchNonce();
+  if (typeof dispatchNonce !== "string" || !/^[a-f0-9]{32}$/.test(dispatchNonce)) {
+    throw new Error("Release dispatch nonce generator returned a malformed value");
+  }
   const dispatchBody = {
     client_payload: {
       default_branch: defaultBranch,
+      dispatch_nonce: dispatchNonce,
       immutable_releases_verified: true,
       operator_login: operatorLogin,
       source_sha: sourceSha,
@@ -303,17 +316,92 @@ function dispatchStagingWorkflow({
     cwd: checkoutRoot,
     input: `${JSON.stringify(dispatchBody)}\n`,
   });
-  return { defaultBranch, dispatched: true, operatorLogin, sourceSha, version };
+  return { defaultBranch, dispatchNonce, dispatched: true, operatorLogin, sourceSha, version };
+}
+
+function paginatedApiArgs(endpoint) {
+  return apiArgs(endpoint, { extra: ["--paginate", "--slurp"] });
+}
+
+function stagingRuns(response) {
+  const pages = parseJson(response, "Release staging workflow lookup");
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page?.workflow_runs))) {
+    throw new Error("Release staging workflow lookup returned malformed pagination");
+  }
+  return pages.flatMap((page) => page.workflow_runs);
+}
+
+async function waitForDispatchedStagingWorkflow({
+  checkoutRoot,
+  defaultBranch,
+  dispatchNonce,
+  operatorLogin,
+  repository,
+  runCommand,
+  sourceSha,
+  wait,
+}) {
+  const expectedTitle = `Release staging ${dispatchNonce}`;
+  const endpoint =
+    `repos/${repository}/actions/workflows/sign-unlisted.yml/runs` +
+    `?event=repository_dispatch&head_sha=${sourceSha}&per_page=100`;
+  for (let attempt = 1; attempt <= MAX_STAGING_WAIT_ATTEMPTS; attempt += 1) {
+    const matches = stagingRuns(
+      runCommand("gh", paginatedApiArgs(endpoint), {
+        cwd: checkoutRoot,
+      }),
+    ).filter(
+      (run) =>
+        run?.actor?.login === operatorLogin &&
+        run.display_title === expectedTitle &&
+        run.event === "repository_dispatch" &&
+        run.head_branch === defaultBranch &&
+        String(run.head_sha ?? "").toLowerCase() === sourceSha &&
+        run.name === "Stage unlisted Firefox release" &&
+        run.path === ".github/workflows/sign-unlisted.yml",
+    );
+    if (matches.length > 1) {
+      throw new Error("Release staging dispatch resolved to duplicate workflow runs");
+    }
+    if (matches.length === 1) {
+      const [run] = matches;
+      if (
+        !Number.isSafeInteger(run.id) ||
+        run.id <= 0 ||
+        !Number.isSafeInteger(run.run_attempt) ||
+        run.run_attempt <= 0 ||
+        !Number.isSafeInteger(run.run_number) ||
+        run.run_number <= 0 ||
+        typeof run.status !== "string" ||
+        !run.status
+      ) {
+        throw new Error("Release staging workflow identity is malformed");
+      }
+      if (run.status === "completed") {
+        if (run.conclusion !== "success") {
+          throw new Error("Release staging workflow did not complete successfully");
+        }
+        return;
+      }
+      if (run.conclusion !== null) {
+        throw new Error("Release staging workflow has an inconsistent pending state");
+      }
+    }
+    if (attempt < MAX_STAGING_WAIT_ATTEMPTS) await wait(STAGING_WAIT_INTERVAL_MS);
+  }
+  throw new Error("Timed out waiting for the exact release staging workflow");
 }
 
 export async function runProtectedReleaseEntrypoint({
   checkout,
+  createDispatchNonce = () => randomBytes(16).toString("hex"),
   now = () => new Date(),
   operation = "finalize",
   repository,
   runCommand,
   trustedExecutables,
   trustedGhHome,
+  wait = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
 }) {
   if (process.env.GITHUB_ACTIONS) {
     throw new Error("The administrator release bootstrap must run out of band, never in GitHub Actions");
@@ -322,7 +410,7 @@ export async function runProtectedReleaseEntrypoint({
     throw new Error("Release repository must use owner/repository form");
   }
   if (!RELEASE_OPERATIONS.has(operation)) {
-    throw new Error("Release bootstrap operation must be dispatch or finalize");
+    throw new Error("Release bootstrap operation must be dispatch, finalize, or release");
   }
   if (typeof runCommand !== "function") {
     throw new Error("Release bootstrap requires a trusted command runner");
@@ -385,15 +473,35 @@ export async function runProtectedReleaseEntrypoint({
     );
   }
 
-  if (operation === "dispatch") {
-    return dispatchStagingWorkflow({
+  if (operation === "dispatch" || operation === "release") {
+    const dispatched = dispatchStagingWorkflow({
       checkoutRoot,
+      createDispatchNonce,
       defaultBranch,
       now,
       operatorLogin,
       repository,
       runCommand,
       sourceSha,
+    });
+    if (operation === "dispatch") return dispatched;
+    await waitForDispatchedStagingWorkflow({
+      checkoutRoot,
+      defaultBranch,
+      dispatchNonce: dispatched.dispatchNonce,
+      operatorLogin,
+      repository,
+      runCommand,
+      sourceSha,
+      wait,
+    });
+    return runProtectedReleaseEntrypoint({
+      checkout: checkoutRoot,
+      operation: "finalize",
+      repository,
+      runCommand,
+      trustedExecutables,
+      trustedGhHome,
     });
   }
 

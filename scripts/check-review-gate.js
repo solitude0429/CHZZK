@@ -6,6 +6,7 @@ import {
   changedFilePaths,
   evaluateReviewCompletion,
   hasExactHeadReviewerApproval,
+  isExactHeadReviewRequest,
   isPendingReviewGateError,
   requiresAutomatedSecurityReview,
 } from "./lib/review-gate.js";
@@ -96,16 +97,6 @@ function listReviewThreads(repository, pullNumber, expectedHeadSha) {
   throw new Error("Review-thread query exceeded the pagination limit");
 }
 
-function containsFullSha(body, headSha) {
-  if (typeof body !== "string") return false;
-  const lowerBody = body.toLowerCase();
-  const index = lowerBody.indexOf(headSha);
-  if (index < 0) return false;
-  return (
-    !/[a-f0-9]/.test(lowerBody[index - 1] ?? "") && !/[a-f0-9]/.test(lowerBody[index + headSha.length] ?? "")
-  );
-}
-
 function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLogin) {
   const comments = paginatedArrays(
     `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
@@ -121,7 +112,7 @@ function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLog
     .filter(
       (comment) =>
         String(comment?.user?.login ?? "").toLowerCase() === operatorLogin &&
-        containsFullSha(comment?.body, headSha),
+        isExactHeadReviewRequest(comment?.body, headSha),
     )
     .map((comment) => {
       return {
@@ -139,6 +130,13 @@ function listCommentEvidence(repository, pullNumber, headSha, releaseOperatorLog
         created_at: comment.created_at,
         id: comment.id,
         updated_at: comment.updated_at,
+        performed_via_github_app:
+          comment.performed_via_github_app === null
+            ? null
+            : {
+                id: comment.performed_via_github_app?.id,
+                slug: comment.performed_via_github_app?.slug,
+              },
         user: {
           id: comment.user?.id,
           login: comment.user?.login,
@@ -307,6 +305,7 @@ async function main() {
       const forceReview = process.env.CHZZK_FORCE_REVIEW === "true";
       const required = requiresAutomatedSecurityReview({ files, forceReview, labels });
       let evidence = {
+        commentSnapshot: undefined,
         reviewRequestComments: undefined,
         reviews: [],
         reviewThreads: [],
@@ -353,6 +352,7 @@ async function main() {
         forceReview,
         labels,
         pullRequest,
+        pullRequestComments: evidence.commentSnapshot,
         releaseOperatorLogin: process.env.CHZZK_RELEASE_OPERATOR_LOGIN,
         reviews: evidence.reviews,
         reviewRequestComments: evidence.reviewRequestComments,

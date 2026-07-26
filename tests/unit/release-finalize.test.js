@@ -658,6 +658,7 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       const result = await outsideGitHubActions(() =>
         runProtectedReleaseEntrypoint({
           checkout,
+          createDispatchNonce: () => "b".repeat(32),
           now: () => new Date("2026-07-16T22:00:00.000Z"),
           operation: "dispatch",
           repository,
@@ -666,6 +667,7 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       );
       assert.deepEqual(result, {
         defaultBranch: "main",
+        dispatchNonce: "b".repeat(32),
         dispatched: true,
         operatorLogin: "release-admin",
         sourceSha,
@@ -676,6 +678,7 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       assert.deepEqual(JSON.parse(dispatch.input), {
         client_payload: {
           default_branch: "main",
+          dispatch_nonce: "b".repeat(32),
           immutable_releases_verified: true,
           operator_login: "release-admin",
           source_sha: sourceSha,
@@ -685,6 +688,119 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         event_type: "chzzk-release-preflight-v1",
       });
     } finally {
+      rmSync(checkout, { force: true, recursive: true });
+    }
+  });
+
+  it("runs dispatch, exact workflow waiting, and protected-head finalization as one bounded operation", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "chzzk-bootstrap-release-"));
+    const remoteMarker = join(checkout, "remote-finalizer-executed");
+    const dispatchNonce = "b".repeat(32);
+    const remoteEntrypoint = Buffer.from(
+      `import { writeFileSync } from "node:fs";\nvoid "release-orchestration";\nwriteFileSync(process.env.REMOTE_MARKER, process.env.CHZZK_RELEASE_BOOTSTRAP_SHA);\n`,
+    );
+    const calls = [];
+    const waits = [];
+    let workflowLookups = 0;
+    const runCommand = (command, args, options = {}) => {
+      calls.push({ args: [...args], command, input: options.input });
+      if (command === "git" && args.join(" ") === "rev-parse HEAD") return `${sourceSha}\n`;
+      if (command === "git" && args.join(" ") === "symbolic-ref --short HEAD") return "main\n";
+      if (command === "git" && args.join(" ") === "status --porcelain") return "";
+      if (command !== "gh") throw new Error(`unexpected bootstrap command: ${command}`);
+      const endpoint = args.find(
+        (argument) => argument === "user" || argument.startsWith(`repos/${repository}`),
+      );
+      if (endpoint === `repos/${repository}`) {
+        return `${JSON.stringify({ archived: false, default_branch: "main", full_name: repository })}\n`;
+      }
+      if (endpoint === `repos/${repository}/branches/main`) {
+        return `${JSON.stringify({ commit: { sha: sourceSha }, name: "main", protected: true })}\n`;
+      }
+      if (endpoint === "user") return `${JSON.stringify({ login: "release-admin" })}\n`;
+      if (endpoint === `repos/${repository}/actions/variables/RELEASE_OPERATOR_LOGIN`) {
+        return `${JSON.stringify({ name: "RELEASE_OPERATOR_LOGIN", value: "release-admin" })}\n`;
+      }
+      if (endpoint === `repos/${repository}/immutable-releases`) {
+        return `${JSON.stringify({ enabled: true })}\n`;
+      }
+      if (endpoint === `repos/${repository}/dispatches` && args.includes("POST")) return "";
+      if (
+        endpoint ===
+        `repos/${repository}/actions/workflows/sign-unlisted.yml/runs` +
+          `?event=repository_dispatch&head_sha=${sourceSha}&per_page=100`
+      ) {
+        workflowLookups += 1;
+        return `${JSON.stringify([
+          {
+            workflow_runs: [
+              {
+                actor: { login: "release-admin" },
+                conclusion: workflowLookups === 1 ? null : "success",
+                display_title: `Release staging ${dispatchNonce}`,
+                event: "repository_dispatch",
+                head_branch: "main",
+                head_sha: sourceSha,
+                id: 9001,
+                name: "Stage unlisted Firefox release",
+                path: ".github/workflows/sign-unlisted.yml",
+                run_attempt: 1,
+                run_number: 42,
+                status: workflowLookups === 1 ? "in_progress" : "completed",
+              },
+            ],
+          },
+        ])}\n`;
+      }
+      if (endpoint === `repos/${repository}/contents/scripts/finalize-release.js?ref=${sourceSha}`) {
+        return `${JSON.stringify({
+          content: remoteEntrypoint.toString("base64"),
+          encoding: "base64",
+          path: "scripts/finalize-release.js",
+          sha: gitBlobSha(remoteEntrypoint),
+          size: remoteEntrypoint.length,
+          type: "file",
+        })}\n`;
+      }
+      throw new Error(`unexpected bootstrap endpoint: ${endpoint}`);
+    };
+    const originalRemoteMarker = process.env.REMOTE_MARKER;
+    try {
+      mkdirSync(join(checkout, "scripts"), { recursive: true });
+      writeFileSync(join(checkout, "package.json"), `${JSON.stringify({ version })}\n`);
+      writeFileSync(join(checkout, "manifest.json"), `${JSON.stringify({ version })}\n`);
+      process.env.REMOTE_MARKER = remoteMarker;
+      const { runProtectedReleaseEntrypoint } = await import(
+        new URL("../../scripts/admin-release-bootstrap.js", import.meta.url)
+      );
+      const result = await outsideGitHubActions(() =>
+        runProtectedReleaseEntrypoint({
+          checkout,
+          createDispatchNonce: () => dispatchNonce,
+          now: () => new Date("2026-07-16T22:00:00.000Z"),
+          operation: "release",
+          repository,
+          runCommand,
+          wait: async (milliseconds) => {
+            waits.push(milliseconds);
+          },
+        }),
+      );
+      assert.equal(result.sourceSha, sourceSha);
+      assert.deepEqual(waits, [5_000]);
+      assert.equal(workflowLookups, 2);
+      assert.equal(readFileSync(remoteMarker, "utf8"), sourceSha);
+      const dispatchIndex = calls.findIndex(({ args }) => args.includes(`repos/${repository}/dispatches`));
+      const workflowIndex = calls.findIndex(({ args }) =>
+        args.some((argument) => argument.includes("/actions/workflows/sign-unlisted.yml/runs")),
+      );
+      const contentIndex = calls.findIndex(({ args }) =>
+        args.includes(`repos/${repository}/contents/scripts/finalize-release.js?ref=${sourceSha}`),
+      );
+      assert.equal(dispatchIndex >= 0 && dispatchIndex < workflowIndex && workflowIndex < contentIndex, true);
+    } finally {
+      if (originalRemoteMarker === undefined) delete process.env.REMOTE_MARKER;
+      else process.env.REMOTE_MARKER = originalRemoteMarker;
       rmSync(checkout, { force: true, recursive: true });
     }
   });

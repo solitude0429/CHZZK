@@ -206,6 +206,94 @@ function runStager({
   }
 }
 
+function runAuthorizer({
+  actor = "solitude0429",
+  dispatchNonce = "b".repeat(32),
+  eventName = "repository_dispatch",
+  protectedRef = "true",
+  ref = "refs/heads/main",
+  requestedVersion = version,
+} = {}) {
+  const scratchRoot = join(repoRoot, "dist");
+  mkdirSync(scratchRoot, { recursive: true });
+  const directory = mkdtempSync(join(scratchRoot, "authorizer-test-"));
+  try {
+    const eventPath = join(directory, "event.json");
+    writeFileSync(
+      eventPath,
+      JSON.stringify({
+        action: "chzzk-release-preflight-v1",
+        client_payload: {
+          default_branch: "main",
+          dispatch_nonce: dispatchNonce,
+          immutable_releases_verified: true,
+          operator_login: actor,
+          source_sha: sourceDigest,
+          verified_at: new Date().toISOString(),
+          version: requestedVersion,
+        },
+        repository: {
+          default_branch: "main",
+          full_name: "solitude0429/CHZZK",
+        },
+        sender: { login: actor },
+      }),
+    );
+    const workflow = parse(readFileSync(join(repoRoot, ".github/workflows/sign-unlisted.yml"), "utf8"));
+    const authorizeStep = workflow.jobs.authorize.steps.find((step) =>
+      String(step.name).includes("administrator preflight"),
+    );
+    const result = spawnSync("bash", ["-c", authorizeStep.run], {
+      cwd: directory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        EXPECTED_OPERATOR: "solitude0429",
+        GITHUB_ACTOR: actor,
+        GITHUB_EVENT_NAME: eventName,
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_REF: ref,
+        GITHUB_REPOSITORY: "solitude0429/CHZZK",
+        GITHUB_SHA: sourceDigest,
+        REF_PROTECTED: protectedRef,
+      },
+    });
+    return {
+      cleanup: () => rmSync(directory, { force: true, recursive: true }),
+      result,
+    };
+  } catch (error) {
+    rmSync(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+describe("protected release workflow authorization", () => {
+  it("accepts only the configured operator on exact protected main with a canonical version", () => {
+    const accepted = runAuthorizer();
+    try {
+      assert.equal(accepted.result.status, 0, accepted.result.stderr);
+    } finally {
+      accepted.cleanup();
+    }
+
+    for (const rejected of [
+      runAuthorizer({ actor: "other-user" }),
+      runAuthorizer({ protectedRef: "false" }),
+      runAuthorizer({ ref: "refs/heads/release" }),
+      runAuthorizer({ requestedVersion: "01.4.0" }),
+      runAuthorizer({ dispatchNonce: "invalid" }),
+      runAuthorizer({ eventName: "workflow_dispatch" }),
+    ]) {
+      try {
+        assert.notEqual(rejected.result.status, 0);
+      } finally {
+        rejected.cleanup();
+      }
+    }
+  });
+});
+
 describe("attested release draft staging workflow shell", () => {
   it("stages a new release as a mutable draft without querying the repository immutable setting", () => {
     const run = runStager({ immutableReleasesEnabled: false });

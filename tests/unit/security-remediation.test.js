@@ -103,91 +103,35 @@ describe("release and repository security guardrails", () => {
     );
   });
 
-  it("stages exact release assets and leaves immutable publication to the out-of-band administrator", () => {
+  it("stages in Actions and completes the release through one bounded out-of-band operation", () => {
     const text = read(".github/workflows/sign-unlisted.yml");
     const release = workflow("sign-unlisted.yml");
     const prepareRelease = release.jobs.prepare.steps.find((step) => step.id === "release").run;
     const packageJson = JSON.parse(read("package.json"));
     const bootstrap = read("scripts/admin-release-bootstrap.js");
     const finalizer = read("scripts/lib/release-finalize.js");
-    const signing = read("docs/SIGNING.md");
     const statePreflight = read("scripts/lib/github-release-state.js");
     assert.deepEqual(release.on, {
       repository_dispatch: { types: ["chzzk-release-preflight-v1"] },
     });
-    assert.equal(Object.hasOwn(release.on, "workflow_dispatch"), false);
+    assert.match(String(release["run-name"]), /dispatch_nonce/);
     assert.equal(release.jobs.prepare.needs, "authorize");
-    assert.match(JSON.stringify(release.jobs.authorize), /RELEASE_OPERATOR_LOGIN|operator_login/);
+    assert.match(JSON.stringify(release.jobs.authorize), /RELEASE_OPERATOR_LOGIN|EXPECTED_OPERATOR/);
     assert.match(
       JSON.stringify(release.jobs.authorize),
-      /source_sha|verified_at|immutable_releases_verified/,
+      /source_sha|dispatch_nonce|verified_at|immutable_releases_verified|REF_PROTECTED/,
     );
     assert.equal(Object.hasOwn(packageJson.scripts, "release:dispatch"), false);
-    assert.doesNotMatch(signing, /npm run release:dispatch/);
-    assert.match(bootstrap, /\/immutable-releases/);
-    assert.match(bootstrap, /enabled\s*!==\s*true/);
-    assert.match(bootstrap, /repos\/\$\{repository\}\/dispatches/);
+    assert.equal(Object.hasOwn(release.jobs, "publish"), false);
     assert.match(text, /reuse_existing/);
     assert.match(text, /draft_signed_ready/);
     assert.match(text, /gh release view/);
     assert.match(text, /cmp "\$SOURCE"/);
     assert.match(text, /--draft/);
-    assert.doesNotMatch(text, /gh release edit "\$TAG" --draft=false/);
-    assert.doesNotMatch(text, /\/immutable-releases/);
     assert.match(text, /sync_draft_assets/);
     assert.match(text, /gh release upload "\$TAG" "\$ASSET"/);
     assert.match(text, /--json isDraft/);
     assert.match(text, /--json isPrerelease/);
-    assert.match(finalizer, /\/immutable-releases/);
-    assert.match(finalizer, /"attestation",\s*"verify"/);
-    assert.match(finalizer, /repos\/\$\{repository\}\/releases\/\$\{releaseId\}/);
-    assert.match(finalizer, /"--method",\s*"PATCH"[\s\S]*"draft=false"/);
-    assert.doesNotMatch(finalizer, /"release",\s*"edit"/);
-    assert.doesNotMatch(signing, /node scripts\/finalize-release\.js/);
-    assert.match(signing, /\.local\/libexec\/chzzk-release-bootstrap\.mjs/);
-    assert.match(signing, /contents\/scripts\/admin-release-bootstrap\.js/);
-    assert.match(signing, /GH_BINARY="\/usr\/local\/bin\/gh"/);
-    assert.match(signing, /CHZZK_BOOTSTRAP_TOKEN/);
-    assert.match(signing, /GH_CONFIG_DIR/);
-    assert.match(signing, /XDG_CACHE_HOME/);
-    assert.match(signing, /"\$GH_BINARY" api/);
-    assert.doesNotMatch(signing, /\n\s*gh api/);
-    assert.match(signing, /unset ALL_PROXY[\s\S]*NODE_EXTRA_CA_CERTS/);
-    assert.match(bootstrap, /branches\/\$\{encodeURIComponent\(defaultBranch\)\}/);
-    assert.match(bootstrap, /branchState\?\.protected !== true/);
-    assert.match(bootstrap, /contents\/scripts\/finalize-release\.js\?ref=\$\{sourceSha\}/);
-    assert.match(bootstrap, /data:text\/javascript;base64/);
-    assert.match(bootstrap, /gitBlobSha/);
-    assert.match(bootstrap, /CHZZK_RELEASE_TRUSTED_GH/);
-    assert.match(bootstrap, /CHZZK_RELEASE_TRUSTED_GIT/);
-    assert.match(bootstrap, /CHZZK_RELEASE_TRUSTED_GH_HOME/);
-    assert.match(bootstrap, /GH_CONFIG_DIR/);
-    assert.match(bootstrap, /XDG_CACHE_HOME/);
-    assert.doesNotMatch(bootstrap, /HOME:\s*process\.env\.HOME/);
-    for (const name of [
-      "ALL_PROXY",
-      "CURL_CA_BUNDLE",
-      "HTTPS_PROXY",
-      "HTTP_PROXY",
-      "LD_AUDIT",
-      "LD_LIBRARY_PATH",
-      "LD_PRELOAD",
-      "NODE_EXTRA_CA_CERTS",
-      "NODE_OPTIONS",
-      "NODE_PATH",
-      "REQUESTS_CA_BUNDLE",
-      "SSL_CERT_DIR",
-      "SSL_CERT_FILE",
-      "XDG_CONFIG_HOME",
-    ]) {
-      assert.match(bootstrap, new RegExp(name));
-    }
-    assert.match(bootstrap, /env:\s*environments\[command\]/);
-    assert.ok(
-      bootstrap.indexOf("branchState?.protected !== true") < bootstrap.indexOf("await import"),
-      "protected-head verification must precede repository entrypoint execution",
-    );
-    assert.doesNotMatch(signing, /(?:npm (?:run|exec)|npx)[^\n]*release:finalize/);
     assert.match(statePreflight, /--source-digest/);
     assert.match(statePreflight, /\.github\/workflows\/sign-unlisted\.yml/);
     assert.match(text, /git diff --cached --exit-code/);
@@ -196,6 +140,42 @@ describe("release and repository security guardrails", () => {
     assert.match(text, /environment:\s*firefox-signing/);
     assert.match(prepareRelease, /preflight-release-state\.js/);
     assert.match(release.jobs.sign.if, /draft_signed_ready/);
+
+    assert.match(bootstrap, /RELEASE_OPERATIONS = new Set\(\["dispatch", "finalize", "release"\]\)/);
+    assert.match(bootstrap, /repos\/\$\{repository\}\/immutable-releases/);
+    assert.match(bootstrap, /randomBytes\(16\)/);
+    assert.match(bootstrap, /dispatch_nonce/);
+    assert.match(bootstrap, /MAX_STAGING_WAIT_ATTEMPTS/);
+    const workflowTimeoutBudget = [...bootstrap.matchAll(/STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES = (\d+)/g)];
+    const queueAndApprovalMargin = [
+      ...bootstrap.matchAll(/STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES = (\d+)/g),
+    ];
+    assert.equal(workflowTimeoutBudget.length, 1);
+    assert.equal(queueAndApprovalMargin.length, 1);
+    assert.equal(
+      Number(workflowTimeoutBudget[0][1]),
+      Object.values(release.jobs).reduce((total, job) => total + job["timeout-minutes"], 0),
+      "bootstrap workflow timeout budget must cover every sequential release job timeout",
+    );
+    assert.equal(
+      Number(queueAndApprovalMargin[0][1]) >= 60,
+      true,
+      "bootstrap needs at least one hour of queue and approval margin",
+    );
+    assert.match(
+      bootstrap,
+      /\(STAGING_WORKFLOW_TIMEOUT_BUDGET_MINUTES \+ STAGING_QUEUE_AND_APPROVAL_MARGIN_MINUTES\)/,
+    );
+    assert.match(bootstrap, /--paginate/);
+    assert.match(bootstrap, /--slurp/);
+    assert.match(bootstrap, /run\.display_title === expectedTitle/);
+    assert.match(bootstrap, /run\.path === "\.github\/workflows\/sign-unlisted\.yml"/);
+    assert.match(bootstrap, /run\?\.actor\?\.login === operatorLogin/);
+    assert.match(bootstrap, /operation: "finalize"/);
+    assert.match(finalizer, /immutableReleasesEnabled/);
+    assert.match(finalizer, /releases\/\$\{releaseId\}/);
+    assert.match(finalizer, /"draft=false"/);
+    assert.doesNotMatch(finalizer, /GITHUB_TOKEN/);
 
     const prepare = read("scripts/prepare-release.js");
     assert.match(prepare, /--porcelain=v1/);
@@ -303,7 +283,8 @@ describe("release and repository security guardrails", () => {
     assert.equal(Object.hasOwn(gate.on, "workflow_dispatch"), true);
     assert.equal(gate.on.workflow_dispatch.inputs.force_generation.type, "string");
     assert.equal(gate.on.workflow_dispatch.inputs.force_generation.required, false);
-    assert.deepEqual(gate.on.schedule, [{ cron: "*/15 * * * *" }]);
+    assert.equal(Object.hasOwn(gate.on, "schedule"), false);
+    assert.equal(Object.hasOwn(gate.on.workflow_dispatch.inputs, "reconcile"), false);
     assert.equal(Object.hasOwn(gate.on, "check_run"), false);
     assert.match(
       gate.concurrency.group,
@@ -403,7 +384,7 @@ describe("release and repository security guardrails", () => {
     assert.deepEqual(cancelSelection.stdout.trim().split("\n"), ["10", "13"]);
     assert.match(persistForceText, /force_review=false/);
     assert.match(persistForceText, /force_generation/);
-    assert.match(persistForceText, /reconcile=true/);
+    assert.doesNotMatch(persistForceText, /reconcile=true/);
     assert.doesNotMatch(persistForceText, /actions\/checkout|npm\s|node scripts\//);
     assert.deepEqual(gate.jobs.evaluate.needs, ["persist-force-review"]);
     assert.match(JSON.stringify(gate.jobs.evaluate), /CHZZK_FORCE_REVIEW[\s\S]*force_generation/);
@@ -413,17 +394,9 @@ describe("release and repository security guardrails", () => {
       "the non-cancelable label-persistence run must not publish a cached review result",
     );
     assert.deepEqual(gate.jobs.status.permissions, { checks: "write" });
-    assert.deepEqual(gate.jobs.reconcile.permissions, {
-      actions: "write",
-      "pull-requests": "read",
-    });
-    const reconcileText = JSON.stringify(gate.jobs.reconcile);
-    assert.match(reconcileText, /pulls\?state=open/);
-    assert.match(reconcileText, /gh workflow run/);
-    assert.match(reconcileText, /reconcile=true/);
-    assert.doesNotMatch(reconcileText, /actions\/checkout|npm\s|node scripts\//);
+    assert.equal(Object.hasOwn(gate.jobs, "reconcile"), false);
     assert.match(JSON.stringify(gate.jobs.status), /check-runs\?check_name=/);
-    assert.match(JSON.stringify(gate.jobs.status), /inputs\.reconcile/);
+    assert.doesNotMatch(JSON.stringify(gate.jobs.status), /inputs\.reconcile|RECONCILE/);
     const statusRun = gate.jobs.status.steps.find((step) =>
       String(step.name ?? "").includes("review completion check"),
     ).run;
@@ -504,9 +477,10 @@ describe("release and repository security guardrails", () => {
     );
     const gateLibrary = read("scripts/lib/review-gate.js");
     assert.match(gateLibrary, /pullRequest\?\.updated_at/);
-    assert.doesNotMatch(gateLibrary, /performed_via_github_app/);
+    assert.match(gateLibrary, /performed_via_github_app/);
+    assert.match(gateLibrary, /Didn't find any major issues/);
+    assert.match(gateLibrary, /cleanReview\.id !== maximumCommentId/);
     assert.doesNotMatch(gateLibrary, /resolved_commit_sha/);
-    assert.doesNotMatch(gateLibrary, /Didn't find any major issues/);
     assert.match(settings, /required_status_checks/);
     assert.match(settings, /apps\/github-actions/);
     assert.match(settings, /required_conversation_resolution/);

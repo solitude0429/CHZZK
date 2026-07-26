@@ -238,9 +238,21 @@ describe("sole-owner review-gate repository configuration", () => {
         checks: [
           { app_id: 7, context: "Existing CI" },
           { app_id: null, context: "Any CI" },
+          { app_id: githubActionsAppId, context: "analyze" },
           { app_id: githubActionsAppId, context: "CHZZK review completion" },
+          { app_id: githubActionsAppId, context: "dependency-review" },
+          { app_id: githubActionsAppId, context: "firefox-e2e" },
+          { app_id: githubActionsAppId, context: "verify" },
         ],
-        contexts: ["Existing CI", "Any CI", "CHZZK review completion"],
+        contexts: [
+          "Existing CI",
+          "Any CI",
+          "analyze",
+          "CHZZK review completion",
+          "dependency-review",
+          "firefox-e2e",
+          "verify",
+        ],
         strict: true,
       });
       assert.equal(configured.conversationResolution, true);
@@ -260,7 +272,11 @@ describe("sole-owner review-gate repository configuration", () => {
           checks: [
             { app_id: 7, context: "Existing CI" },
             { app_id: -1, context: "Any CI" },
+            { app_id: githubActionsAppId, context: "analyze" },
             { app_id: githubActionsAppId, context: "CHZZK review completion" },
+            { app_id: githubActionsAppId, context: "dependency-review" },
+            { app_id: githubActionsAppId, context: "firefox-e2e" },
+            { app_id: githubActionsAppId, context: "verify" },
           ],
           strict: true,
         },
@@ -328,8 +344,14 @@ describe("sole-owner review-gate repository configuration", () => {
       assert.equal(applied.status, 0, applied.stderr);
       const configured = readState(statePath);
       assert.deepEqual(configured.statusProtection, {
-        checks: [{ app_id: githubActionsAppId, context: "CHZZK review completion" }],
-        contexts: ["CHZZK review completion"],
+        checks: [
+          { app_id: githubActionsAppId, context: "analyze" },
+          { app_id: githubActionsAppId, context: "CHZZK review completion" },
+          { app_id: githubActionsAppId, context: "dependency-review" },
+          { app_id: githubActionsAppId, context: "firefox-e2e" },
+          { app_id: githubActionsAppId, context: "verify" },
+        ],
+        contexts: ["analyze", "CHZZK review completion", "dependency-review", "firefox-e2e", "verify"],
         strict: true,
       });
 
@@ -340,7 +362,13 @@ describe("sole-owner review-gate repository configuration", () => {
       assert.deepEqual(JSON.parse(reapplied.stdout).plannedChanges, [
         {
           action: "update",
-          checks: [{ app_id: githubActionsAppId, context: "CHZZK review completion" }],
+          checks: [
+            { app_id: githubActionsAppId, context: "analyze" },
+            { app_id: githubActionsAppId, context: "CHZZK review completion" },
+            { app_id: githubActionsAppId, context: "dependency-review" },
+            { app_id: githubActionsAppId, context: "firefox-e2e" },
+            { app_id: githubActionsAppId, context: "verify" },
+          ],
           kind: "status-checks",
           strict: true,
         },

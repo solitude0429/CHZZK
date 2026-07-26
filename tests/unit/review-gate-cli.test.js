@@ -10,12 +10,29 @@ const headSha = "d".repeat(40);
 const baseSha = "b".repeat(40);
 const reviewerLogin = "chatgpt-codex-connector[bot]";
 const operatorLogin = "sole-owner";
+const cleanReviewFooter = `<details> <summary>ℹ️ About Codex in GitHub</summary>
+<br/>
+
+[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you
+- Open a pull request for review
+- Mark a draft as ready
+- Comment "@codex review".
+
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+
+
+
+
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+
+</details>`;
 
 function fakeGhSource() {
   return `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const state = JSON.parse(fs.readFileSync(process.env.FAKE_GH_STATE, "utf8"));
+const cleanReviewFooter = ${JSON.stringify(cleanReviewFooter)};
 const endpoint = args.at(-1);
 state.log.push(args);
 fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(state));
@@ -72,25 +89,36 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
   fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify(state));
   const comments = [
     {
-      body: "@codex review " + state.headSha,
-      created_at: "2026-07-15T10:00:30Z",
+      body: state.unrelatedExactHeadOperatorComment
+        ? "Status note for exact head " + state.headSha
+        : "@codex review " + state.headSha,
+      created_at: state.sameSecondCleanReview
+        ? "2026-07-15T10:02:00Z"
+        : "2026-07-15T10:00:30Z",
       id: 100,
-      updated_at: "2026-07-15T10:00:30Z",
-      user: { login: "${operatorLogin}", type: "User" },
+      performed_via_github_app: null,
+      updated_at: state.sameSecondCleanReview
+        ? "2026-07-15T10:02:00Z"
+        : "2026-07-15T10:00:30Z",
+      user: { id: 2, login: "${operatorLogin}", type: "User" },
     },
     {
-      body: state.prefixedExactHeadCleanFormat
-        ? "Untrusted preamble\\n\\n## Review Result\\n\\nNo major issues found in exact head \\\`" +
-          state.headSha + "\\\`.\\n"
-        : state.exactHeadCleanFormat
-          ? "## Review Result\\n\\nNo major issues found in exact head \\\`" +
-            state.headSha + "\\\`.\\n"
-          : "Codex Review: Didn't find any major issues. Nice work!\\n\\n**Reviewed commit:** \\\`" +
-            state.headSha.slice(0, 10) + "\\\`\\n",
+      body: state.includeCleanReview
+        ? (state.prefixedExactHeadCleanFormat ? "Untrusted preamble\\n\\n" : "") +
+          "Codex Review: Didn't find any major issues. Nice work!\\n\\n**Reviewed commit:** \\\`" +
+          (state.staleCleanPrefix ? "${"e".repeat(10)}" : state.headSha.slice(0, 10)) +
+          "\\\`\\n\\n" +
+          cleanReviewFooter +
+          (state.trailingCleanContent ? "\\n\\n### Findings\\n\\n- P1: trailing content" : "")
+        : "You have reached your Codex usage limits for code reviews.",
       created_at: "2026-07-15T10:02:00Z",
       id: 200,
-      updated_at: "2026-07-15T10:02:00Z",
-      user: { login: "${reviewerLogin}", type: "Bot" },
+      performed_via_github_app: {
+        id: 3,
+        slug: state.wrongCleanApp ? "different-app" : "chatgpt-codex-connector",
+      },
+      updated_at: state.cleanReviewEdited ? "2026-07-15T10:02:01Z" : "2026-07-15T10:02:00Z",
+      user: { id: 1, login: "${reviewerLogin}", type: "Bot" },
     },
   ];
   if (state.commentsChangeBetweenSnapshots && state.commentReads > 1) {
@@ -106,6 +134,7 @@ if (endpoint === "repos/example/repository/issues/42/comments?per_page=100") {
   pages(comments);
 }
 if (endpoint === "repos/example/repository/issues/comments/100/reactions?per_page=100") {
+  if (state.noRequestReaction) pages([]);
   pages([{
     content: "+1",
     created_at: state.staleReaction ? "2026-07-15T10:01:00Z" : "2026-07-15T10:03:00Z",
@@ -177,6 +206,43 @@ describe("review-gate GitHub evidence collection", () => {
       ),
       true,
     );
+  });
+
+  it("accepts the connector's exact-head clean-review App comment without trusting a PR-level reaction", () => {
+    const run = runGate({ includeCleanReview: true, noRequestReaction: true });
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.output, /^state=success$/m);
+    assert.match(run.result.stdout, /Trusted reviewer reported no major issues/);
+    assert.equal(
+      run.state.log.some((args) => args.includes("repos/example/repository/issues/42/reactions")),
+      false,
+    );
+  });
+
+  it("rejects stale, prefixed, edited, or wrong-App clean-review comments", () => {
+    for (const overrides of [
+      { includeCleanReview: true, noRequestReaction: true, prefixedExactHeadCleanFormat: true },
+      { includeCleanReview: true, noRequestReaction: true, staleCleanPrefix: true },
+      { cleanReviewEdited: true, includeCleanReview: true, noRequestReaction: true },
+      { includeCleanReview: true, noRequestReaction: true, wrongCleanApp: true },
+      { includeCleanReview: true, noRequestReaction: true, trailingCleanContent: true },
+      { includeCleanReview: true, noRequestReaction: true, unrelatedExactHeadOperatorComment: true },
+    ]) {
+      const run = runGate(overrides);
+      assert.notEqual(run.result.status, 0);
+      assert.match(run.output, /^state=failure$/m);
+    }
+  });
+
+  it("accepts a same-second clean response only when its issue-comment ID follows the request", () => {
+    const run = runGate({
+      includeCleanReview: true,
+      noRequestReaction: true,
+      sameSecondCleanReview: true,
+    });
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.output, /^state=success$/m);
+    assert.match(run.result.stdout, /Trusted reviewer reported no major issues/);
   });
 
   it("fails closed on reaction provenance, timestamps, metadata, comment, or review races", () => {

@@ -12,8 +12,6 @@ on:
     types: [created, deleted, edited]
   issue_comment:
     types: [created, deleted, edited]
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force_generation:
@@ -30,11 +28,6 @@ on:
         description: Pull request number to re-evaluate after resolving review threads
         required: true
         type: number
-      reconcile:
-        description: Quiet periodic reconciliation of reaction-backed review evidence
-        required: true
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -121,8 +114,7 @@ jobs:
             --ref "$DEFAULT_BRANCH" \
             -f force_generation="$GITHUB_RUN_ID" \
             -f force_review=false \
-            -f pr_number="$PR_NUMBER" \
-            -f reconcile=true
+            -f pr_number="$PR_NUMBER"
 
   evaluate:
     needs: [persist-force-review]
@@ -130,7 +122,6 @@ jobs:
       always() &&
       (needs.persist-force-review.result == 'success' || needs.persist-force-review.result == 'skipped') &&
       !(github.event_name == 'workflow_dispatch' && inputs.force_review) &&
-      github.event_name != 'schedule' &&
       (github.event_name != 'issue_comment' || github.event.issue.pull_request != null)
     permissions:
       contents: read
@@ -177,7 +168,6 @@ jobs:
           FORCE_GENERATION: ${{ inputs.force_generation || '' }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.evaluate.outputs.head_sha }}
-          RECONCILE: ${{ github.event_name == 'workflow_dispatch' && inputs.reconcile || false }}
           STATE: ${{ needs.evaluate.outputs.state }}
         run: |
           set -euo pipefail
@@ -223,33 +213,4 @@ jobs:
                 -f "output[summary]=$DESCRIPTION"
             fi
           fi
-          if [ "$RECONCILE" != "true" ]; then
-            test "$STATE" = "success"
-          fi
-
-  reconcile:
-    if: github.event_name == 'schedule'
-    permissions:
-      actions: write
-      pull-requests: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Re-evaluate every open non-draft pull request
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          PULLS_FILE="$RUNNER_TEMP/chzzk-open-pulls"
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
-            --jq '.[] | select(.draft == false) | .number' > "$PULLS_FILE"
-          while IFS= read -r PULL_NUMBER; do
-            test -n "$PULL_NUMBER"
-            gh workflow run review-gate.yml \
-              --repo "$GITHUB_REPOSITORY" \
-              --ref "$DEFAULT_BRANCH" \
-              -f force_review=false \
-              -f pr_number="$PULL_NUMBER" \
-              -f reconcile=true
-          done < "$PULLS_FILE"
+          test "$STATE" = "success"
