@@ -38,7 +38,7 @@ describe("bounded HLS response evidence", () => {
     );
   });
 
-  it("accepts LL-HLS parts and part preload hints", () => {
+  it("accepts usable LL-HLS parts and part preload hints", () => {
     assert.equal(
       isUsableHlsPlaylist(
         '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PART:DURATION=0.333,URI="part-1.m4s?token=x"\n',
@@ -48,6 +48,20 @@ describe("bounded HLS response evidence", () => {
     assert.equal(
       isUsableHlsPlaylist(
         '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part-next.m4s"\n',
+      ),
+      true,
+    );
+  });
+
+  it("rejects GAP-only LL-HLS evidence but accepts a later usable part", () => {
+    const gapPart = '#EXT-X-PART:DURATION=0.333,URI="part-gap.m4s",GAP=YES\n';
+    assert.equal(
+      isUsableHlsPlaylist(`#EXTM3U\n#EXT-X-TARGETDURATION:2\n${gapPart}`),
+      false,
+    );
+    assert.equal(
+      isUsableHlsPlaylist(
+        `#EXTM3U\n#EXT-X-TARGETDURATION:2\n${gapPart}#EXT-X-PART:DURATION=0.333,URI="part-live.m4s"\n`,
       ),
       true,
     );
