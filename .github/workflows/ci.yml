@@ -79,7 +79,7 @@ jobs:
           FIREFOX_BINARY: ${{ github.workspace }}/dist/e2e-tools/firefox/firefox
           GECKODRIVER_BINARY: ${{ github.workspace }}/dist/e2e-tools/geckodriver
 
-  generate-runtime-artifact:
+  format-and-generate-artifact:
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -93,13 +93,34 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
+      - name: Format changed source and policy files
+        run: |
+          npx prettier --write \
+            .github/PULL_REQUEST_TEMPLATE/hardening.md \
+            .github/workflows/ci.yml \
+            .github/workflows/exact-head-review.yml \
+            docs/OPERATIONS.md \
+            docs/SECURITY.md \
+            scripts/verify-exact-head-review.js \
+            src/shared/playlist-evidence.js \
+            tests/unit/exact-head-review.test.js \
+            tests/unit/playlist-evidence.test.js \
+            tests/unit/windows-wrapper-policy.test.js
       - run: npm run build:runtime
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           if-no-files-found: error
-          name: generated-runtime-${{ github.event.pull_request.head.sha || github.sha }}
+          name: formatted-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
+            .github/PULL_REQUEST_TEMPLATE/hardening.md
+            .github/workflows/ci.yml
+            .github/workflows/exact-head-review.yml
             background.js
-            diagnostics.js
-            site-observer.js
+            docs/OPERATIONS.md
+            docs/SECURITY.md
+            scripts/verify-exact-head-review.js
+            src/shared/playlist-evidence.js
+            tests/unit/exact-head-review.test.js
+            tests/unit/playlist-evidence.test.js
+            tests/unit/windows-wrapper-policy.test.js
           retention-days: 1
