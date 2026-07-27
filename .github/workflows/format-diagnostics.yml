@@ -11,27 +11,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Format ${{ matrix.path }}
+  format:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        path:
-          - .github/workflows/ci.yml
-          - .github/workflows/exact-head-review.yml
-          - .github/workflows/format-diagnostics.yml
-          - docs/TESTING.md
-          - package.json
-          - scripts/configure-exact-head-review.js
-          - scripts/configure-repository-all.js
-          - scripts/verify-exact-head-review.js
-          - tests/unit/exact-head-review-protection.test.js
-          - tests/unit/exact-head-review.test.js
-          - tests/unit/windows-wrapper-policy.test.js
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,4 +25,34 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - run: npx prettier --check "${{ matrix.path }}"
+      - name: Format changed text files
+        run: |
+          npx prettier --write \
+            .github/workflows/ci.yml \
+            .github/workflows/exact-head-review.yml \
+            .github/workflows/format-diagnostics.yml \
+            docs/TESTING.md \
+            package.json \
+            scripts/configure-exact-head-review.js \
+            scripts/configure-repository-all.js \
+            scripts/verify-exact-head-review.js \
+            tests/unit/exact-head-review-protection.test.js \
+            tests/unit/exact-head-review.test.js \
+            tests/unit/windows-wrapper-policy.test.js
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          if-no-files-found: error
+          name: formatted-source-${{ github.sha }}
+          path: |
+            .github/workflows/ci.yml
+            .github/workflows/exact-head-review.yml
+            .github/workflows/format-diagnostics.yml
+            docs/TESTING.md
+            package.json
+            scripts/configure-exact-head-review.js
+            scripts/configure-repository-all.js
+            scripts/verify-exact-head-review.js
+            tests/unit/exact-head-review-protection.test.js
+            tests/unit/exact-head-review.test.js
+            tests/unit/windows-wrapper-policy.test.js
+          retention-days: 1
