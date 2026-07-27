@@ -490,6 +490,66 @@ describe("background runtime quality resolution", () => {
     );
   });
 
+  it("does not downgrade a valid target when an upward refresh sees only lower evidence", async () => {
+    const availableQualities = new Set(["720p"]);
+    const { advanceClock, fetches, listeners, responseFilters, storage } = await loadBackground({
+      availableQualities,
+    });
+    const tabId = 637;
+    const validPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+    const request = (requestId) => familyRequest(tabId, "upgrade-no-downgrade", requestId);
+
+    const first = plain(await listeners.onBeforeRequest(request("no-downgrade-first")));
+    assert.match(first.redirectUrl, /chunklist_720p/);
+    await observeRedirectTarget(listeners, request("no-downgrade-first"), first.redirectUrl);
+    deliverFilteredResponse(responseFilters, "no-downgrade-first", validPlaylist);
+    listeners.onCompleted({
+      requestId: "no-downgrade-first",
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    for (const [requestId, lowerProbeEvidence] of [
+      ["no-downgrade-renew-1", false],
+      ["no-downgrade-renew-2", true],
+    ]) {
+      if (lowerProbeEvidence) {
+        availableQualities.clear();
+        availableQualities.add("480p");
+      }
+      advanceClock(25_000);
+      const renewed = plain(await listeners.onBeforeRequest(request(requestId)));
+      assert.match(renewed.redirectUrl, /chunklist_720p/);
+      await observeRedirectTarget(listeners, request(requestId), renewed.redirectUrl);
+      deliverFilteredResponse(responseFilters, requestId, validPlaylist);
+      listeners.onCompleted({
+        requestId,
+        statusCode: 200,
+        url: renewed.redirectUrl,
+      });
+    }
+
+    const fetchCountBeforeRefresh = fetches.length;
+    advanceClock(11_000);
+    const currentRequest = listeners.onBeforeRequest(request("no-downgrade-trigger"));
+    assert.equal(typeof currentRequest?.then, "undefined");
+    assert.match(plain(currentRequest).redirectUrl, /chunklist_720p/);
+
+    await waitForDiagnosticsQueue(20);
+    const fetchCountAfterRefresh = fetches.length;
+    assert.equal(fetchCountAfterRefresh > fetchCountBeforeRefresh, true);
+    const retained = plain(await listeners.onBeforeRequest(request("no-downgrade-retained")));
+    assert.match(retained.redirectUrl, /chunklist_720p/);
+    assert.equal(
+      fetches.length,
+      fetchCountAfterRefresh,
+      "the same refresh interval must not start another candidate scan",
+    );
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {
+      [tabId]: "720p",
+    });
+  });
+
   it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
     const availableQualities = new Set(["2160p"]);
     const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
