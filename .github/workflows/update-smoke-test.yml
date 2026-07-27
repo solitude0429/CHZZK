@@ -1,0 +1,51 @@
+name: Update smoke regression test
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-smoke-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - name: Update trusted Node assertions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("tests/unit/firefox-signed-smoke.test.js")
+          text = path.read_text()
+          text = text.replace(
+              'const versionProbe = wrapper.indexOf("$nodeMajor = & $node.Source");',
+              'const versionProbe = wrapper.indexOf("$nodeMajorOutput = & $node -p");',
+          )
+          text = text.replace(
+              'const smokeRun = wrapper.indexOf("& $node.Source $runner");',
+              'const smokeRun = wrapper.indexOf("& $node $runner");',
+          )
+          path.write_text(text)
+          PY
+          npx prettier --write tests/unit/firefox-signed-smoke.test.js
+          node --test tests/unit/firefox-signed-smoke.test.js
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          if-no-files-found: error
+          name: updated-smoke-test-${{ github.sha }}
+          path: tests/unit/firefox-signed-smoke.test.js
+          retention-days: 1
