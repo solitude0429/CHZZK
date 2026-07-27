@@ -11,6 +11,8 @@ import {
 const headSha = "0123456789abcdef0123456789abcdef01234567";
 const baseSha = "89abcdef0123456789abcdef0123456789abcdef";
 const requestCommentId = 42;
+const reactionId = 777;
+const requestCreatedAt = "2026-07-28T00:00:00Z";
 const requestBody = `@codex review\n\nhead: \`${headSha}\`\nbase: \`main@${baseSha}\``;
 
 function context(overrides = {}) {
@@ -30,18 +32,20 @@ function requestComment(overrides = {}) {
     __typename: "IssueComment",
     author: { login: "repository-owner" },
     body: requestBody,
-    createdAt: "2026-07-28T00:00:00Z",
+    createdAt: requestCreatedAt,
     databaseId: requestCommentId,
-    reactionGroups: [
-      {
-        content: "THUMBS_UP",
-        users: {
-          nodes: [{ login: "chatgpt-codex-connector[bot]" }],
-          pageInfo: { hasNextPage: false },
+    reactions: {
+      nodes: [
+        {
+          content: "THUMBS_UP",
+          createdAt: "2026-07-28T00:00:05Z",
+          databaseId: reactionId,
+          user: { login: "chatgpt-codex-connector[bot]" },
         },
-      },
-    ],
-    updatedAt: "2026-07-28T00:00:00Z",
+      ],
+      pageInfo: { hasNextPage: false },
+    },
+    updatedAt: requestCreatedAt,
     ...overrides,
   };
 }
@@ -53,12 +57,16 @@ function passingSnapshot() {
     baseRefOid: baseSha,
     headRefOid: headSha,
     isDraft: true,
+    lastEditedAt: "2026-07-27T23:59:00Z",
     reviewThreads: {
       nodes: [],
       pageInfo: { hasNextPage: false },
     },
     timelineItems: {
-      nodes: [{ __typename: "PullRequestCommit", commit: { oid: headSha } }, requestComment()],
+      nodes: [
+        { __typename: "PullRequestCommit", commit: { oid: headSha } },
+        requestComment(),
+      ],
       pageInfo: { hasNextPage: false, hasPreviousPage: false },
     },
   };
@@ -76,23 +84,36 @@ describe("exact-diff review verification", () => {
     assert.equal(parseReviewRequest(`review ${headSha}`), null);
   });
 
-  it("accepts a bound Codex thumbs-up while the PR remains draft", () => {
+  it("accepts a bound Codex reaction only while the PR remains draft", () => {
     assert.deepEqual(evaluateExactHeadReview(passingSnapshot(), context()), {
       baseRefName: "main",
       baseSha,
       conclusion: "success",
+      evidenceCreatedAt: "2026-07-28T00:00:05Z",
+      evidenceId: reactionId,
       headSha,
+      requestCommentId,
       retryable: false,
       shouldPublish: true,
-      summary: `Exact-diff Codex review passed for main@${baseSha.slice(0, 12)}...${headSha.slice(0, 12)} with zero unresolved threads.`,
+      summary: `Durable exact-diff review attestation passed for main@${baseSha.slice(0, 12)}...${headSha.slice(0, 12)} using request ${requestCommentId} and Codex reaction ${reactionId}.`,
     });
+
+    const ready = passingSnapshot();
+    ready.isDraft = false;
+    assert.match(evaluateExactHeadReview(ready, context()).summary, /remain draft/i);
   });
 
-  it("rejects edited requests and requests created before the current head entered the PR", () => {
-    const edited = passingSnapshot();
-    edited.timelineItems.nodes[1].updatedAt = "2026-07-28T00:01:00Z";
-    assert.match(evaluateExactHeadReview(edited, context()).summary, /edited/i);
+  it("rejects edited requests and pull-request edits after the request", () => {
+    const editedRequest = passingSnapshot();
+    editedRequest.timelineItems.nodes[1].updatedAt = "2026-07-28T00:01:00Z";
+    assert.match(evaluateExactHeadReview(editedRequest, context()).summary, /edited after creation/i);
 
+    const editedPullRequest = passingSnapshot();
+    editedPullRequest.lastEditedAt = "2026-07-28T00:01:00Z";
+    assert.match(evaluateExactHeadReview(editedPullRequest, context()).summary, /title or body/i);
+  });
+
+  it("rejects requests created before the current head entered the PR", () => {
     const futureHead = passingSnapshot();
     futureHead.timelineItems.nodes = [
       requestComment(),
@@ -118,7 +139,7 @@ describe("exact-diff review verification", () => {
     }
   });
 
-  it("rejects stale base identity, pagination, spoofed reactions, and unresolved threads", () => {
+  it("rejects stale base identity, pagination, malformed reactions, and unresolved threads", () => {
     const staleBase = passingSnapshot();
     staleBase.timelineItems.nodes[1].body = requestBody.replace(baseSha, "a".repeat(40));
     assert.match(evaluateExactHeadReview(staleBase, context()).summary, /must bind head/i);
@@ -128,51 +149,23 @@ describe("exact-diff review verification", () => {
     assert.match(evaluateExactHeadReview(timelinePaginated, context()).summary, /pagination/i);
 
     const reactionPaginated = passingSnapshot();
-    reactionPaginated.timelineItems.nodes[1].reactionGroups[0].users.pageInfo.hasNextPage = true;
-    assert.match(evaluateExactHeadReview(reactionPaginated, context()).summary, /pagination/i);
+    reactionPaginated.timelineItems.nodes[1].reactions.pageInfo.hasNextPage = true;
+    assert.match(evaluateExactHeadReview(reactionPaginated, context()).summary, /reaction evidence/i);
+
+    const malformedReaction = passingSnapshot();
+    malformedReaction.timelineItems.nodes[1].reactions.nodes[0].databaseId = null;
+    assert.match(evaluateExactHeadReview(malformedReaction, context()).summary, /reaction evidence/i);
 
     const spoofed = passingSnapshot();
-    spoofed.timelineItems.nodes[1].reactionGroups[0].users.nodes[0].login = "other-bot";
-    const spoofedResult = evaluateExactHeadReview(spoofed, context());
-    assert.equal(spoofedResult.retryable, true);
+    spoofed.timelineItems.nodes[1].reactions.nodes[0].user.login = "other-bot";
+    assert.equal(evaluateExactHeadReview(spoofed, context()).retryable, true);
 
     const unresolved = passingSnapshot();
     unresolved.reviewThreads.nodes.push({ isResolved: false });
     assert.match(evaluateExactHeadReview(unresolved, context()).summary, /unresolved/i);
   });
 
-  it("accepts the configured trusted operator but not an unrelated actor", () => {
-    const operatorSnapshot = passingSnapshot();
-    operatorSnapshot.timelineItems.nodes[1].author.login = "release-operator";
-    assert.equal(
-      evaluateExactHeadReview(
-        operatorSnapshot,
-        context({
-          eventCommentAuthor: "release-operator",
-          eventTrustedRequester: "release-operator",
-        }),
-      ).conclusion,
-      "success",
-    );
-    assert.equal(
-      evaluateExactHeadReview(
-        operatorSnapshot,
-        context({ eventCommentAuthor: "other-user", eventTrustedRequester: "release-operator" }),
-      ).shouldPublish,
-      false,
-    );
-  });
-
-  it("invalidates prior evidence whenever pull-request state changes", () => {
-    const result = evaluateExactHeadReview(
-      passingSnapshot(),
-      context({ eventAction: "synchronize", eventName: "pull_request_target" }),
-    );
-    assert.equal(result.conclusion, "failure");
-    assert.match(result.summary, /state changed/i);
-  });
-
-  it("skips outsider requests without entering the polling loop", async () => {
+  it("requires the PR author and skips unrelated actors without polling", async () => {
     let loads = 0;
     let sleeps = 0;
     const result = await waitForExactHeadReview({
@@ -192,10 +185,19 @@ describe("exact-diff review verification", () => {
     assert.equal(sleeps, 0);
   });
 
-  it("polls only the immutable request and fails closed when the window expires", async () => {
+  it("invalidates prior evidence whenever pull-request state changes", () => {
+    const result = evaluateExactHeadReview(
+      passingSnapshot(),
+      context({ eventAction: "synchronize", eventName: "pull_request_target" }),
+    );
+    assert.equal(result.conclusion, "failure");
+    assert.match(result.summary, /state changed/i);
+  });
+
+  it("polls only the immutable draft request and fails closed when the window expires", async () => {
     let loads = 0;
     const pending = passingSnapshot();
-    pending.timelineItems.nodes[1].reactionGroups = [];
+    pending.timelineItems.nodes[1].reactions.nodes = [];
     const result = await waitForExactHeadReview({
       attempts: 3,
       context: context(),
@@ -210,6 +212,26 @@ describe("exact-diff review verification", () => {
     assert.equal(result.conclusion, "failure");
     assert.equal(result.retryable, false);
     assert.match(result.summary, /polling window expired/i);
+  });
+
+  it("stops polling if the PR leaves draft or its body changes", async () => {
+    let loads = 0;
+    const pending = passingSnapshot();
+    pending.timelineItems.nodes[1].reactions.nodes = [];
+    const ready = passingSnapshot();
+    ready.isDraft = false;
+    const result = await waitForExactHeadReview({
+      attempts: 3,
+      context: context(),
+      intervalMs: 1,
+      loadSnapshot: async () => {
+        loads += 1;
+        return loads === 1 ? pending : ready;
+      },
+      sleepImpl: async () => {},
+    });
+    assert.equal(loads, 2);
+    assert.match(result.summary, /remain draft/i);
   });
 
   it("invalidates an edited or deleted review request", () => {
