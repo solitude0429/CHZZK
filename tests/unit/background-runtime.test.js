@@ -669,7 +669,7 @@ describe("background runtime quality resolution", () => {
     assert.deepEqual(fetches, []);
   });
 
-  it("detaches a proven target from the old player's terminal request during mini-player migration", async () => {
+  it("keeps a newer mini-player verifier authoritative over an old-player terminal event", async () => {
     const tabId = 647;
     const liveUrl = "https://chzzk.naver.com/live/example-channel";
     const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
@@ -690,12 +690,34 @@ describe("background runtime quality resolution", () => {
     assert.match(oldPlayerRedirect.redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
     await observeRedirectTarget(listeners, oldPlayerRequest, oldPlayerRedirect.redirectUrl);
 
+    // The page has already called pushState, but Firefox has not delivered
+    // tabs.onUpdated yet. This request belongs to the new mini-player even
+    // though it is still keyed to the old live context.
+    const newMiniPlayerRequest = {
+      ...oldPlayerRequest,
+      requestId: "new-mini-player-before-tabs-update",
+    };
+    const newMiniPlayerRedirect = plain(listeners.onBeforeRequest(newMiniPlayerRequest));
+    assert.match(newMiniPlayerRedirect.redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    await observeRedirectTarget(listeners, newMiniPlayerRequest, newMiniPlayerRedirect.redirectUrl);
+
     listeners.onUpdated(tabId, { url: miniPlayerUrl });
     listeners.onErrorOccurred({
       error: "NS_ERROR_NET_RESET",
       requestId: oldPlayerRequest.requestId,
       tabId,
       url: oldPlayerRedirect.redirectUrl,
+    });
+    deliverFilteredResponse(
+      responseFilters,
+      newMiniPlayerRequest.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: newMiniPlayerRequest.requestId,
+      statusCode: 200,
+      tabId,
+      url: newMiniPlayerRedirect.redirectUrl,
     });
 
     const next = listeners.onBeforeRequest({
@@ -705,7 +727,7 @@ describe("background runtime quality resolution", () => {
     assert.equal(
       typeof next?.then,
       "undefined",
-      "an old-player terminal event must not turn a proven master target into a cold probe",
+      "the newer mini-player verifier must supersede the retired player's terminal event",
     );
     assert.match(plain(next).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
     assert.deepEqual(fetches, []);
@@ -718,6 +740,54 @@ describe("background runtime quality resolution", () => {
           transition.reason === "network-error",
       ),
       false,
+    );
+  });
+
+  it("honors a failed mini-player verifier that starts before tabs.onUpdated is delivered", async () => {
+    const tabId = 649;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["720p"]),
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(dedicatedMasterRequest(tabId, "master-before-early-mini-request", liveUrl));
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      "master-before-early-mini-request",
+      DEDICATED_MASTER_URL,
+      DEDICATED_MASTER_BODY,
+    );
+
+    // This is the mini-player's first request after pushState, but the
+    // asynchronous tabs.onUpdated notification has not reached the background.
+    const earlyMiniRequest = highBitrateLowQualityRequest(tabId, "early-mini-player-verifier", liveUrl);
+    const earlyMiniRedirect = plain(listeners.onBeforeRequest(earlyMiniRequest));
+    assert.match(earlyMiniRedirect.redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    await observeRedirectTarget(listeners, earlyMiniRequest, earlyMiniRedirect.redirectUrl);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    deliverFilteredResponse(responseFilters, earlyMiniRequest.requestId, "<!doctype html>");
+    listeners.onCompleted({
+      requestId: earlyMiniRequest.requestId,
+      statusCode: 200,
+      tabId,
+      url: earlyMiniRedirect.redirectUrl,
+    });
+
+    const retry = plain(
+      await listeners.onBeforeRequest({
+        ...earlyMiniRequest,
+        documentUrl: miniPlayerUrl,
+        requestId: "early-mini-player-retry",
+      }),
+    );
+    assert.match(
+      retry.redirectUrl,
+      /chunklist_720p_highbitrate\.m3u8/,
+      "a failed verifier owned by the new mini-player must invalidate the migrated master target",
     );
   });
 
@@ -2254,6 +2324,51 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     );
     assert.match(plain(cached).redirectUrl, /chunklist_1080p/);
     assert.equal(fetches.length, fetchCountBeforeValidation);
+  });
+
+  it("migrates an observer-only origin-bound master during delayed content prewarm", async () => {
+    const tabId = 518;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const pendingTab = deferred();
+    const { fetches, listeners, responseFilters, sessionState } = await loadBackground({
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    const masterRequest = {
+      ...dedicatedMasterRequest(tabId, "contextless-master-observer", undefined),
+      documentUrl: undefined,
+      originUrl: undefined,
+    };
+
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: tabId } });
+    assert.equal(listeners.onBeforeRequest(masterRequest), undefined);
+    assert.equal(sessionState().masterObservers, 1);
+
+    pendingTab.resolve({ id: tabId, url: liveUrl });
+    await waitForDiagnosticsQueue();
+    assert.equal(
+      sessionState().masterObservers,
+      1,
+      "binding the concrete live context must retain the eligible master observer",
+    );
+
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      masterRequest.requestId,
+      DEDICATED_MASTER_URL,
+      DEDICATED_MASTER_BODY,
+    );
+    const cached = listeners.onBeforeRequest(
+      highBitrateLowQualityRequest(tabId, "contextless-master-cached", liveUrl),
+    );
+
+    assert.equal(
+      typeof cached?.then,
+      "undefined",
+      "the observer must finish under the adopted live context without a cold numeric probe",
+    );
+    assert.match(plain(cached).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    assert.deepEqual(fetches, []);
   });
 
   it("evicts stale tab trust when explicit request metadata proves a non-CHZZK document", async () => {

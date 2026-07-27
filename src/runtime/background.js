@@ -843,6 +843,17 @@ function tabHasQualityState(tabId) {
   );
 }
 
+function tabHasMigratableContextlessMasterObserver(tabId) {
+  return [...masterResponseObserversById.values()].some(
+    (record) =>
+      !record.settled &&
+      record.session.tabId === tabId &&
+      record.session.contextKey === "trusted-request" &&
+      record.session.dedicatedHls &&
+      record.streamFailed !== true,
+  );
+}
+
 function dropTabQualityState(tabId, { dropToken = false } = {}) {
   let hadTarget = false;
   for (const [key, state] of resolutionBySession) {
@@ -1050,11 +1061,6 @@ function migrateTabQualityState(
     if (record.tabId !== tabId) continue;
     const target = preservedTargetByOldKey.get(record.key);
     if (target?.targetEpoch === record.targetEpoch && target.targetQuality === record.targetQuality) {
-      if (target.evidenceKind === "master") {
-        record.settled = true;
-        redirectedRequestsById.delete(requestId);
-        continue;
-      }
       record.contextKey = target.contextKey;
       record.key = target.key;
       continue;
@@ -1134,7 +1140,8 @@ async function prewarmLiveTab(
     ) ||
       [...activeTargetsBySession.values()].some(
         (state) => state.tabId === tabId && state.contextKey === "trusted-request",
-      ));
+      ) ||
+      tabHasMigratableContextlessMasterObserver(tabId));
   const contextChanged = Boolean(
     nextContext && ((previousContext && previousContext !== nextContext) || hasUnboundState),
   );

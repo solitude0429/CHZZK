@@ -124,6 +124,31 @@ async function makeExtensionXpi({
     urls: ["https://*.pstatic.net/*"],
   },
 );
+browser.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  let updatedUrl;
+  try {
+    updatedUrl = new URL(changeInfo && changeInfo.url);
+  } catch {
+    return;
+  }
+  if (
+    updatedUrl.hostname !== "www.chzzk.naver.com" ||
+    updatedUrl.pathname !== "/lives" ||
+    updatedUrl.searchParams.get("keyword") !== "another-channel-live-to-mini"
+  ) {
+    return;
+  }
+  Promise.resolve()
+    .then(() =>
+      fetch(
+        "https://nvelop-livecloud.pstatic.net:" +
+          updatedUrl.port +
+          "/chzzk/fixture/transition-ack",
+        { cache: "no-store" },
+      ),
+    )
+    .catch(() => {});
+});
 `),
     { date: fixedZipDate, unixPermissions: 0o100644 },
   );
@@ -220,6 +245,22 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       response.setHeader("cache-control", "no-store");
 
       if (
+        host === "nvelop-livecloud.pstatic.net" &&
+        requestUrl.pathname === "/chzzk/fixture/transition-ack"
+      ) {
+        state.transitionAckCount += 1;
+        const pendingMaster = state.pendingTransitionMaster;
+        if (pendingMaster) {
+          state.pendingTransitionMaster = null;
+          state.transitionMasterReleasedByAck = true;
+          pendingMaster.response.end(pendingMaster.body);
+        }
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+
+      if (
         host === "www.chzzk.naver.com" &&
         (requestUrl.pathname === "/live/test" || requestUrl.pathname === "/lives")
       ) {
@@ -285,8 +326,13 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 720p/segment/chunklist_720p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
 `;
           if (requestUrl.searchParams.get("transition") === "live-to-mini") {
+            const initialMasterChunk = "#EXTM3U\n";
             response.flushHeaders();
-            setTimeout(() => response.end(masterBody), 250);
+            response.write(initialMasterChunk);
+            state.pendingTransitionMaster = {
+              body: masterBody.slice(initialMasterChunk.length),
+              response,
+            };
           } else {
             response.end(masterBody);
           }
@@ -520,7 +566,15 @@ async function main() {
   const runtimeDir = join(workDir, "runtime");
   const logs = [];
   const requests = [];
-  const state = { port: null, updateManifest: null, updateXpiBytes: null, updateXpiPath: null };
+  const state = {
+    pendingTransitionMaster: null,
+    port: null,
+    transitionAckCount: 0,
+    transitionMasterReleasedByAck: false,
+    updateManifest: null,
+    updateXpiBytes: null,
+    updateXpiPath: null,
+  };
   const { certificatePath, keyPath } = generateCertificate(workDir);
   const server = createFixtureServer({ certificatePath, keyPath, requests, state });
   let geckodriverProcess = null;
@@ -706,6 +760,11 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       true,
       "Firefox did not exercise a master response that crossed the live-to-mini transition",
     );
+    assert.equal(
+      state.transitionAckCount > 0 && state.transitionMasterReleasedByAck,
+      true,
+      "the master body was not gated on a background-observed live-to-mini transition",
+    );
 
     await driver.setContext("content");
     await driver.command("POST", "/url", { url: "about:blank" });
@@ -799,7 +858,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
         hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,
-        liveToMiniTransition: "in-flight-master-pushState",
+        liveToMiniTransition: "background-acknowledged-in-flight-master-pushState",
         masterResponsePreselection: true,
         miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
@@ -825,6 +884,10 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       geckodriverProcess.kill("SIGTERM");
       await Promise.race([new Promise((resolve) => geckodriverProcess.once("exit", resolve)), delay(3000)]);
       if (geckodriverProcess.exitCode === null) geckodriverProcess.kill("SIGKILL");
+    }
+    if (state.pendingTransitionMaster) {
+      state.pendingTransitionMaster.response.destroy();
+      state.pendingTransitionMaster = null;
     }
     await closeServer(server);
     rmSync(workDir, { force: true, recursive: true });
