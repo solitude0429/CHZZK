@@ -68,10 +68,7 @@ jobs:
         run: node scripts/verify-exact-head-review.js
 
   publish-exact-head-review:
-    if: >-
-      always() &&
-      needs.evaluate-exact-head-review.result != 'skipped' &&
-      needs.evaluate-exact-head-review.outputs.should_publish == 'true'
+    if: always() && needs.evaluate-exact-head-review.result != 'skipped'
     needs: evaluate-exact-head-review
     runs-on: ubuntu-latest
     timeout-minutes: 5
