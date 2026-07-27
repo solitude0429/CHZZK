@@ -31,6 +31,13 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(workflow, /checks:\s*write/);
     assert.match(workflow, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
     const publishJob = workflow.slice(workflow.indexOf("  publish-exact-head-review:"));
+    const publishCondition = publishJob.slice(0, publishJob.indexOf("    needs:"));
+    assert.match(
+      publishCondition,
+      /if:\s*always\(\) && needs\.evaluate-exact-head-review\.result != 'skipped'/,
+    );
+    assert.doesNotMatch(publishCondition, /should_publish/);
+    assert.match(publishJob, /Verifier did not produce a result\./);
     assert.doesNotMatch(publishJob, /actions\/checkout@/);
     assert.doesNotMatch(publishJob, /node scripts\//);
   });
