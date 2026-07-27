@@ -3,10 +3,7 @@ import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const REVIEW_BOT_LOGINS = new Set([
-  "chatgpt-codex-connector",
-  "chatgpt-codex-connector[bot]",
-]);
+const REVIEW_BOT_LOGINS = new Set(["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"]);
 const SUCCESS_RE = /Codex Review:\s*Didn['’]t find any major issues/i;
 const REVIEWED_COMMIT_RE = /Reviewed commit:\*?\*?\s*`?([a-f0-9]{7,40})`?/i;
 
@@ -51,9 +48,7 @@ export function evaluateExactHeadReview(snapshot) {
       summary: "Review thread pagination exceeded the verifier limit; refusing an incomplete result.",
     };
   }
-  const unresolved = asArray(threadConnection?.nodes).filter(
-    (thread) => thread?.isResolved !== true,
-  );
+  const unresolved = asArray(threadConnection?.nodes).filter((thread) => thread?.isResolved !== true);
   if (unresolved.length > 0) {
     return {
       conclusion: "failure",
@@ -73,13 +68,9 @@ export function evaluateExactHeadReview(snapshot) {
     }
   }
 
-  const candidates = [
-    ...asArray(snapshot?.comments?.nodes),
-    ...asArray(snapshot?.reviews?.nodes),
-  ];
+  const candidates = [...asArray(snapshot?.comments?.nodes), ...asArray(snapshot?.reviews?.nodes)];
   const exactEvidence = candidates.find(
-    (entry) =>
-      REVIEW_BOT_LOGINS.has(entry?.author?.login) && evidenceMatchesHead(entry?.body, headSha),
+    (entry) => REVIEW_BOT_LOGINS.has(entry?.author?.login) && evidenceMatchesHead(entry?.body, headSha),
   );
   if (!exactEvidence) {
     return {
@@ -111,19 +102,12 @@ async function githubGraphql(token, query, variables) {
   });
   const body = await response.json();
   if (!response.ok || body.errors?.length) {
-    throw new Error(
-      `GitHub GraphQL request failed: ${JSON.stringify(body.errors ?? body)}`,
-    );
+    throw new Error(`GitHub GraphQL request failed: ${JSON.stringify(body.errors ?? body)}`);
   }
   return body.data;
 }
 
-export async function loadPullRequestSnapshot({
-  owner,
-  pullRequestNumber,
-  repository,
-  token,
-}) {
+export async function loadPullRequestSnapshot({ owner, pullRequestNumber, repository, token }) {
   const query = `
     query($owner: String!, $repository: String!, $number: Int!) {
       repository(owner: $owner, name: $repository) {
@@ -196,8 +180,7 @@ async function main() {
   if (result.conclusion !== "success") process.exitCode = 1;
 }
 
-const isMain =
-  process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   main().catch((error) => {
     console.error(`Exact-head review verification failed: ${error.message}`);
