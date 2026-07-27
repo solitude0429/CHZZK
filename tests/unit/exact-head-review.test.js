@@ -105,7 +105,12 @@ describe("exact-diff review verification", () => {
   });
 
   it("rejects any head or base transition after the request", () => {
-    for (const typename of ["PullRequestCommit", "HeadRefForcePushedEvent", "BaseRefChangedEvent"]) {
+    for (const typename of [
+      "PullRequestCommit",
+      "HeadRefForcePushedEvent",
+      "BaseRefChangedEvent",
+      "BaseRefForcePushedEvent",
+    ]) {
       const snapshot = passingSnapshot();
       snapshot.timelineItems.nodes.push(
         typename === "PullRequestCommit"
