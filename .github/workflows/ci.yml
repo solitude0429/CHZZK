@@ -27,6 +27,24 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
+      - name: Format workflow
+        continue-on-error: true
+        run: npx prettier --check .github/workflows/exact-head-review.yml
+      - name: Format documentation
+        continue-on-error: true
+        run: npx prettier --check docs/TESTING.md
+      - name: Format package metadata
+        continue-on-error: true
+        run: npx prettier --check package.json
+      - name: Format repository configurators
+        continue-on-error: true
+        run: npx prettier --check scripts/configure-exact-head-review.js scripts/configure-repository-all.js
+      - name: Format review verifier
+        continue-on-error: true
+        run: npx prettier --check scripts/verify-exact-head-review.js
+      - name: Format policy tests
+        continue-on-error: true
+        run: npx prettier --check tests/unit/exact-head-review-protection.test.js tests/unit/exact-head-review.test.js tests/unit/windows-wrapper-policy.test.js
       - name: Check formatting
         run: npm run format:check
       - name: Check generated runtime
