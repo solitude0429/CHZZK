@@ -29,10 +29,18 @@ export function evidenceMatchesHead(body, headSha) {
 export function evaluateExactHeadReview(snapshot) {
   const headSha = String(snapshot?.headRefOid ?? "").toLowerCase();
   if (!/^[a-f0-9]{40}$/.test(headSha)) {
-    return { conclusion: "failure", headSha: null, summary: "Pull request head SHA is invalid." };
+    return {
+      conclusion: "failure",
+      headSha: null,
+      summary: "Pull request head SHA is invalid.",
+    };
   }
   if (snapshot?.isDraft === true) {
-    return { conclusion: "failure", headSha, summary: "Pull request is still a draft." };
+    return {
+      conclusion: "failure",
+      headSha,
+      summary: "Pull request is still a draft.",
+    };
   }
 
   const threadConnection = snapshot?.reviewThreads;
@@ -43,7 +51,9 @@ export function evaluateExactHeadReview(snapshot) {
       summary: "Review thread pagination exceeded the verifier limit; refusing an incomplete result.",
     };
   }
-  const unresolved = asArray(threadConnection?.nodes).filter((thread) => thread?.isResolved !== true);
+  const unresolved = asArray(threadConnection?.nodes).filter(
+    (thread) => thread?.isResolved !== true,
+  );
   if (unresolved.length > 0) {
     return {
       conclusion: "failure",
@@ -101,12 +111,19 @@ async function githubGraphql(token, query, variables) {
   });
   const body = await response.json();
   if (!response.ok || body.errors?.length) {
-    throw new Error(`GitHub GraphQL request failed: ${JSON.stringify(body.errors ?? body)}`);
+    throw new Error(
+      `GitHub GraphQL request failed: ${JSON.stringify(body.errors ?? body)}`,
+    );
   }
   return body.data;
 }
 
-export async function loadPullRequestSnapshot({ owner, pullRequestNumber, repository, token }) {
+export async function loadPullRequestSnapshot({
+  owner,
+  pullRequestNumber,
+  repository,
+  token,
+}) {
   const query = `
     query($owner: String!, $repository: String!, $number: Int!) {
       repository(owner: $owner, name: $repository) {
@@ -141,7 +158,9 @@ export async function loadPullRequestSnapshot({ owner, pullRequestNumber, reposi
 
 function requiredEnvironment(name) {
   const value = process.env[name];
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name} is required`);
+  }
   return value.trim();
 }
 
@@ -157,20 +176,28 @@ function writeOutputs(result) {
 
 async function main() {
   const [owner, repository] = requiredEnvironment("GITHUB_REPOSITORY").split("/");
-  if (!owner || !repository) throw new Error("GITHUB_REPOSITORY must be owner/name");
+  if (!owner || !repository) {
+    throw new Error("GITHUB_REPOSITORY must be owner/name");
+  }
   const pullRequestNumber = Number(requiredEnvironment("CHZZK_PR_NUMBER"));
   if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
     throw new Error("CHZZK_PR_NUMBER must be a positive integer");
   }
   const token = requiredEnvironment("GITHUB_TOKEN");
-  const snapshot = await loadPullRequestSnapshot({ owner, pullRequestNumber, repository, token });
+  const snapshot = await loadPullRequestSnapshot({
+    owner,
+    pullRequestNumber,
+    repository,
+    token,
+  });
   const result = evaluateExactHeadReview(snapshot);
   writeOutputs(result);
   console.log(JSON.stringify(result));
   if (result.conclusion !== "success") process.exitCode = 1;
 }
 
-const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+const isMain =
+  process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   main().catch((error) => {
     console.error(`Exact-head review verification failed: ${error.message}`);
