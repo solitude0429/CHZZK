@@ -21,7 +21,7 @@
     "build:runtime": "node scripts/build-runtime.js",
     "build:update-manifest": "node scripts/build-update-manifest.js",
     "check:generated": "node scripts/check-generated.js",
-    "configure:repository": "node scripts/configure-repository-all.js",
+    "configure:repository": "node scripts/configure-repository.js",
     "deploy:updates:internal": "node scripts/deploy-internal-updates.js",
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check \"**/*.{js,mjs,json,md,yml}\" --ignore-path .prettierignore",
