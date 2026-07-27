@@ -187,6 +187,13 @@ async function loadBackground({
           listeners.extraInfoSpec = extraInfoSpec;
         },
       },
+      onHeadersReceived: {
+        addListener(fn, filter, extraInfoSpec) {
+          listeners.onHeadersReceived = fn;
+          listeners.headersFilter = filter;
+          listeners.headersExtraInfoSpec = extraInfoSpec;
+        },
+      },
       onCompleted: {
         addListener(fn) {
           listeners.onCompleted = fn;
@@ -278,6 +285,11 @@ function deliverFilteredResponse(responseFilters, requestId, body) {
           return output;
         }, new Uint8Array()),
   );
+}
+
+function deliverObservedMasterResponse(listeners, responseFilters, requestId, url, body, statusCode = 200) {
+  listeners.onHeadersReceived({ requestId, statusCode, url });
+  return deliverFilteredResponse(responseFilters, requestId, body);
 }
 
 async function observeRedirectTarget(listeners, details, redirectUrl) {
@@ -1591,6 +1603,98 @@ describe("background runtime quality resolution", () => {
     }
   });
 
+  it("treats Firefox client-cancellation error variants as neutral in either event order", async () => {
+    for (const [errorName, eventOrder] of [
+      ["NS_BINDING_ABORTED", "filter-first"],
+      ["NS_BINDING_ABORTED", "request-first"],
+      ["NS_ERROR_ABORT", "filter-first"],
+      ["NS_ERROR_ABORT", "request-first"],
+    ]) {
+      const { fetches, listeners, responseFilters, storage } = await loadBackground({
+        availableQualities: new Set(["1080p", "720p"]),
+      });
+      const family = `client-cancel-${errorName.toLowerCase()}-${eventOrder}`;
+      const requestId = `${family}-redirect`;
+      const request = familyRequest(631, family, requestId);
+      const first = plain(await listeners.onBeforeRequest(request));
+      assert.match(first.redirectUrl, /chunklist_1080p/);
+      await observeRedirectTarget(listeners, request, first.redirectUrl);
+      const filter = responseFilters.get(requestId);
+      assert.ok(filter);
+
+      const requestError = () =>
+        listeners.onErrorOccurred({
+          error: errorName,
+          requestId,
+          tabId: 631,
+          url: first.redirectUrl,
+        });
+      if (eventOrder === "filter-first") {
+        filter.onerror();
+        requestError();
+      } else {
+        requestError();
+        filter.onerror();
+      }
+
+      const fetchCountAfterSelection = fetches.length;
+      const next = listeners.onBeforeRequest(familyRequest(631, family, `${family}-next`));
+      assert.equal(typeof next?.then, "undefined");
+      assert.match(plain(next).redirectUrl, /chunklist_1080p/);
+      assert.equal(
+        fetches.length,
+        fetchCountAfterSelection,
+        "a cancelled overlapping request must not trigger a lower-quality scan",
+      );
+      await waitForDiagnosticsQueue();
+      assert.equal(storage.chzzkDiagnostics.runtimeTransitions.at(-1).action, "ignored");
+      assert.equal(storage.chzzkDiagnostics.runtimeTransitions.at(-1).reason, "client-cancelled");
+    }
+  });
+
+  it("retries a genuinely failed higher target at backoff expiry instead of waiting a minute", async () => {
+    const availableQualities = new Set(["1080p", "720p"]);
+    const { advanceClock, fetches, listeners } = await loadBackground({
+      availableQualities,
+    });
+    const family = "bounded-failure-retry";
+    const firstRequest = familyRequest(632, family, "failed-high");
+    const first = plain(await listeners.onBeforeRequest(firstRequest));
+    assert.match(first.redirectUrl, /chunklist_1080p/);
+    listeners.onErrorOccurred({
+      error: "NS_ERROR_NET_RESET",
+      requestId: firstRequest.requestId,
+      tabId: 632,
+      url: first.redirectUrl,
+    });
+
+    availableQualities.delete("1080p");
+    const fallback = plain(await listeners.onBeforeRequest(familyRequest(632, family, "fallback-low")));
+    assert.match(fallback.redirectUrl, /chunklist_720p/);
+    const fetchCountAfterFallback = fetches.length;
+
+    advanceClock(9_000);
+    const beforeExpiry = listeners.onBeforeRequest(familyRequest(632, family, "before-backoff-expiry"));
+    assert.equal(typeof beforeExpiry?.then, "undefined");
+    assert.match(plain(beforeExpiry).redirectUrl, /chunklist_720p/);
+    assert.equal(fetches.length, fetchCountAfterFallback);
+
+    availableQualities.add("1080p");
+    advanceClock(1_001);
+    const retrying = listeners.onBeforeRequest(familyRequest(632, family, "at-backoff-expiry"));
+    assert.equal(typeof retrying?.then, "undefined");
+    assert.match(plain(retrying).redirectUrl, /chunklist_720p/);
+    await waitForDiagnosticsQueue(20);
+
+    const promoted = listeners.onBeforeRequest(familyRequest(632, family, "after-bounded-retry"));
+    assert.equal(typeof promoted?.then, "undefined");
+    assert.match(plain(promoted).redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.some((url) => url.includes(family) && url.includes("1080p")),
+      true,
+    );
+  });
+
   it("invalidates bodyless redirected playlist responses instead of renewing the target", async () => {
     for (const statusCode of [204, 205]) {
       const family = `bodyless-${statusCode}`;
@@ -2193,6 +2297,191 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     assert.equal(diagnostics.decisions.at(-1).redirectedCurrentRequest, true);
   });
 
+  it("scores the actual master response before the first rendition request without a duplicate fetch", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p_highbitrate.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
+720p/segment/chunklist_720p_highbitrate.m3u8?Policy=redacted
+`;
+    const { fetches, listeners, responseFilters } = await loadBackground();
+
+    assert.equal(
+      listeners.onBeforeRequest({
+        documentUrl: "https://chzzk.naver.com/live/example-channel",
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        requestId: "observed-master",
+        tabId: 431,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    assert.equal(
+      responseFilters.has("observed-master"),
+      false,
+      "the master filter must wait until a successful response status is known",
+    );
+    assert.equal(
+      deliverObservedMasterResponse(listeners, responseFilters, "observed-master", masterUrl, masterPlaylist),
+      masterPlaylist,
+      "master response bytes must reach CHZZK unchanged",
+    );
+    assert.deepEqual(plain(listeners.headersExtraInfoSpec), ["blocking"]);
+
+    const firstRendition = listeners.onBeforeRequest({
+      ...firstLowQualityRequest(431),
+      url: firstLowQualityRequest(431).url.replace("chunklist_480p.m3u8", "chunklist_480p_highbitrate.m3u8"),
+    });
+    assert.equal(
+      typeof firstRendition?.then,
+      "undefined",
+      "the first rendition request must reuse master evidence synchronously",
+    );
+    assert.match(plain(firstRendition).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    assert.deepEqual(fetches, [], "master response scoring must not issue a second master request");
+  });
+
+  it("does not seed a target from a non-success master response even when its body looks valid", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const { listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["720p"]),
+    });
+    listeners.onBeforeRequest({
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      requestId: "failed-master-status",
+      tabId: 434,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    });
+    listeners.onHeadersReceived({
+      requestId: "failed-master-status",
+      statusCode: 404,
+      url: masterUrl,
+    });
+    assert.equal(
+      responseFilters.has("failed-master-status"),
+      false,
+      "a failed master response must not be consumed or scored",
+    );
+
+    const firstRendition = plain(await listeners.onBeforeRequest(firstLowQualityRequest(434)));
+    assert.match(firstRendition.redirectUrl, /chunklist_720p\.m3u8/);
+  });
+
+  it("does not let a later lower master response overwrite a valid higher target", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const highMaster = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p.m3u8?Policy=redacted
+`;
+    const lowerMaster = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
+720p/segment/chunklist_720p.m3u8?Policy=redacted
+`;
+    const { listeners, responseFilters, storage } = await loadBackground();
+    const request = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      tabId: 432,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    };
+
+    listeners.onBeforeRequest({ ...request, requestId: "higher-master" });
+    listeners.onBeforeRequest({ ...request, requestId: "lower-master" });
+    deliverObservedMasterResponse(listeners, responseFilters, "higher-master", masterUrl, highMaster);
+    deliverObservedMasterResponse(listeners, responseFilters, "lower-master", masterUrl, lowerMaster);
+
+    const rendition = plain(listeners.onBeforeRequest(firstLowQualityRequest(432)));
+    assert.match(rendition.redirectUrl, /chunklist_1080p\.m3u8/);
+    await waitForDiagnosticsQueue();
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeTransitions.at(-1)), {
+      action: "blocked",
+      fromQuality: "1080p",
+      reason: "lower-quality",
+      seenAt: storage.chzzkDiagnostics.runtimeTransitions.at(-1).seenAt,
+      source: "master-response",
+      toQuality: "720p",
+    });
+  });
+
+  it("falls back to the bounded master probe only when response filtering is unavailable", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p.m3u8?Policy=redacted
+`;
+    const { fetches, listeners } = await loadBackground({
+      filterResponseDataAvailable: false,
+      responsesByUrl: new Map([[masterUrl, masterPlaylist]]),
+    });
+
+    assert.equal(
+      listeners.onBeforeRequest({
+        documentUrl: "https://chzzk.naver.com/live/example-channel",
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        requestId: "fallback-master",
+        tabId: 433,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    await waitForDiagnosticsQueue(20);
+
+    assert.deepEqual(fetches, [masterUrl]);
+    assert.match(
+      plain(listeners.onBeforeRequest(firstLowQualityRequest(433))).redirectUrl,
+      /chunklist_1080p\.m3u8/,
+    );
+  });
+
+  it("falls back to the bounded master probe when successful-response filter attachment fails", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p.m3u8?Policy=redacted
+`;
+    const { fetches, listeners } = await loadBackground({
+      filterResponseDataThrows: true,
+      responsesByUrl: new Map([[masterUrl, masterPlaylist]]),
+    });
+
+    listeners.onBeforeRequest({
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      requestId: "throwing-master-filter",
+      tabId: 435,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    });
+    listeners.onHeadersReceived({
+      requestId: "throwing-master-filter",
+      statusCode: 200,
+      url: masterUrl,
+    });
+    await waitForDiagnosticsQueue(20);
+
+    assert.deepEqual(fetches, [masterUrl]);
+    assert.match(
+      plain(listeners.onBeforeRequest(firstLowQualityRequest(435))).redirectUrl,
+      /chunklist_1080p\.m3u8/,
+    );
+  });
+
   it("lets a real CHZZK hls_playlist master promote an already cached lower rendition", async () => {
     const masterUrl =
       "https://livecloud.akamaized.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
@@ -2753,7 +3042,7 @@ describe("static-analysis remediation regressions", () => {
       "chunklist_1440p.m3u8?Policy=synthetic",
       "",
     ].join("\n");
-    const { fetches, listeners } = await loadBackground({
+    const { fetches, listeners, responseFilters } = await loadBackground({
       responsesByUrl: new Map([[masterUrl, { body: masterBody }]]),
     });
 
@@ -2769,13 +3058,18 @@ describe("static-analysis remediation regressions", () => {
       }),
       undefined,
     );
+    assert.equal(
+      deliverObservedMasterResponse(listeners, responseFilters, "master-fallback", masterUrl, masterBody),
+      masterBody,
+      "observed master bytes must pass through unchanged",
+    );
     await waitForDiagnosticsQueue(20);
 
     const redirect = plain(
       await listeners.onBeforeRequest(familyRequest(811, "master-fallback", "master-low")),
     );
     assert.match(redirect.redirectUrl, /master-fallback\/chunklist_1440p\.m3u8/);
-    assert.deepEqual(fetches, [masterUrl]);
+    assert.deepEqual(fetches, [], "the observed master response must avoid a duplicate scoring fetch");
   });
 
   it("rejects an EXTM3U-only candidate and downgrades to usable evidence", async () => {

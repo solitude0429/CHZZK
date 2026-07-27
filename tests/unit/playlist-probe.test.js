@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { createPlaylistProbe, networkRequestUrl } from "../../src/runtime/playlist-probe.js";
+import { playlistFamilyKey } from "../../src/shared/quality.js";
 
 const policy = Object.freeze({
   minRedirectQuality: "100p",
@@ -114,10 +115,29 @@ chunklist_1080p.m3u8?Policy=synthetic
       policy,
     });
 
-    assert.deepEqual(await probe.resolveBestVariantFromMaster({ url: masterUrl }), {
+    const expected = {
       evidenceKind: "master",
+      targetDedicatedHls: false,
+      targetFamilyKey: playlistFamilyKey(
+        "https://edge.pstatic.net/chzzk/channel/chunklist_1440p.m3u8?Policy=synthetic",
+      ),
       targetQuality: "1440p",
-    });
+    };
+    assert.deepEqual(await probe.resolveBestVariantFromMaster({ url: masterUrl }), expected);
+    assert.deepEqual(
+      probe.resolveBestVariantFromEvidence({
+        finalUrl: masterUrl,
+        text: master,
+      }),
+      expected,
+    );
+    assert.equal(
+      probe.resolveBestVariantFromEvidence({
+        finalUrl: "https://untrusted.example.invalid/master.m3u8",
+        text: master,
+      }),
+      null,
+    );
   });
 
   it("does not cap an advertised master quality to the numeric fallback candidate grid", async () => {
@@ -135,6 +155,10 @@ chunklist_2160p.m3u8?Policy=synthetic
 
     assert.deepEqual(await probe.resolveBestVariantFromMaster({ url: masterUrl }), {
       evidenceKind: "master",
+      targetDedicatedHls: false,
+      targetFamilyKey: playlistFamilyKey(
+        "https://edge.pstatic.net/chzzk/channel/chunklist_4320p.m3u8?Policy=synthetic",
+      ),
       targetQuality: "4320p",
     });
   });

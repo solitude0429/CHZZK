@@ -1,11 +1,12 @@
 import { isUsableHlsPlaylist, isUtf8TextWithinByteLimit } from "../shared/playlist-evidence.js";
-import { isTrustedRequestDomain } from "../shared/request-policy.js";
+import { isDedicatedChzzkHlsPlaylistUrl, isTrustedRequestDomain } from "../shared/request-policy.js";
 import {
   chooseBestHlsVariantFromVariants,
   normalizeQualityCandidates,
   parseHlsMasterPlaylistVariants,
   parseQualitiesFromUrl,
   parseQualityFromUrl,
+  playlistFamilyKey,
   qualityNumber,
   replaceQualityInUrl,
   urlQualityMarkersAreSafe,
@@ -206,7 +207,17 @@ export function createPlaylistProbe({
   ) {
     const evidence = await fetchPlaylistEvidence(details.url, { signal });
     if (!evidence || signal?.aborted) return null;
+    return resolveBestVariantFromEvidence(evidence, { skipTargetQualities });
+  }
 
+  function resolveBestVariantFromEvidence(evidence, { skipTargetQualities = new Set() } = {}) {
+    if (
+      !evidence ||
+      !isUsableHlsPlaylist(evidence.text) ||
+      !isTrustedRequestDomain(evidence.finalUrl, policy)
+    ) {
+      return null;
+    }
     const eligibleVariants = parseHlsMasterPlaylistVariants(evidence.text, evidence.finalUrl).filter(
       (candidate) => {
         const candidateQuality = bestVariantTargetQuality(candidate);
@@ -223,13 +234,22 @@ export function createPlaylistProbe({
       minRedirectQuality: policy.minRedirectQuality,
     });
     const targetQuality = bestVariantTargetQuality(variant);
-    return variant?.url && targetQuality ? { evidenceKind: "master", targetQuality } : null;
+    const targetFamilyKey = playlistFamilyKey(variant?.url);
+    return variant?.url && targetQuality && targetFamilyKey
+      ? {
+          evidenceKind: "master",
+          targetDedicatedHls: isDedicatedChzzkHlsPlaylistUrl(variant.url, policy),
+          targetFamilyKey,
+          targetQuality,
+        }
+      : null;
   }
 
   return Object.freeze({
     fetchPlaylistEvidence,
     playlistEvidenceSupportsExpectedQuality,
     probeMaxBytes: () => probeMaxBytes,
+    resolveBestVariantFromEvidence,
     resolveBestVariantFromMaster,
     resolveHighestSupportedQuality,
     urlQualityMarkersMatch,
