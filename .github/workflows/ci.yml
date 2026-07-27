@@ -2,20 +2,22 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: ["feat/**", "fix/**", "main"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-review-hardening-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  format-and-harden-artifact:
+  verify:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,198 +27,54 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Enforce protected default-branch history in the settings source
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
+      - name: Check formatting
+        run: npm run format:check
+      - name: Check generated runtime
+        run: npm run check:generated
+      - name: Validate manifest
+        run: npm run validate:manifest
+      - name: Validate project cleanliness
+        run: npm run validate:project
+      - name: Validate workflows
+        run: npm run validate:workflows
+      - name: Run ESLint
+        run: npm run lint
+      - name: Run web-ext lint
+        run: npm run lint:webext
+      - name: Run unit tests
+        run: npm test
+      - name: Check coverage
+        run: npm run test:coverage
+      - name: Run audit fuzzing
+        run: npm run test:audit-fuzz
+      - name: Audit dependencies
+        run: npm run audit:deps
+      - name: Build extension
+        run: npm run build
+      - name: Audit package
+        run: npm run audit:package
 
-          configurator = Path("scripts/configure-repository.js")
-          source = configurator.read_text()
-          old_condition = (
-              "  if (\n"
-              "    state.branchProtection.required_conversation_resolution?.enabled !== true ||\n"
-              "    state.branchProtection.required_pull_request_reviews != null\n"
-              "  ) {\n"
-              "    changes.push({ kind: \"pull-request-protection\" });\n"
-              "  }\n"
-          )
-          new_condition = (
-              "  if (\n"
-              "    state.branchProtection.allow_deletions?.enabled !== false ||\n"
-              "    state.branchProtection.allow_force_pushes?.enabled !== false ||\n"
-              "    state.branchProtection.required_conversation_resolution?.enabled !== true ||\n"
-              "    state.branchProtection.required_pull_request_reviews != null\n"
-              "  ) {\n"
-              "    changes.push({ kind: \"pull-request-protection\" });\n"
-              "  }\n"
-          )
-          if source.count(old_condition) != 1:
-              raise RuntimeError("repository protection planning source did not match exactly")
-          source = source.replace(old_condition, new_condition)
-          old_update = (
-              "    allow_deletions: enabledProtection(protection, \"allow_deletions\"),\n"
-              "    allow_force_pushes: enabledProtection(protection, \"allow_force_pushes\"),\n"
-          )
-          new_update = "    allow_deletions: false,\n    allow_force_pushes: false,\n"
-          if source.count(old_update) != 1:
-              raise RuntimeError("repository protection update source did not match exactly")
-          configurator.write_text(source.replace(old_update, new_update))
-
-          settings_test = Path("tests/unit/repository-settings.test.js")
-          test_source = settings_test.read_text()
-          old_fixture = (
-              "    branchProtection: {\n"
-              "      enforce_admins: { enabled: true },\n"
-          )
-          new_fixture = (
-              "    branchProtection: {\n"
-              "      allow_deletions: { enabled: false },\n"
-              "      allow_force_pushes: { enabled: false },\n"
-              "      enforce_admins: { enabled: true },\n"
-          )
-          if test_source.count(old_fixture) != 1:
-              raise RuntimeError("repository settings fixture did not match exactly")
-          settings_test.write_text(test_source.replace(old_fixture, new_fixture))
-          PY
-      - name: Format changed source, policy, and tests
-        run: |
-          npx prettier --write \
-            .github/PULL_REQUEST_TEMPLATE/hardening.md \
-            .github/workflows/ci.yml \
-            .github/workflows/exact-head-review.yml \
-            docs/OPERATIONS.md \
-            docs/SECURITY.md \
-            scripts/configure-repository.js \
-            scripts/verify-exact-head-review.js \
-            tests/unit/exact-head-review-protection.test.js \
-            tests/unit/exact-head-review.test.js \
-            tests/unit/repository-settings.test.js \
-            tests/unit/windows-wrapper-policy.test.js
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          if-no-files-found: error
-          name: review-hardening-${{ github.event.pull_request.head.sha }}
-          path: |
-            .github/PULL_REQUEST_TEMPLATE/hardening.md
-            .github/workflows/ci.yml
-            .github/workflows/exact-head-review.yml
-            docs/OPERATIONS.md
-            docs/SECURITY.md
-            scripts/configure-repository.js
-            scripts/verify-exact-head-review.js
-            tests/unit/exact-head-review-protection.test.js
-            tests/unit/exact-head-review.test.js
-            tests/unit/repository-settings.test.js
-            tests/unit/windows-wrapper-policy.test.js
-          retention-days: 1
-
-  apply-review-hardening:
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor == github.repository_owner
-    needs: format-and-harden-artifact
+  firefox-e2e:
     permissions:
-      actions: read
-      contents: write
+      contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: review-hardening-${{ github.event.pull_request.head.sha }}
-          path: formatted
-      - name: Apply the exact allowlisted hardening artifact as one commit
-        env:
-          CHZZK_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CHZZK_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          GITHUB_TOKEN: ${{ github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: npm
+          node-version: 22
+      - run: npm ci
+      - run: npm run setup:firefox-e2e
+      - name: Run Firefox functional E2E three times
         run: |
-          python3 - <<'PY'
-          import base64
-          import json
-          import os
-          import pathlib
-          import urllib.parse
-          import urllib.request
-
-          repository = os.environ["GITHUB_REPOSITORY"]
-          token = os.environ["GITHUB_TOKEN"]
-          expected_head = os.environ["CHZZK_EXPECTED_HEAD_SHA"]
-          head_ref = os.environ["CHZZK_HEAD_REF"]
-          root = pathlib.Path("formatted")
-          expected_paths = [
-              ".github/PULL_REQUEST_TEMPLATE/hardening.md",
-              ".github/workflows/exact-head-review.yml",
-              "docs/OPERATIONS.md",
-              "docs/SECURITY.md",
-              "scripts/configure-repository.js",
-              "scripts/verify-exact-head-review.js",
-              "tests/unit/exact-head-review-protection.test.js",
-              "tests/unit/exact-head-review.test.js",
-              "tests/unit/repository-settings.test.js",
-              "tests/unit/windows-wrapper-policy.test.js",
-          ]
-          actual_paths = sorted(
-              str(path.relative_to(root))
-              for path in root.rglob("*")
-              if path.is_file() and str(path.relative_to(root)) != ".github/workflows/ci.yml"
-          )
-          if actual_paths != expected_paths:
-              raise RuntimeError(f"hardening artifact paths are invalid: {actual_paths}")
-
-          headers = {
-              "Accept": "application/vnd.github+json",
-              "Authorization": f"Bearer {token}",
-              "Content-Type": "application/json",
-              "User-Agent": "chzzk-review-hardening-bootstrap",
-              "X-GitHub-Api-Version": "2022-11-28",
-          }
-
-          def request(method, path, payload=None):
-              data = None if payload is None else json.dumps(payload).encode()
-              req = urllib.request.Request(
-                  f"https://api.github.com{path}", data=data, headers=headers, method=method
-              )
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  return json.load(response)
-
-          encoded_ref = urllib.parse.quote(f"heads/{head_ref}", safe="/")
-          ref = request("GET", f"/repos/{repository}/git/ref/{encoded_ref}")
-          current_head = ref["object"]["sha"]
-          if current_head != expected_head:
-              raise RuntimeError("pull-request head moved before hardening artifact application")
-          commit = request("GET", f"/repos/{repository}/git/commits/{current_head}")
-          base_tree = commit["tree"]["sha"]
-          entries = []
-          for path in expected_paths:
-              content = (root / path).read_bytes()
-              blob = request(
-                  "POST",
-                  f"/repos/{repository}/git/blobs",
-                  {"content": base64.b64encode(content).decode(), "encoding": "base64"},
-              )
-              entries.append({"mode": "100644", "path": path, "sha": blob["sha"], "type": "blob"})
-          tree = request(
-              "POST",
-              f"/repos/{repository}/git/trees",
-              {"base_tree": base_tree, "tree": entries},
-          )
-          if tree["sha"] == base_tree:
-              print("Review hardening files already match the branch.")
-              raise SystemExit(0)
-          new_commit = request(
-              "POST",
-              f"/repos/{repository}/git/commits",
-              {
-                  "message": "chore: apply formatted review hardening",
-                  "parents": [current_head],
-                  "tree": tree["sha"],
-              },
-          )
-          request(
-              "PATCH",
-              f"/repos/{repository}/git/refs/{encoded_ref}",
-              {"force": False, "sha": new_commit["sha"]},
-          )
-          print(f"Applied review hardening commit {new_commit['sha']}.")
-          PY
+          for iteration in 1 2 3; do
+            echo "Firefox functional E2E iteration ${iteration}/3"
+            npm run test:firefox-e2e
+          done
+        env:
+          FIREFOX_BINARY: ${{ github.workspace }}/dist/e2e-tools/firefox/firefox
+          GECKODRIVER_BINARY: ${{ github.workspace }}/dist/e2e-tools/geckodriver
