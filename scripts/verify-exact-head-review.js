@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const REVIEW_BOT_LOGINS = new Set(["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"]);
 const SUCCESS_RE = /Codex Review:\s*Didn['’]t find any major issues/i;
-const REVIEWED_COMMIT_RE = /Reviewed commit:\*?\*?\s*`?([a-f0-9]{7,40})`?/i;
+const REVIEWED_COMMIT_RE = /Reviewed commit:\*?\*?\s*`?([a-f0-9]{40})`?/i;
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -20,7 +20,7 @@ export function evidenceMatchesHead(body, headSha) {
   if (typeof body !== "string" || typeof headSha !== "string") return false;
   if (!SUCCESS_RE.test(body)) return false;
   const reviewed = reviewedCommit(body);
-  return Boolean(reviewed && headSha.toLowerCase().startsWith(reviewed));
+  return Boolean(reviewed && reviewed === headSha.toLowerCase());
 }
 
 export function evaluateExactHeadReview(snapshot) {
@@ -57,26 +57,23 @@ export function evaluateExactHeadReview(snapshot) {
     };
   }
 
-  for (const connection of [snapshot?.comments, snapshot?.reviews]) {
-    const pageInfo = connection?.pageInfo;
-    if (pageInfo?.hasPreviousPage || pageInfo?.hasNextPage) {
-      return {
-        conclusion: "failure",
-        headSha,
-        summary: "Review evidence pagination exceeded the verifier limit; refusing an incomplete result.",
-      };
-    }
+  const comments = snapshot?.comments;
+  if (comments?.pageInfo?.hasPreviousPage || comments?.pageInfo?.hasNextPage) {
+    return {
+      conclusion: "failure",
+      headSha,
+      summary: "Review evidence pagination exceeded the verifier limit; refusing an incomplete result.",
+    };
   }
 
-  const candidates = [...asArray(snapshot?.comments?.nodes), ...asArray(snapshot?.reviews?.nodes)];
-  const exactEvidence = candidates.find(
+  const exactEvidence = asArray(comments?.nodes).find(
     (entry) => REVIEW_BOT_LOGINS.has(entry?.author?.login) && evidenceMatchesHead(entry?.body, headSha),
   );
   if (!exactEvidence) {
     return {
       conclusion: "failure",
       headSha,
-      summary: `No successful Codex review evidence names the exact current head ${headSha.slice(0, 12)}.`,
+      summary: `No successful Codex issue-comment review names the exact current head ${headSha.slice(0, 12)}.`,
     };
   }
 
@@ -117,10 +114,6 @@ export async function loadPullRequestSnapshot({ owner, pullRequestNumber, reposi
           comments(last: 100) {
             pageInfo { hasNextPage hasPreviousPage }
             nodes { author { login } body createdAt }
-          }
-          reviews(last: 100) {
-            pageInfo { hasNextPage hasPreviousPage }
-            nodes { author { login } body submittedAt }
           }
           reviewThreads(first: 100) {
             pageInfo { hasNextPage }
