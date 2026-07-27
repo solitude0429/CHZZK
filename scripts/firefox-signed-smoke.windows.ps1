@@ -42,15 +42,21 @@ function Resolve-RegularFile {
         [switch]$RequireAbsolute
     )
 
-    if ($RequireAbsolute -and -not [IO.Path]::IsPathFullyQualified($Path)) {
-        throw "$Label must be an explicit absolute path."
+    if ($RequireAbsolute) {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        if (
+            -not [IO.Path]::IsPathRooted($Path) -or
+            -not [string]::Equals(
+                $fullPath,
+                $Path,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            throw "$Label must be an explicit canonical absolute path."
+        }
     }
 
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
-    if ($RequireAbsolute -and -not [IO.Path]::IsPathFullyQualified($resolved)) {
-        throw "$Label did not resolve to an absolute path."
-    }
-
     $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
     if (
         $item.PSIsContainer -or
