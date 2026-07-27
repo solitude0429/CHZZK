@@ -34,6 +34,11 @@ function normalizedBaseRef(value) {
   return ref && !/[\s`@]/.test(ref) ? ref : null;
 }
 
+function normalizedDateTime(value) {
+  if (typeof value !== "string" || value === "" || !Number.isFinite(Date.parse(value))) return null;
+  return value;
+}
+
 function pullRequestIdentity(snapshot) {
   return {
     baseRefName: normalizedBaseRef(snapshot?.baseRefName),
@@ -44,14 +49,25 @@ function pullRequestIdentity(snapshot) {
 
 function evaluationResult(
   snapshot,
-  { conclusion = "failure", retryable = false, shouldPublish = true, summary },
+  {
+    conclusion = "failure",
+    evidenceCreatedAt = null,
+    evidenceId = null,
+    requestCommentId = null,
+    retryable = false,
+    shouldPublish = true,
+    summary,
+  },
 ) {
   const { baseRefName, baseSha, headSha } = pullRequestIdentity(snapshot);
   return {
     baseRefName,
     baseSha,
     conclusion,
+    evidenceCreatedAt,
+    evidenceId,
     headSha,
+    requestCommentId,
     retryable,
     shouldPublish,
     summary,
@@ -80,26 +96,33 @@ export function reviewRequestMatchesSnapshot(body, snapshot) {
   const identity = pullRequestIdentity(snapshot);
   return Boolean(
     request &&
-    identity.headSha &&
-    identity.baseRefName &&
-    identity.baseSha &&
-    request.headSha === identity.headSha &&
-    request.baseRefName === identity.baseRefName &&
-    request.baseSha === identity.baseSha,
+      identity.headSha &&
+      identity.baseRefName &&
+      identity.baseSha &&
+      request.headSha === identity.headSha &&
+      request.baseRefName === identity.baseRefName &&
+      request.baseSha === identity.baseSha,
   );
 }
 
-function reactionUsers(group) {
-  const users = group?.users;
-  if (users?.pageInfo?.hasNextPage) return null;
-  return asArray(users?.nodes);
-}
-
-function hasSuccessfulBotReaction(entry) {
-  const thumbsUp = asArray(entry?.reactionGroups).find((group) => group?.content === "THUMBS_UP");
-  const users = reactionUsers(thumbsUp);
-  if (users === null) return null;
-  return users.some((user) => REVIEW_BOT_LOGINS.has(user?.login));
+function successfulBotReaction(entry) {
+  const reactions = entry?.reactions;
+  if (reactions?.pageInfo?.hasNextPage) return null;
+  for (const reaction of asArray(reactions?.nodes)) {
+    if (!REVIEW_BOT_LOGINS.has(reaction?.user?.login)) continue;
+    const createdAt = normalizedDateTime(reaction?.createdAt);
+    const databaseId = Number(reaction?.databaseId);
+    if (
+      reaction?.content !== "THUMBS_UP" ||
+      !createdAt ||
+      !Number.isSafeInteger(databaseId) ||
+      databaseId < 1
+    ) {
+      return null;
+    }
+    return { createdAt, databaseId };
+  }
+  return false;
 }
 
 function timelineRequest(snapshot, commentId) {
@@ -147,6 +170,14 @@ function eventBodyContainsReviewRequest(context) {
   );
 }
 
+function pullRequestEditedAfterRequest(snapshot, comment) {
+  if (snapshot?.lastEditedAt == null) return false;
+  const lastEditedAt = normalizedDateTime(snapshot.lastEditedAt);
+  const requestCreatedAt = normalizedDateTime(comment?.createdAt);
+  if (!lastEditedAt || !requestCreatedAt) return null;
+  return Date.parse(lastEditedAt) > Date.parse(requestCreatedAt);
+}
+
 export function evaluateExactHeadReview(snapshot, context = {}) {
   const identity = pullRequestIdentity(snapshot);
   if (!identity.headSha || !identity.baseRefName || !identity.baseSha) {
@@ -162,27 +193,22 @@ export function evaluateExactHeadReview(snapshot, context = {}) {
   }
 
   const pullRequestAuthor = snapshot?.author?.login;
-  const trustedRequester = context.eventTrustedRequester;
-  const requesterAuthorized =
-    typeof context.eventCommentAuthor === "string" &&
-    (context.eventCommentAuthor === pullRequestAuthor ||
-      (typeof trustedRequester === "string" &&
-        trustedRequester !== "" &&
-        context.eventCommentAuthor === trustedRequester));
   if (
     typeof pullRequestAuthor !== "string" ||
-    !requesterAuthorized ||
+    context.eventCommentAuthor !== pullRequestAuthor ||
     !eventBodyContainsReviewRequest(context)
   ) {
-    return skippedResult(
-      snapshot,
-      "The comment is not an exact-diff request from the PR author or trusted operator.",
-    );
+    return skippedResult(snapshot, "The comment is not an exact-diff request from the PR author.");
   }
 
   if (context.eventAction !== "created") {
     return evaluationResult(snapshot, {
       summary: "The exact-diff review request was edited or deleted; submit a new unedited request.",
+    });
+  }
+  if (snapshot?.isDraft !== true) {
+    return evaluationResult(snapshot, {
+      summary: "The pull request must remain draft until the exact-diff review is attested.",
     });
   }
 
@@ -200,7 +226,7 @@ export function evaluateExactHeadReview(snapshot, context = {}) {
   const comment = request.comment;
   if (comment?.author?.login !== context.eventCommentAuthor) {
     return evaluationResult(snapshot, {
-      summary: "The review-request comment author does not match the triggering actor.",
+      summary: "The review-request comment author does not match the pull-request author.",
     });
   }
   if (
@@ -210,6 +236,17 @@ export function evaluateExactHeadReview(snapshot, context = {}) {
   ) {
     return evaluationResult(snapshot, {
       summary: "The review-request comment was edited after creation.",
+    });
+  }
+  const editedAfterRequest = pullRequestEditedAfterRequest(snapshot, comment);
+  if (editedAfterRequest === null) {
+    return evaluationResult(snapshot, {
+      summary: "Pull-request edit timestamps are malformed.",
+    });
+  }
+  if (editedAfterRequest) {
+    return evaluationResult(snapshot, {
+      summary: "The pull-request title or body was edited after the review request.",
     });
   }
   if (!reviewRequestMatchesSnapshot(comment?.body, snapshot)) {
@@ -225,28 +262,36 @@ export function evaluateExactHeadReview(snapshot, context = {}) {
     });
   }
   const unresolved = asArray(threadConnection?.nodes).filter((thread) => thread?.isResolved !== true);
-
-  const reacted = hasSuccessfulBotReaction(comment);
-  if (reacted === null) {
-    return evaluationResult(snapshot, {
-      summary: "Codex reaction pagination exceeded the verifier limit; refusing an incomplete result.",
-    });
-  }
-  if (!reacted) {
-    return evaluationResult(snapshot, {
-      retryable: true,
-      summary: `Waiting for Codex to complete the exact diff ${identity.baseRefName}@${identity.baseSha.slice(0, 12)}...${identity.headSha.slice(0, 12)}.`,
-    });
-  }
   if (unresolved.length > 0) {
     return evaluationResult(snapshot, {
       summary: `${unresolved.length} unresolved review thread(s) remain; resolve them and submit a new exact-diff request.`,
     });
   }
 
+  const reaction = successfulBotReaction(comment);
+  if (reaction === null) {
+    return evaluationResult(snapshot, {
+      summary: "Codex reaction evidence is malformed or paginated; refusing an incomplete result.",
+    });
+  }
+  if (!reaction) {
+    return evaluationResult(snapshot, {
+      retryable: true,
+      summary: `Waiting for Codex to complete the exact diff ${identity.baseRefName}@${identity.baseSha.slice(0, 12)}...${identity.headSha.slice(0, 12)}.`,
+    });
+  }
+  if (Date.parse(reaction.createdAt) < Date.parse(comment.updatedAt)) {
+    return evaluationResult(snapshot, {
+      summary: "The Codex reaction predates the immutable review request.",
+    });
+  }
+
   return evaluationResult(snapshot, {
     conclusion: "success",
-    summary: `Exact-diff Codex review passed for ${identity.baseRefName}@${identity.baseSha.slice(0, 12)}...${identity.headSha.slice(0, 12)} with zero unresolved threads.`,
+    evidenceCreatedAt: reaction.createdAt,
+    evidenceId: reaction.databaseId,
+    requestCommentId: commentId,
+    summary: `Durable exact-diff review attestation passed for ${identity.baseRefName}@${identity.baseSha.slice(0, 12)}...${identity.headSha.slice(0, 12)} using request ${commentId} and Codex reaction ${reaction.databaseId}.`,
   });
 }
 
@@ -277,7 +322,7 @@ export async function waitForExactHeadReview({
   return {
     ...result,
     retryable: false,
-    summary: "Codex did not provide a bound thumbs-up before the polling window expired.",
+    summary: "Codex did not provide bound review evidence before the polling window expired.",
   };
 }
 
@@ -310,6 +355,8 @@ export async function loadPullRequestSnapshot({ owner, pullRequestNumber, reposi
           baseRefName
           baseRefOid
           headRefOid
+          isDraft
+          lastEditedAt
           reviewThreads(first: 100) {
             pageInfo { hasNextPage }
             nodes { isResolved }
@@ -323,11 +370,13 @@ export async function loadPullRequestSnapshot({ owner, pullRequestNumber, reposi
                 body
                 createdAt
                 databaseId
-                reactionGroups {
-                  content
-                  users(first: 100) {
-                    pageInfo { hasNextPage }
-                    nodes { login }
+                reactions(first: 100, content: THUMBS_UP, orderBy: { field: CREATED_AT, direction: ASC }) {
+                  pageInfo { hasNextPage }
+                  nodes {
+                    content
+                    createdAt
+                    databaseId
+                    user { login }
                   }
                 }
                 updatedAt
@@ -374,7 +423,10 @@ function writeOutputs(result) {
       `base_ref=${result.baseRefName ?? ""}`,
       `base_sha=${result.baseSha ?? ""}`,
       `conclusion=${result.conclusion}`,
+      `evidence_created_at=${result.evidenceCreatedAt ?? ""}`,
+      `evidence_id=${result.evidenceId ?? ""}`,
       `head_sha=${result.headSha ?? ""}`,
+      `request_comment_id=${result.requestCommentId ?? ""}`,
       `should_publish=${result.shouldPublish === true}`,
       `summary_base64=${summaryBase64}`,
       "",
@@ -390,7 +442,6 @@ function eventContextFromEnvironment() {
     eventCommentId: optionalEnvironment("CHZZK_EVENT_COMMENT_ID"),
     eventName: requiredEnvironment("CHZZK_EVENT_NAME"),
     eventPreviousBody: optionalEnvironment("CHZZK_EVENT_PREVIOUS_BODY"),
-    eventTrustedRequester: optionalEnvironment("CHZZK_TRUSTED_REVIEW_REQUESTER"),
   };
 }
 
@@ -426,7 +477,10 @@ if (isMain) {
       baseRefName: null,
       baseSha: null,
       conclusion: "failure",
+      evidenceCreatedAt: null,
+      evidenceId: null,
       headSha: null,
+      requestCommentId: null,
       retryable: false,
       shouldPublish: true,
       summary: `Exact-diff review verification failed closed: ${error.message}`,
