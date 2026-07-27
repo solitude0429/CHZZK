@@ -16,8 +16,7 @@ function passingSnapshot() {
         {
           author: { login: "chatgpt-codex-connector[bot]" },
           body:
-            `Codex Review: Didn't find any major issues. :tada:\n\n` +
-            `**Reviewed commit:** \`${headSha}\``,
+            `Codex Review: Didn't find any major issues. :tada:\n\n` + `**Reviewed commit:** \`${headSha}\``,
         },
       ],
       pageInfo: { hasNextPage: false, hasPreviousPage: false },
