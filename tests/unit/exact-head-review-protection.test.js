@@ -44,17 +44,12 @@ describe("exact-head review branch protection", () => {
   });
 
   it("routes the public configure command through both protection stages", () => {
-    const packageJson = JSON.parse(
-      readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
-    );
+    const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
     const orchestrator = readFileSync(
       new URL("../../scripts/configure-repository-all.js", import.meta.url),
       "utf8",
     );
-    assert.equal(
-      packageJson.scripts["configure:repository"],
-      "node scripts/configure-repository-all.js",
-    );
+    assert.equal(packageJson.scripts["configure:repository"], "node scripts/configure-repository-all.js");
     assert.match(orchestrator, /configure-repository\.js/);
     assert.match(orchestrator, /configure-exact-head-review\.js/);
   });
