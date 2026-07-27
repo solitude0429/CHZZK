@@ -55,10 +55,7 @@ describe("bounded HLS response evidence", () => {
 
   it("rejects GAP-only LL-HLS evidence but accepts a later usable part", () => {
     const gapPart = '#EXT-X-PART:DURATION=0.333,URI="part-gap.m4s",GAP=YES\n';
-    assert.equal(
-      isUsableHlsPlaylist(`#EXTM3U\n#EXT-X-TARGETDURATION:2\n${gapPart}`),
-      false,
-    );
+    assert.equal(isUsableHlsPlaylist(`#EXTM3U\n#EXT-X-TARGETDURATION:2\n${gapPart}`), false);
     assert.equal(
       isUsableHlsPlaylist(
         `#EXTM3U\n#EXT-X-TARGETDURATION:2\n${gapPart}#EXT-X-PART:DURATION=0.333,URI="part-live.m4s"\n`,

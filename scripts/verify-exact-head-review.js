@@ -80,12 +80,12 @@ export function reviewRequestMatchesSnapshot(body, snapshot) {
   const identity = pullRequestIdentity(snapshot);
   return Boolean(
     request &&
-      identity.headSha &&
-      identity.baseRefName &&
-      identity.baseSha &&
-      request.headSha === identity.headSha &&
-      request.baseRefName === identity.baseRefName &&
-      request.baseSha === identity.baseSha,
+    identity.headSha &&
+    identity.baseRefName &&
+    identity.baseSha &&
+    request.headSha === identity.headSha &&
+    request.baseRefName === identity.baseRefName &&
+    request.baseSha === identity.baseSha,
   );
 }
 
@@ -410,8 +410,7 @@ async function main() {
         : 1,
     context,
     intervalMs: process.env.CHZZK_WAIT_INTERVAL_MS,
-    loadSnapshot: () =>
-      loadPullRequestSnapshot({ owner, pullRequestNumber, repository, token }),
+    loadSnapshot: () => loadPullRequestSnapshot({ owner, pullRequestNumber, repository, token }),
   });
   writeOutputs(result);
   console.log(JSON.stringify(result));
