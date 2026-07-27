@@ -38,8 +38,7 @@ function passingSnapshot() {
 describe("exact-head review verification", () => {
   it("extracts and matches reviewed commit evidence", () => {
     const body =
-      `Codex Review: Didn't find any major issues.\n` +
-      `Reviewed commit: \`${headSha.slice(0, 12)}\``;
+      `Codex Review: Didn't find any major issues.\n` + `Reviewed commit: \`${headSha.slice(0, 12)}\``;
     assert.equal(reviewedCommit(body), headSha.slice(0, 12));
     assert.equal(evidenceMatchesHead(body, headSha), true);
     assert.equal(evidenceMatchesHead(body, `f${headSha.slice(1)}`), false);
@@ -55,10 +54,7 @@ describe("exact-head review verification", () => {
 
   it("rejects stale, user-authored, draft, unresolved, and incomplete evidence", () => {
     const stale = passingSnapshot();
-    stale.comments.nodes[0].body = stale.comments.nodes[0].body.replace(
-      headSha.slice(0, 10),
-      "aaaaaaaaaa",
-    );
+    stale.comments.nodes[0].body = stale.comments.nodes[0].body.replace(headSha.slice(0, 10), "aaaaaaaaaa");
     assert.equal(evaluateExactHeadReview(stale).conclusion, "failure");
 
     const spoofed = passingSnapshot();
