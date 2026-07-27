@@ -20,13 +20,15 @@
     probeResolutionBudgetMs: 3e3,
     probeTimeoutMs: 1500,
     redirectFailureBackoffMs: 1e4,
+    upgradeProbeIntervalMs: 6e4,
     notes: [
       "Firefox MV2 declares the CHZZK origin and trusted HLS CDN origins as required permissions so webRequest can observe dedicated livecloud playlists initiated by the site's same-origin small-player pages instead of exposing core access as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
       "The persistent background page limits blocking webRequest URL filters to case-complete .m3u8 path patterns so media segments bypass extension code; cached playlist redirects return synchronously, while tab-trust validation and unresolved candidate search share one request-level blockingProbeBudgetMs deadline before failing open as one shared per-tab/live-context/playlist-family resolution continues in the background.",
-      "A trusted HLS master playlist validates each candidate URL against the request-domain and quality-marker policy before scoring eligible variants by resolution, frame rate, then bitrate; one malformed or untrusted high-ranked entry cannot hide a lower valid variant.",
+      "A trusted HLS master playlist validates each candidate URL against the request-domain and quality-marker policy before scoring eligible variants by resolution, frame rate, then bitrate; one malformed or untrusted high-ranked entry cannot hide a lower valid variant, and a valid advertised quality is not capped to the numeric fallback candidate grid.",
       "Numeric quality replacement and response renewal use one safe pathname-marker grammar: they preserve the observed 360p-directory/chunklist_480p legacy shape, reject other marker contradictions, and preserve signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
+      "A cached target below the highest configured candidate gets at most one non-blocking upward-only candidate refresh per upgradeProbeIntervalMs; the current playlist request keeps using the verified target, and a failed, equal, or lower refresh cannot downgrade it. CHZZK hls_playlist and llhls_playlist master names share the corresponding numeric rendition family so trusted master evidence can promote a cached lower target immediately.",
       "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation; status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
@@ -113,7 +115,7 @@
     let stem = decoded.slice(0, -".m3u8".length);
     stem = stem.replace(/(^|[_-])\d{3,4}p(?=$|[_-])/gi, "$1{quality}");
     stem = stem.replace(
-      /^(?:chunklist(?:_\{quality\})?|index|manifest|master|media|playlist)(?:[_-]+|$)/i,
+      /^(?:chunklist(?:_\{quality\})?|(?:ll)?hls(?:[_-]+(?:master|playlist))*|index|manifest|master|media|playlist)(?:[_-]+|$)/i,
       "",
     );
     stem = stem.replace(/\{quality\}/gi, "").replace(/^[-_.]+|[-_.]+$/g, "");
@@ -191,6 +193,9 @@
       .filter((entry) => entry.value && entry.value >= min)
       .sort((a, b) => b.value - a.value)
       .map((entry) => entry.label);
+  }
+  function highestQualityCandidate(candidates, options = {}) {
+    return normalizeQualityCandidates(candidates, options)[0] ?? null;
   }
   function replaceQualityInUrl(url, targetQuality) {
     const normalizedTarget = normalizeQualityLabel(targetQuality);
@@ -1462,8 +1467,15 @@
   } = createPlaylistProbe({ policy: quality_policy_default });
   var MAX_MARKER_EVIDENCE_TTL_MS = 3e4;
   var MAX_REDIRECT_FAILURE_BACKOFF_MS = 3e4;
+  var MIN_UPGRADE_PROBE_INTERVAL_MS = 3e4;
+  var MAX_UPGRADE_PROBE_INTERVAL_MS = 10 * 6e4;
   var MAX_TRACKED_REDIRECT_REQUESTS = 500;
   var MAX_VALIDATED_TARGET_URLS = 16;
+  var HIGHEST_CONFIGURED_TARGET_NUMBER = qualityNumber(
+    highestQualityCandidate(quality_policy_default.qualityCandidates, {
+      minRedirectQuality: quality_policy_default.minRedirectQuality,
+    }),
+  );
   var diagnosticsMutationQueue = Promise.resolve();
   var diagnosticsMutationQueueDepth = 0;
   var redirectVerificationSequence = 0;
@@ -1571,6 +1583,12 @@
     return Number.isSafeInteger(configured) && configured > 0
       ? Math.min(configured, MAX_REDIRECT_FAILURE_BACKOFF_MS)
       : 1e4;
+  }
+  function upgradeProbeIntervalMs() {
+    const configured = Number(quality_policy_default.upgradeProbeIntervalMs ?? 6e4);
+    return Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(Math.max(configured, MIN_UPGRADE_PROBE_INTERVAL_MS), MAX_UPGRADE_PROBE_INTERVAL_MS)
+      : 6e4;
   }
   async function updateRedirectDiagnostics(lastError = null) {
     await enqueueDiagnosticsMutation((diagnostics) => {
@@ -1689,11 +1707,19 @@
       reusePrevious && (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
         ? "master"
         : resolution.evidenceKind;
+    const targetNumber = qualityNumber(targetQuality);
+    const canUpgrade =
+      targetNumber && HIGHEST_CONFIGURED_TARGET_NUMBER && targetNumber < HIGHEST_CONFIGURED_TARGET_NUMBER;
     const state = touchSessionState({
       ...session,
       evidenceKind,
       expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
       lastSuccessfulVerificationSequence: reusePrevious ? previous.lastSuccessfulVerificationSequence : 0,
+      nextUpgradeProbeAt: canUpgrade
+        ? reusePrevious && Number.isFinite(previous.nextUpgradeProbeAt)
+          ? previous.nextUpgradeProbeAt
+          : now + upgradeProbeIntervalMs()
+        : null,
       resolved: true,
       targetEpoch,
       targetQuality,
@@ -1718,7 +1744,7 @@
       tabId: state.tabId,
     };
   }
-  function startSessionResolution(details, resolver, resolverKind) {
+  function startSessionResolution(details, resolver, resolverKind, { minimumTargetQuality = null } = {}) {
     const session = playlistSession(details);
     if (!session) return Promise.resolve(null);
     const token = currentTabContextToken(session.tabId);
@@ -1732,7 +1758,14 @@
     }
     const controller = new AbortController();
     const resolutionTimeout = setTimeout(() => controller.abort(), probeResolutionBudgetMs());
-    const state = touchSessionState({ ...session, controller, promise: null, resolverKind, token });
+    const state = touchSessionState({
+      ...session,
+      controller,
+      minimumTargetQuality,
+      promise: null,
+      resolverKind,
+      token,
+    });
     state.promise = Promise.resolve()
       .then(() =>
         resolver({
@@ -1742,6 +1775,11 @@
       )
       .then(async (resolution) => {
         if (!resolution?.targetQuality || !resolutionIsCurrent(state)) return null;
+        const resolvedTargetNumber = qualityNumber(resolution.targetQuality);
+        const minimumTargetNumber = qualityNumber(state.minimumTargetQuality);
+        if (minimumTargetNumber && (!resolvedTargetNumber || resolvedTargetNumber <= minimumTargetNumber)) {
+          return null;
+        }
         const stored = await setSessionTarget(sessionFromResolutionState(state), resolution, state.token);
         return stored ? resolution.targetQuality : null;
       })
@@ -1760,12 +1798,13 @@
   async function waitForBlockingResolution(promise, budget) {
     return waitWithinBlockingRequestBudget(promise, budget);
   }
-  function startHighestTargetResolution(details, decision) {
+  function startHighestTargetResolution(details, decision, options = {}) {
     return startSessionResolution(
       details,
       ({ signal, skipTargetQualities }) =>
         resolveHighestSupportedQuality(details, decision.quality, { signal, skipTargetQualities }),
       "numeric",
+      options,
     );
   }
   function startMasterTargetResolution(details) {
@@ -1775,6 +1814,32 @@
         resolveBestVariantFromMaster(details, { signal, skipTargetQualities }),
       "master",
     );
+  }
+  function scheduleUpwardTargetResolution(details, decision, targetState) {
+    const targetNumber = qualityNumber(targetState?.targetQuality);
+    if (
+      !targetNumber ||
+      !HIGHEST_CONFIGURED_TARGET_NUMBER ||
+      targetNumber >= HIGHEST_CONFIGURED_TARGET_NUMBER
+    ) {
+      if (targetState) targetState.nextUpgradeProbeAt = null;
+      return;
+    }
+    const now = Date.now();
+    if (!Number.isFinite(targetState.nextUpgradeProbeAt)) {
+      targetState.nextUpgradeProbeAt = now + upgradeProbeIntervalMs();
+      touchSessionState(targetState);
+      return;
+    }
+    if (targetState.nextUpgradeProbeAt > now) return;
+    targetState.nextUpgradeProbeAt = now + upgradeProbeIntervalMs();
+    touchSessionState(targetState);
+    startHighestTargetResolution(details, decision, {
+      minimumTargetQuality: targetState.targetQuality,
+    }).catch((error) => {
+      reportRedirectError(error).catch(() => {});
+      console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality", error);
+    });
   }
   function tabHasQualityState(tabId) {
     return (
@@ -2443,6 +2508,8 @@
             reportRedirectError(error).catch(() => {});
             console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
           });
+        } else {
+          scheduleUpwardTargetResolution(details, decision, targetState);
         }
         return finalizeEligibleRequest(
           details,

@@ -442,6 +442,114 @@ describe("background runtime quality resolution", () => {
     assert.equal(fetches.length > fetchCountBeforeExpiry, true, "expired evidence must be re-probed");
   });
 
+  it("rechecks a renewed lower target in the background and promotes only after higher evidence exists", async () => {
+    const availableQualities = new Set(["720p"]);
+    const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
+      availableQualities,
+    });
+    const tabId = 636;
+    const validPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+    const request = (requestId) => familyRequest(tabId, "upgrade-refresh", requestId);
+
+    const first = plain(await listeners.onBeforeRequest(request("upgrade-first")));
+    assert.match(first.redirectUrl, /chunklist_720p/);
+    await observeRedirectTarget(listeners, request("upgrade-first"), first.redirectUrl);
+    deliverFilteredResponse(responseFilters, "upgrade-first", validPlaylist);
+    listeners.onCompleted({ requestId: "upgrade-first", statusCode: 200, url: first.redirectUrl });
+
+    availableQualities.add("1080p");
+    for (const [requestId, elapsedMs] of [
+      ["upgrade-renew-1", 25_000],
+      ["upgrade-renew-2", 25_000],
+    ]) {
+      advanceClock(elapsedMs);
+      const renewed = plain(await listeners.onBeforeRequest(request(requestId)));
+      assert.match(renewed.redirectUrl, /chunklist_720p/);
+      await observeRedirectTarget(listeners, request(requestId), renewed.redirectUrl);
+      deliverFilteredResponse(responseFilters, requestId, validPlaylist);
+      listeners.onCompleted({ requestId, statusCode: 200, url: renewed.redirectUrl });
+    }
+
+    const fetchCountBeforeUpgrade = fetches.length;
+    advanceClock(11_000);
+    const currentRequest = listeners.onBeforeRequest(request("upgrade-trigger"));
+    assert.equal(
+      typeof currentRequest?.then,
+      "undefined",
+      "a scheduled upgrade check must not add blocking latency to a cached request",
+    );
+    assert.match(plain(currentRequest).redirectUrl, /chunklist_720p/);
+
+    await waitForDiagnosticsQueue(20);
+    const upgraded = plain(await listeners.onBeforeRequest(request("upgrade-after-probe")));
+    assert.match(upgraded.redirectUrl, /chunklist_1080p/);
+    assert.equal(
+      fetches.slice(fetchCountBeforeUpgrade).some((url) => url.includes("1080p")),
+      true,
+      "the non-blocking recheck must prove a newly available higher rendition",
+    );
+  });
+
+  it("does not downgrade a valid target when an upward refresh sees only lower evidence", async () => {
+    const availableQualities = new Set(["720p"]);
+    const { advanceClock, fetches, listeners, responseFilters, storage } = await loadBackground({
+      availableQualities,
+    });
+    const tabId = 637;
+    const validPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n";
+    const request = (requestId) => familyRequest(tabId, "upgrade-no-downgrade", requestId);
+
+    const first = plain(await listeners.onBeforeRequest(request("no-downgrade-first")));
+    assert.match(first.redirectUrl, /chunklist_720p/);
+    await observeRedirectTarget(listeners, request("no-downgrade-first"), first.redirectUrl);
+    deliverFilteredResponse(responseFilters, "no-downgrade-first", validPlaylist);
+    listeners.onCompleted({
+      requestId: "no-downgrade-first",
+      statusCode: 200,
+      url: first.redirectUrl,
+    });
+
+    for (const [requestId, lowerProbeEvidence] of [
+      ["no-downgrade-renew-1", false],
+      ["no-downgrade-renew-2", true],
+    ]) {
+      if (lowerProbeEvidence) {
+        availableQualities.clear();
+        availableQualities.add("480p");
+      }
+      advanceClock(25_000);
+      const renewed = plain(await listeners.onBeforeRequest(request(requestId)));
+      assert.match(renewed.redirectUrl, /chunklist_720p/);
+      await observeRedirectTarget(listeners, request(requestId), renewed.redirectUrl);
+      deliverFilteredResponse(responseFilters, requestId, validPlaylist);
+      listeners.onCompleted({
+        requestId,
+        statusCode: 200,
+        url: renewed.redirectUrl,
+      });
+    }
+
+    const fetchCountBeforeRefresh = fetches.length;
+    advanceClock(11_000);
+    const currentRequest = listeners.onBeforeRequest(request("no-downgrade-trigger"));
+    assert.equal(typeof currentRequest?.then, "undefined");
+    assert.match(plain(currentRequest).redirectUrl, /chunklist_720p/);
+
+    await waitForDiagnosticsQueue(20);
+    const fetchCountAfterRefresh = fetches.length;
+    assert.equal(fetchCountAfterRefresh > fetchCountBeforeRefresh, true);
+    const retained = plain(await listeners.onBeforeRequest(request("no-downgrade-retained")));
+    assert.match(retained.redirectUrl, /chunklist_720p/);
+    assert.equal(
+      fetches.length,
+      fetchCountAfterRefresh,
+      "the same refresh interval must not start another candidate scan",
+    );
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {
+      [tabId]: "720p",
+    });
+  });
+
   it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
     const availableQualities = new Set(["2160p"]);
     const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({
@@ -2083,6 +2191,55 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     assert.deepEqual(diagnostics.runtimeRedirects.targetsByTab, { 43: "1080p" });
     assert.equal(diagnostics.decisions.at(-1).targetQuality, "1080p");
     assert.equal(diagnostics.decisions.at(-1).redirectedCurrentRequest, true);
+  });
+
+  it("lets a real CHZZK hls_playlist master promote an already cached lower rendition", async () => {
+    const masterUrl =
+      "https://livecloud.akamaized.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
+720p/segment/chunklist_720p.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=1692000,RESOLUTION=852x480,FRAME-RATE=30.00
+480p/segment/chunklist_480p.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=696000,RESOLUTION=640x360,FRAME-RATE=30.00
+360p/segment/chunklist_360p.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=192000,RESOLUTION=256x144,FRAME-RATE=30.00
+144p/segment/chunklist_144p.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=59.94
+1080p/segment/chunklist_1080p.m3u8?Policy=redacted
+`;
+    const availableQualities = new Set(["720p"]);
+    const lowRequest = {
+      ...firstLowQualityRequest(44),
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      url: "https://livecloud.akamaized.net/chzzk/lip2_kr/example/360p/segment/chunklist_480p.m3u8?Policy=redacted",
+    };
+    const { listeners, storage } = await loadBackground({
+      availableQualities,
+      responsesByUrl: new Map([[masterUrl, masterPlaylist]]),
+      tabUrlsById: new Map([[44, "https://chzzk.naver.com/live/example-channel"]]),
+    });
+
+    const first = plain(await listeners.onBeforeRequest(lowRequest));
+    assert.match(first.redirectUrl, /chunklist_720p/);
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        documentUrl: "https://chzzk.naver.com/live/example-channel",
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        originUrl: undefined,
+        tabId: 44,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    await waitForDiagnosticsQueue(20);
+
+    const promoted = plain(await listeners.onBeforeRequest(lowRequest));
+    assert.match(promoted.redirectUrl, /chunklist_1080p/);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 44: "1080p" });
   });
 
   it("lets newer master-playlist evidence supersede an older numeric probe", async () => {

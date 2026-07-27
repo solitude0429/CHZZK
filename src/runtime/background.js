@@ -21,6 +21,7 @@ import {
 } from "../shared/request-policy.js";
 import {
   buildHighestQualityRedirectUrl,
+  highestQualityCandidate,
   playlistFamilyKey,
   qualityNumber,
 } from "../shared/quality.js";
@@ -59,8 +60,15 @@ const {
 } = createPlaylistProbe({ policy });
 const MAX_MARKER_EVIDENCE_TTL_MS = 30_000;
 const MAX_REDIRECT_FAILURE_BACKOFF_MS = 30_000;
+const MIN_UPGRADE_PROBE_INTERVAL_MS = 30_000;
+const MAX_UPGRADE_PROBE_INTERVAL_MS = 10 * 60_000;
 const MAX_TRACKED_REDIRECT_REQUESTS = 500;
 const MAX_VALIDATED_TARGET_URLS = 16;
+const HIGHEST_CONFIGURED_TARGET_NUMBER = qualityNumber(
+  highestQualityCandidate(policy.qualityCandidates, {
+    minRedirectQuality: policy.minRedirectQuality,
+  }),
+);
 let diagnosticsMutationQueue = Promise.resolve();
 let diagnosticsMutationQueueDepth = 0;
 let redirectVerificationSequence = 0;
@@ -182,6 +190,16 @@ function redirectFailureBackoffMs() {
   return Number.isSafeInteger(configured) && configured > 0
     ? Math.min(configured, MAX_REDIRECT_FAILURE_BACKOFF_MS)
     : 10_000;
+}
+
+function upgradeProbeIntervalMs() {
+  const configured = Number(policy.upgradeProbeIntervalMs ?? 60_000);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? Math.min(
+        Math.max(configured, MIN_UPGRADE_PROBE_INTERVAL_MS),
+        MAX_UPGRADE_PROBE_INTERVAL_MS,
+      )
+    : 60_000;
 }
 
 async function updateRedirectDiagnostics(lastError = null) {
@@ -316,6 +334,11 @@ async function setSessionTarget(session, resolution, token) {
     (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
       ? "master"
       : resolution.evidenceKind;
+  const targetNumber = qualityNumber(targetQuality);
+  const canUpgrade =
+    targetNumber &&
+    HIGHEST_CONFIGURED_TARGET_NUMBER &&
+    targetNumber < HIGHEST_CONFIGURED_TARGET_NUMBER;
   const state = touchSessionState({
     ...session,
     evidenceKind,
@@ -323,6 +346,11 @@ async function setSessionTarget(session, resolution, token) {
     lastSuccessfulVerificationSequence: reusePrevious
       ? previous.lastSuccessfulVerificationSequence
       : 0,
+    nextUpgradeProbeAt: canUpgrade
+      ? reusePrevious && Number.isFinite(previous.nextUpgradeProbeAt)
+        ? previous.nextUpgradeProbeAt
+        : now + upgradeProbeIntervalMs()
+      : null,
     resolved: true,
     targetEpoch,
     targetQuality,
@@ -350,7 +378,12 @@ function sessionFromResolutionState(state) {
   };
 }
 
-function startSessionResolution(details, resolver, resolverKind) {
+function startSessionResolution(
+  details,
+  resolver,
+  resolverKind,
+  { minimumTargetQuality = null } = {},
+) {
   const session = playlistSession(details);
   if (!session) return Promise.resolve(null);
   const token = currentTabContextToken(session.tabId);
@@ -365,7 +398,14 @@ function startSessionResolution(details, resolver, resolverKind) {
 
   const controller = new AbortController();
   const resolutionTimeout = setTimeout(() => controller.abort(), probeResolutionBudgetMs());
-  const state = touchSessionState({ ...session, controller, promise: null, resolverKind, token });
+  const state = touchSessionState({
+    ...session,
+    controller,
+    minimumTargetQuality,
+    promise: null,
+    resolverKind,
+    token,
+  });
   state.promise = Promise.resolve()
     .then(() =>
       resolver({
@@ -375,6 +415,14 @@ function startSessionResolution(details, resolver, resolverKind) {
     )
     .then(async (resolution) => {
       if (!resolution?.targetQuality || !resolutionIsCurrent(state)) return null;
+      const resolvedTargetNumber = qualityNumber(resolution.targetQuality);
+      const minimumTargetNumber = qualityNumber(state.minimumTargetQuality);
+      if (
+        minimumTargetNumber &&
+        (!resolvedTargetNumber || resolvedTargetNumber <= minimumTargetNumber)
+      ) {
+        return null;
+      }
       const stored = await setSessionTarget(
         sessionFromResolutionState(state),
         resolution,
@@ -399,12 +447,13 @@ async function waitForBlockingResolution(promise, budget) {
   return waitWithinBlockingRequestBudget(promise, budget);
 }
 
-function startHighestTargetResolution(details, decision) {
+function startHighestTargetResolution(details, decision, options = {}) {
   return startSessionResolution(
     details,
     ({ signal, skipTargetQualities }) =>
       resolveHighestSupportedQuality(details, decision.quality, { signal, skipTargetQualities }),
     "numeric",
+    options,
   );
 }
 
@@ -415,6 +464,35 @@ function startMasterTargetResolution(details) {
       resolveBestVariantFromMaster(details, { signal, skipTargetQualities }),
     "master",
   );
+}
+
+function scheduleUpwardTargetResolution(details, decision, targetState) {
+  const targetNumber = qualityNumber(targetState?.targetQuality);
+  if (
+    !targetNumber ||
+    !HIGHEST_CONFIGURED_TARGET_NUMBER ||
+    targetNumber >= HIGHEST_CONFIGURED_TARGET_NUMBER
+  ) {
+    if (targetState) targetState.nextUpgradeProbeAt = null;
+    return;
+  }
+
+  const now = Date.now();
+  if (!Number.isFinite(targetState.nextUpgradeProbeAt)) {
+    targetState.nextUpgradeProbeAt = now + upgradeProbeIntervalMs();
+    touchSessionState(targetState);
+    return;
+  }
+  if (targetState.nextUpgradeProbeAt > now) return;
+
+  targetState.nextUpgradeProbeAt = now + upgradeProbeIntervalMs();
+  touchSessionState(targetState);
+  startHighestTargetResolution(details, decision, {
+    minimumTargetQuality: targetState.targetQuality,
+  }).catch((error) => {
+    reportRedirectError(error).catch(() => {});
+    console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality", error);
+  });
 }
 
 function tabHasQualityState(tabId) {
@@ -1164,6 +1242,8 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
           reportRedirectError(error).catch(() => {});
           console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
         });
+      } else {
+        scheduleUpwardTargetResolution(details, decision, targetState);
       }
       return finalizeEligibleRequest(
         details,
