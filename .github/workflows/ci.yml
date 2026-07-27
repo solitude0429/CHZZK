@@ -44,7 +44,12 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run setup:firefox-e2e
-      - run: npm run test:firefox-e2e
+      - name: Run Firefox functional E2E three times
+        run: |
+          for iteration in 1 2 3; do
+            echo "Firefox functional E2E iteration ${iteration}/3"
+            npm run test:firefox-e2e
+          done
         env:
           FIREFOX_BINARY: ${{ github.workspace }}/dist/e2e-tools/firefox/firefox
           GECKODRIVER_BINARY: ${{ github.workspace }}/dist/e2e-tools/geckodriver

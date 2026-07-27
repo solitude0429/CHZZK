@@ -15,8 +15,8 @@ GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
 npm run test:firefox-functional-e2e
 ```
 
-4. Open a PR. The protected branch requires GitHub-Actions-bound `verify`, `firefox-e2e`, `dependency-review`, and `analyze` (CodeQL) checks plus zero unresolved review threads.
-5. Review the final diff directly in the active Codex task after the last push. Record any high-risk release, permissions, deployment, or security-policy impact in the PR body. A second GitHub bot-review round and a self-approval are not required for this sole-owner repository.
+4. Open a draft PR. The protected branch requires GitHub-Actions-bound `verify`, `firefox-e2e`, `dependency-review`, and `analyze` (CodeQL) checks plus zero unresolved review threads.
+5. After the last source push, keep the PR draft while the active Codex task reviews the final diff. Record the exact reviewed head SHA and any high-risk release, permissions, deployment, or security-policy impact in the PR body only after the review result exists. If any source commit is pushed afterward, return to draft and repeat the exact-head review. Mark ready only when the recorded reviewed SHA equals the current PR head and every actionable thread is resolved. A second bot-review status and a self-approval are not required for this sole-owner repository.
 6. Merge through protected `main`.
 7. Refresh the external operator bootstrap from the protected exact `main` blob as described in `docs/SIGNING.md`.
 8. From the clean exact-`main` checkout, run the fully sanitized, bounded `release` command in `docs/SIGNING.md` once. Do not replace it with a checkout script, npm command, or ambient `gh workflow run`.
@@ -39,11 +39,11 @@ npm run deploy:updates:internal
 
 12. Verify live `updates.json` and XPI MIME type, SHA-256, version, add-on ID, minimum Firefox version, source commit, and stable symlink targets.
 13. Run the old-signed-to-new-signed stock-Firefox update smoke from `docs/TESTING.md`.
-14. From the actual current Windows client, automate the same visible `about:addons` controls through its installed Firefox ESR, normal DNS, and production TLS path. Require both the installed state and a second `none-found` result. Do not ask the user to perform this gate, stop their Firefox, or overwrite an installed profile XPI.
+14. From the actual current Windows client, run the checked-in `scripts/firefox-signed-smoke.windows.ps1` command in `docs/TESTING.md` through its installed Firefox ESR, normal DNS, and production TLS path. Require the bounded result to report the Firefox and extension versions, `permanent-signed-active`, and final `none-found`; transfer it to protected release evidence and remove every task-created Windows input, result, profile, and process. Do not ask the user to perform this gate, stop their Firefox, or overwrite an installed profile XPI.
 
 ## Repository settings
 
-Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound checks above, enforces protection for administrators, and requires resolved conversations without a self-approval rule.
+Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound checks above, enforces protection for administrators, and requires resolved conversations without a self-approval rule. Exact-head qualitative review is enforced operationally by retaining high-risk PRs in draft until the active Codex review completes; do not recreate the retired custom review-completion status or approval-count gate.
 
 ```bash
 CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \

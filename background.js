@@ -25,10 +25,10 @@
       "Firefox MV2 declares the CHZZK origin and trusted HLS CDN origins as required permissions so webRequest can observe dedicated livecloud playlists initiated by the site's same-origin small-player pages instead of exposing core access as optional MV3 site toggles.",
       "A minimal MV2 content script runs at document_start on CHZZK live pages only and sends a live-page-ready message; it does not query or mutate the page DOM.",
       "The persistent background page limits blocking webRequest URL filters to case-complete .m3u8 path patterns so media segments bypass extension code; cached playlist redirects return synchronously, while tab-trust validation and unresolved candidate search share one request-level blockingProbeBudgetMs deadline before failing open as one shared per-tab/live-context/playlist-family resolution continues in the background.",
-      "A trusted HLS master response is streamed to CHZZK unchanged, bounded by probeMaxBytes for local parsing, accepted only with an exact successful response URL/status, and scored before the response filter closes so its highest eligible variant is cached before the first numeric rendition request. Candidate URLs must pass the request-domain and quality-marker policy before ranking by resolution, frame rate, then bitrate; one malformed or untrusted high-ranked entry cannot hide a lower valid variant, and a valid advertised quality is not capped to the numeric fallback grid. A bounded no-credential fetch is used only when Firefox response filtering cannot attach.",
+      "A trusted HLS master response is streamed to CHZZK unchanged, bounded by probeMaxBytes for local parsing, accepted only with an exact successful response URL/status, and scored before the response filter closes so its highest eligible variant is cached before the first numeric rendition request. Master-response observers are released on filter stop/error, terminal completion/error, ineligible redirect, context migration, and tab closure, and are retained only across an eligible master redirect chain. Candidate URLs must pass the request-domain and quality-marker policy before ranking by resolution, frame rate, then bitrate; one malformed or untrusted high-ranked entry cannot hide a lower valid variant, and a valid advertised quality is not capped to the numeric fallback grid. A bounded no-credential fetch is used only when response filtering or redirect lifecycle observation cannot attach.",
       "Numeric quality replacement and response renewal use one safe pathname-marker grammar: they preserve the observed 360p-directory/chunklist_480p legacy shape, reject other marker contradictions, and preserve signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
-      "Every active valid target is monotonic across numeric probes, fetched master evidence, and observed master responses: equal evidence may strengthen it and higher evidence may promote it, but a later lower result cannot overwrite it. A cached target below the highest configured candidate gets at most one non-blocking upward candidate refresh per upgradeProbeIntervalMs; after a genuine higher-target failure, the first retry is advanced to that target's redirectFailureBackoffMs expiry instead of waiting the full generic interval. CHZZK hls_playlist and llhls_playlist master names share the corresponding numeric rendition family.",
+      "A valid master-derived target is authoritative for its live context: numeric evidence may match it but cannot promote it to an unadvertised rendition, while a later trusted master may promote it. Numeric-fallback targets remain monotonic, so equal evidence may strengthen them and higher evidence may promote them, but a later lower result cannot overwrite them. A cached numeric target below the highest configured candidate gets at most one non-blocking upward candidate refresh per upgradeProbeIntervalMs; after a genuine higher-target failure, the first retry is advanced to that target's redirectFailureBackoffMs expiry instead of waiting the full generic interval. CHZZK hls_playlist and llhls_playlist master names share the corresponding numeric rendition family.",
       "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation. Firefox NS_BINDING_ABORTED and NS_ERROR_ABORT are treated as exact neutral client-cancellation codes because overlapping LL-HLS requests are routinely superseded; they neither renew nor invalidate the selected target. Status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and other request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
@@ -394,6 +394,7 @@
     "higher-quality",
     "initial-selection",
     "lower-quality",
+    "master-authority",
     "network-error",
     "response-body",
     "response-status",
@@ -1820,6 +1821,23 @@
     }
     const previousTargetNumber = qualityNumber(previous?.targetQuality);
     const targetNumber = qualityNumber(targetQuality);
+    if (
+      previous?.resolved &&
+      previous.evidenceKind === "master" &&
+      resolution.evidenceKind !== "master" &&
+      previousTargetNumber &&
+      targetNumber &&
+      targetNumber > previousTargetNumber
+    ) {
+      scheduleRuntimeTransition({
+        action: "blocked",
+        fromQuality: previous.targetQuality,
+        reason: "master-authority",
+        source: resolutionDiagnosticSource(resolution),
+        toQuality: targetQuality,
+      });
+      return false;
+    }
     if (previous?.resolved && previousTargetNumber && targetNumber && targetNumber < previousTargetNumber) {
       scheduleRuntimeTransition({
         action: "blocked",
@@ -1847,7 +1865,10 @@
         ? "master"
         : resolution.evidenceKind;
     const canUpgrade =
-      targetNumber && HIGHEST_CONFIGURED_TARGET_NUMBER && targetNumber < HIGHEST_CONFIGURED_TARGET_NUMBER;
+      evidenceKind !== "master" &&
+      targetNumber &&
+      HIGHEST_CONFIGURED_TARGET_NUMBER &&
+      targetNumber < HIGHEST_CONFIGURED_TARGET_NUMBER;
     const failedHigherRetryAt = canUpgrade
       ? earliestFailedHigherTargetRetryAt(session, targetQuality, now)
       : null;
@@ -1985,10 +2006,16 @@
       masterResponseObserversById.delete(record.requestId);
     }
   }
+  function settleMasterResponseObserver(record) {
+    if (!record || record.settled) return;
+    record.settled = true;
+    forgetMasterResponseObserver(record);
+  }
   function attachMasterResponseObserver(details) {
     if (
       typeof api.webRequest.filterResponseData !== "function" ||
-      typeof api.webRequest.onHeadersReceived?.addListener !== "function"
+      typeof api.webRequest.onHeadersReceived?.addListener !== "function" ||
+      typeof api.webRequest.onBeforeRedirect?.addListener !== "function"
     ) {
       return false;
     }
@@ -2000,21 +2027,26 @@
     }
     const existing = masterResponseObserversById.get(requestId);
     if (existing && !existing.settled) {
-      if (
+      const contextMismatch =
         existing.token !== tabContextTokenByTab.get(session.tabId) ||
         existing.session.tabId !== session.tabId ||
-        existing.session.contextKey !== session.contextKey
-      ) {
+        existing.session.contextKey !== session.contextKey;
+      const expectedRedirectMismatch =
+        existing.expectedRedirectNetworkUrl && existing.expectedRedirectNetworkUrl !== finalNetworkUrl;
+      if (contextMismatch || expectedRedirectMismatch) {
+        settleMasterResponseObserver(existing);
+      } else {
+        existing.details = details;
+        existing.expectedRedirectNetworkUrl = null;
+        existing.finalNetworkUrl = finalNetworkUrl;
+        existing.session = session;
         return true;
       }
-      existing.details = details;
-      existing.finalNetworkUrl = finalNetworkUrl;
-      existing.session = session;
-      return true;
     }
     if (masterResponseObserversById.size >= MAX_TRACKED_REDIRECT_REQUESTS) return false;
     masterResponseObserversById.set(requestId, {
       details,
+      expectedRedirectNetworkUrl: null,
       filterAttached: false,
       finalNetworkUrl,
       requestId,
@@ -2065,8 +2097,7 @@
         }
         return;
       }
-      record.settled = true;
-      forgetMasterResponseObserver(record);
+      settleMasterResponseObserver(record);
       try {
         if (!record.streamFailed && !record.oversized && record.totalBytes > 0) {
           textChunks.push(decoder.decode());
@@ -2104,8 +2135,7 @@
     };
     filter.onerror = () => {
       record.streamFailed = true;
-      record.settled = true;
-      forgetMasterResponseObserver(record);
+      settleMasterResponseObserver(record);
     };
     return true;
   }
@@ -2124,8 +2154,7 @@
       statusCode !== 205;
     if (exactSuccessfulResponse) {
       if (!record.filterAttached && !attachMasterResponseFilter(record)) {
-        record.settled = true;
-        forgetMasterResponseObserver(record);
+        settleMasterResponseObserver(record);
         startMasterTargetResolution(record.details).catch((error) => {
           reportRedirectError(error).catch(() => {});
           console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
@@ -2133,11 +2162,43 @@
       }
       return;
     }
+    if (statusCode === 304) {
+      settleMasterResponseObserver(record);
+      return;
+    }
     if (Number.isSafeInteger(statusCode) && statusCode >= 300 && statusCode <= 399) return;
-    record.settled = true;
-    forgetMasterResponseObserver(record);
+    settleMasterResponseObserver(record);
+  }
+  function handleMasterResponseRedirect(details) {
+    const requestId = details?.requestId == null ? null : String(details.requestId);
+    if (!requestId) return;
+    const record = masterResponseObserversById.get(requestId);
+    if (!record || record.settled) return;
+    const redirectNetworkUrl = networkRequestUrl(details?.redirectUrl);
+    const redirectDetails = {
+      ...record.details,
+      ...details,
+      url: details?.redirectUrl,
+    };
+    const redirectOptions = {
+      miniPlayerTabIds,
+      trustedLiveTabIds: activeLiveTabIds,
+    };
+    if (
+      !redirectNetworkUrl ||
+      !isTrustedMasterPlaylistRequest(redirectDetails, quality_policy_default, redirectOptions)
+    ) {
+      settleMasterResponseObserver(record);
+      return;
+    }
+    record.expectedRedirectNetworkUrl = redirectNetworkUrl;
   }
   function scheduleUpwardTargetResolution(details, decision, targetState) {
+    if (targetState?.evidenceKind === "master") {
+      targetState.nextUpgradeProbeAt = null;
+      touchSessionState(targetState);
+      return;
+    }
     const targetNumber = qualityNumber(targetState?.targetQuality);
     if (
       !targetNumber ||
@@ -2327,6 +2388,9 @@
       }
       record.settled = true;
       redirectedRequestsById.delete(requestId);
+    }
+    for (const record of masterResponseObserversById.values()) {
+      if (record.session.tabId === tabId) settleMasterResponseObserver(record);
     }
     tabContextTokenByTab.set(tabId, transitionToken);
     enforceSessionStateLimits();
@@ -2727,6 +2791,10 @@
   function handleRedirectCompleted(details) {
     const requestId = details?.requestId == null ? null : String(details.requestId);
     if (!requestId) return;
+    const masterObserver = masterResponseObserversById.get(requestId);
+    if (masterObserver && !masterObserver.filterAttached) {
+      settleMasterResponseObserver(masterObserver);
+    }
     const record = redirectedRequestsById.get(requestId);
     if (!record) return;
     const statusCode = Number(details.statusCode);
@@ -2740,10 +2808,7 @@
     const requestId = details?.requestId == null ? null : String(details.requestId);
     if (!requestId) return;
     const masterObserver = masterResponseObserversById.get(requestId);
-    if (masterObserver) {
-      masterObserver.settled = true;
-      forgetMasterResponseObserver(masterObserver);
-    }
+    settleMasterResponseObserver(masterObserver);
     const record = redirectedRequestsById.get(requestId);
     if (!record) return;
     const normalizedError = String(details?.error ?? "")
@@ -2864,7 +2929,10 @@
             inheritedBudget,
           );
         }
-        if (!resolvedTargetCoversObserved(targetState, decision.quality)) {
+        if (
+          targetState.evidenceKind !== "master" &&
+          !resolvedTargetCoversObserved(targetState, decision.quality)
+        ) {
           startHighestTargetResolution(details, decision).catch((error) => {
             reportRedirectError(error).catch(() => {});
             console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
@@ -2947,6 +3015,7 @@
   api.webRequest.onHeadersReceived?.addListener(handleMasterResponseHeaders, WEB_REQUEST_FILTER, [
     "blocking",
   ]);
+  api.webRequest.onBeforeRedirect?.addListener(handleMasterResponseRedirect, WEB_REQUEST_FILTER);
   api.webRequest.onCompleted?.addListener(handleRedirectCompleted, WEB_REQUEST_FILTER);
   api.webRequest.onErrorOccurred?.addListener(handleRedirectError, WEB_REQUEST_FILTER);
   async function prewarmMessageTab(tabId) {

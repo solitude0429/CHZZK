@@ -59,7 +59,7 @@ The release workflow downloads checksum-pinned stock Firefox and geckodriver wit
 npm run setup:firefox-signed-smoke
 ```
 
-The required release runner is Linux x64; the setup also has checksum-pinned Linux arm64 inputs. Windows, macOS, and Android are not required gates: the shipped WebExtension payload is platform-independent, and unattended unlisted-extension installation on those runners would add a large, fragile toolchain without replacing the stock-Firefox signature check. Residual operating-system integration risk is handled by the disposable post-deployment update smoke on the actual Firefox client, without weakening signature or update trust.
+The pre-publication authenticity runner is Linux x64; the setup also has checksum-pinned Linux arm64 inputs. The post-deployment update gate is native Windows and uses the checked-in wrapper below against the actual client Firefox ESR. macOS and Android are not required release gates.
 
 Install mode requires a real final AMO-signed XPI and canonical release metadata:
 
@@ -86,7 +86,21 @@ npm run test:firefox-signed-smoke
 
 Update mode deliberately uses the older XPI's canonical production `update_url`; run it only after the versioned final XPI and `updates.json` are deployed. The test clicks both the per-extension `[action="update-check"]`/`[action="install-update"]` controls and the global `[action="check-for-updates"]` control in stock Firefox rather than calling `AddonManager.findUpdates` directly. Missing binaries, metadata, or required signed artifacts are hard failures, never skips. Fake or cryptographically tampered metadata that can satisfy the structural ZIP bounds is rejected by Firefox installation/signed-state enforcement rather than by home-grown cryptography.
 
-The Linux authenticity gate does not replace the client-network boundary. Release readiness also requires an operator-automated disposable profile on the actual current Windows client using its installed Firefox ESR, normal DNS, and production TLS path. Drive the same visible, interactability-enforcing `about:addons` controls from an older Mozilla-signed XPI to the intended version, then require a second visible `none-found` result. Keep results enum-only and leave the user's running profile untouched.
+The Linux authenticity gate does not replace the client-network boundary. Release readiness also requires an operator-automated disposable profile on the actual current Windows client using its installed Firefox ESR, normal DNS, and production TLS path. `validateSignedSmokeInputs` applies POSIX executable-bit validation only on POSIX; native `firefox.exe` and `geckodriver.exe` are validated as nonempty regular files and then proven by successful process launch.
+
+Run the repository-owned native Windows gate from a clean exact-`main` checkout after deployment:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\firefox-signed-smoke.windows.ps1 `
+  -FirefoxBinary "C:\Program Files\Mozilla Firefox\firefox.exe" `
+  -GeckodriverBinary "C:\path\to\geckodriver.exe" `
+  -ReleaseMetadata "C:\path\to\chzzk-<version>-release-metadata.json" `
+  -SignedXpi "C:\path\to\chzzk-<version>-signed.xpi" `
+  -OldSignedXpi "C:\path\to\chzzk-<older-version>-signed.xpi" `
+  -ResultPath "$env:TEMP\chzzk-<version>-signed-smoke-result.json"
+```
+
+The wrapper always runs update mode. It drives the visible, interactability-enforcing `about:addons` controls from the older Mozilla-signed XPI to the intended version, then requires a second visible `none-found` result. On success it creates, without overwriting, one UTF-8 result no larger than 4 KiB. The exact schema contains only `schemaVersion`, `status`, `mode`, `firefoxVersion`, `extensionVersion`, `installedState`, and `finalUpdateState`; it contains no profile path, URL, identifier, or raw driver log. Copy that result into the protected release evidence, then delete the task-created Windows result and inputs. The disposable profiles and geckodriver process are removed by the runner, and the user's running profile is never opened or modified.
 
 ## Manual Firefox smoke test
 
