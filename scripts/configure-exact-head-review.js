@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const GH_COMMAND = process.env.CHZZK_GH_COMMAND || "gh";
 const GH_COMMAND_PREFIX = process.env.CHZZK_GH_COMMAND_PREFIX
@@ -105,7 +107,8 @@ function main() {
   ghApi("PATCH", endpoint, { checks: plan.checks, strict: plan.strict });
 }
 
-if (process.argv[1]) {
+const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+if (isMain) {
   try {
     main();
   } catch (error) {
