@@ -31,7 +31,10 @@ describe("exact-head review branch protection", () => {
 
   it("is idempotent and fails closed without a source-bound verify check", () => {
     const configured = statusProtection();
-    configured.checks.push({ app_id: githubActionsAppId, context: "exact-head-review" });
+    configured.checks.push({
+      app_id: githubActionsAppId,
+      context: "exact-head-review",
+    });
     assert.equal(planExactHeadReviewCheck(configured).changed, false);
 
     assert.throws(
@@ -41,12 +44,17 @@ describe("exact-head review branch protection", () => {
   });
 
   it("routes the public configure command through both protection stages", () => {
-    const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+    const packageJson = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+    );
     const orchestrator = readFileSync(
       new URL("../../scripts/configure-repository-all.js", import.meta.url),
       "utf8",
     );
-    assert.equal(packageJson.scripts["configure:repository"], "node scripts/configure-repository-all.js");
+    assert.equal(
+      packageJson.scripts["configure:repository"],
+      "node scripts/configure-repository-all.js",
+    );
     assert.match(orchestrator, /configure-repository\.js/);
     assert.match(orchestrator, /configure-exact-head-review\.js/);
   });
