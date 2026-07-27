@@ -19,6 +19,7 @@ const RUNTIME_TRANSITION_REASONS = new Set([
   "higher-quality",
   "initial-selection",
   "lower-quality",
+  "master-authority",
   "network-error",
   "response-body",
   "response-status",

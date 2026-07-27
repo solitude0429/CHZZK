@@ -187,6 +187,11 @@ async function loadBackground({
           listeners.extraInfoSpec = extraInfoSpec;
         },
       },
+      onBeforeRedirect: {
+        addListener(fn) {
+          listeners.onBeforeRedirect = fn;
+        },
+      },
       onHeadersReceived: {
         addListener(fn, filter, extraInfoSpec) {
           listeners.onHeadersReceived = fn;
@@ -222,6 +227,7 @@ async function loadBackground({
       tabId: state.tabId,
       targetCount: state.targets instanceof Map ? state.targets.size : 0,
     })),
+    masterObservers: masterResponseObserversById.size,
     resolving: resolutionBySession.size,
   });
 ${source.slice(closureEnd)}`;
@@ -306,6 +312,36 @@ function firstLowQualityRequest(tabId) {
     tabId,
     type: "xmlhttprequest",
     url: "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/360p/segment/chunklist_480p.m3u8?Policy=redacted",
+  };
+}
+
+const DEDICATED_MASTER_URL =
+  "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+const DEDICATED_MASTER_BODY = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p_highbitrate.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
+720p/segment/chunklist_720p_highbitrate.m3u8?Policy=redacted
+`;
+
+function dedicatedMasterRequest(tabId, requestId, documentUrl) {
+  return {
+    documentUrl,
+    initiator: "https://chzzk.naver.com",
+    method: "GET",
+    requestId,
+    tabId,
+    type: "xmlhttprequest",
+    url: DEDICATED_MASTER_URL,
+  };
+}
+
+function highBitrateLowQualityRequest(tabId, requestId, documentUrl) {
+  return {
+    ...firstLowQualityRequest(tabId),
+    documentUrl,
+    requestId,
+    url: firstLowQualityRequest(tabId).url.replace("chunklist_480p.m3u8", "chunklist_480p_highbitrate.m3u8"),
   };
 }
 
@@ -560,6 +596,276 @@ describe("background runtime quality resolution", () => {
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), {
       [tabId]: "720p",
     });
+  });
+
+  it("continues an in-flight dedicated master response across a live-to-mini-player transition", async () => {
+    const tabId = 645;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { fetches, listeners, responseFilters, sessionState } = await loadBackground();
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(
+      listeners.onBeforeRequest(dedicatedMasterRequest(tabId, "master-live-to-mini", liveUrl)),
+      undefined,
+    );
+    assert.equal(sessionState().masterObservers, 1);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      sessionState().masterObservers,
+      1,
+      "the same-stream mini-player transition must retain the dedicated master observer",
+    );
+    assert.equal(
+      deliverObservedMasterResponse(
+        listeners,
+        responseFilters,
+        "master-live-to-mini",
+        DEDICATED_MASTER_URL,
+        DEDICATED_MASTER_BODY,
+      ),
+      DEDICATED_MASTER_BODY,
+    );
+
+    const miniRequest = highBitrateLowQualityRequest(tabId, "master-live-to-mini-rendition", liveUrl);
+    const redirect = listeners.onBeforeRequest(miniRequest);
+    assert.equal(
+      typeof redirect?.then,
+      "undefined",
+      "the completed master observation must avoid a blocking mini-player probe",
+    );
+    assert.match(plain(redirect).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    assert.deepEqual(fetches, []);
+  });
+
+  it("migrates completed trusted master evidence before the first rendition verification", async () => {
+    const tabId = 646;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { fetches, listeners, responseFilters } = await loadBackground();
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(dedicatedMasterRequest(tabId, "master-before-first-rendition", liveUrl));
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      "master-before-first-rendition",
+      DEDICATED_MASTER_URL,
+      DEDICATED_MASTER_BODY,
+    );
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    const redirect = listeners.onBeforeRequest(
+      highBitrateLowQualityRequest(tabId, "first-rendition-after-mini-transition", liveUrl),
+    );
+
+    assert.equal(
+      typeof redirect?.then,
+      "undefined",
+      "trusted master evidence must remain synchronous when the player shrinks",
+    );
+    assert.match(plain(redirect).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    assert.deepEqual(fetches, []);
+  });
+
+  it("keeps a newer mini-player verifier authoritative over an old-player terminal event", async () => {
+    const tabId = 647;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { fetches, listeners, responseFilters, storage } = await loadBackground();
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(dedicatedMasterRequest(tabId, "master-before-player-teardown", liveUrl));
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      "master-before-player-teardown",
+      DEDICATED_MASTER_URL,
+      DEDICATED_MASTER_BODY,
+    );
+
+    const oldPlayerRequest = highBitrateLowQualityRequest(tabId, "old-player-rendition", liveUrl);
+    const oldPlayerRedirect = plain(listeners.onBeforeRequest(oldPlayerRequest));
+    assert.match(oldPlayerRedirect.redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    await observeRedirectTarget(listeners, oldPlayerRequest, oldPlayerRedirect.redirectUrl);
+
+    // The page has already called pushState, but Firefox has not delivered
+    // tabs.onUpdated yet. This request belongs to the new mini-player even
+    // though it is still keyed to the old live context.
+    const newMiniPlayerRequest = {
+      ...oldPlayerRequest,
+      requestId: "new-mini-player-before-tabs-update",
+    };
+    const newMiniPlayerRedirect = plain(listeners.onBeforeRequest(newMiniPlayerRequest));
+    assert.match(newMiniPlayerRedirect.redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    await observeRedirectTarget(listeners, newMiniPlayerRequest, newMiniPlayerRedirect.redirectUrl);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    listeners.onErrorOccurred({
+      error: "NS_ERROR_NET_RESET",
+      requestId: oldPlayerRequest.requestId,
+      tabId,
+      url: oldPlayerRedirect.redirectUrl,
+    });
+    deliverFilteredResponse(
+      responseFilters,
+      newMiniPlayerRequest.requestId,
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n",
+    );
+    listeners.onCompleted({
+      requestId: newMiniPlayerRequest.requestId,
+      statusCode: 200,
+      tabId,
+      url: newMiniPlayerRedirect.redirectUrl,
+    });
+
+    const next = listeners.onBeforeRequest({
+      ...oldPlayerRequest,
+      requestId: "new-mini-player-rendition",
+    });
+    assert.equal(
+      typeof next?.then,
+      "undefined",
+      "the newer mini-player verifier must supersede the retired player's terminal event",
+    );
+    assert.match(plain(next).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    assert.deepEqual(fetches, []);
+    await waitForDiagnosticsQueue();
+    assert.equal(
+      storage.chzzkDiagnostics.runtimeTransitions.some(
+        (transition) =>
+          transition.action === "invalidated" &&
+          transition.fromQuality === "1080p" &&
+          transition.reason === "network-error",
+      ),
+      false,
+    );
+  });
+
+  it("honors a failed mini-player verifier that starts before tabs.onUpdated is delivered", async () => {
+    const tabId = 649;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const { listeners, responseFilters } = await loadBackground({
+      availableQualities: new Set(["720p"]),
+    });
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(dedicatedMasterRequest(tabId, "master-before-early-mini-request", liveUrl));
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      "master-before-early-mini-request",
+      DEDICATED_MASTER_URL,
+      DEDICATED_MASTER_BODY,
+    );
+
+    // This is the mini-player's first request after pushState, but the
+    // asynchronous tabs.onUpdated notification has not reached the background.
+    const earlyMiniRequest = highBitrateLowQualityRequest(tabId, "early-mini-player-verifier", liveUrl);
+    const earlyMiniRedirect = plain(listeners.onBeforeRequest(earlyMiniRequest));
+    assert.match(earlyMiniRedirect.redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    await observeRedirectTarget(listeners, earlyMiniRequest, earlyMiniRedirect.redirectUrl);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    deliverFilteredResponse(responseFilters, earlyMiniRequest.requestId, "<!doctype html>");
+    listeners.onCompleted({
+      requestId: earlyMiniRequest.requestId,
+      statusCode: 200,
+      tabId,
+      url: earlyMiniRedirect.redirectUrl,
+    });
+
+    const retry = plain(
+      await listeners.onBeforeRequest({
+        ...earlyMiniRequest,
+        documentUrl: miniPlayerUrl,
+        requestId: "early-mini-player-retry",
+      }),
+    );
+    assert.match(
+      retry.redirectUrl,
+      /chunklist_720p_highbitrate\.m3u8/,
+      "a failed verifier owned by the new mini-player must invalidate the migrated master target",
+    );
+  });
+
+  it("does not carry a generic-CDN master observer into mini-player mode", async () => {
+    const tabId = 648;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const masterUrl = "https://edge.pstatic.net/chzzk/generic-master/master.m3u8?Policy=synthetic";
+    const { listeners, responseFilters, sessionState } = await loadBackground();
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    assert.equal(
+      listeners.onBeforeRequest({
+        documentUrl: liveUrl,
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        requestId: "generic-master-live-to-mini",
+        tabId,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    assert.equal(sessionState().masterObservers, 1);
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      sessionState().masterObservers,
+      0,
+      "mini-player migration must remain limited to dedicated CHZZK livecloud masters",
+    );
+    listeners.onHeadersReceived({
+      requestId: "generic-master-live-to-mini",
+      statusCode: 200,
+      url: masterUrl,
+    });
+    assert.equal(responseFilters.has("generic-master-live-to-mini"), false);
+  });
+
+  it("drops a dedicated master observer while its pending redirect points at a generic CDN", async () => {
+    const tabId = 650;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const genericRedirectUrl =
+      "https://edge.pstatic.net/chzzk/pending-generic-master/hls_playlist.m3u8?Policy=synthetic";
+    const { listeners, responseFilters, sessionState } = await loadBackground();
+    const request = dedicatedMasterRequest(tabId, "dedicated-master-pending-generic-redirect", liveUrl);
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(request);
+    listeners.onHeadersReceived({
+      requestId: request.requestId,
+      statusCode: 302,
+      url: request.url,
+    });
+    listeners.onBeforeRedirect({
+      ...request,
+      redirectUrl: genericRedirectUrl,
+      statusCode: 302,
+    });
+    assert.equal(
+      sessionState().masterObservers,
+      1,
+      "the observer must remain pending until Firefox starts the redirected request",
+    );
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      sessionState().masterObservers,
+      0,
+      "a pending generic-CDN redirect must not consume a mini-player observer slot",
+    );
+    listeners.onHeadersReceived({
+      requestId: request.requestId,
+      statusCode: 200,
+      url: genericRedirectUrl,
+    });
+    assert.equal(responseFilters.has(request.requestId), false);
   });
 
   it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
@@ -2061,6 +2367,51 @@ https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/2160p/segment/chunkli
     assert.equal(fetches.length, fetchCountBeforeValidation);
   });
 
+  it("migrates an observer-only origin-bound master during delayed content prewarm", async () => {
+    const tabId = 518;
+    const liveUrl = "https://chzzk.naver.com/live/channel-a";
+    const pendingTab = deferred();
+    const { fetches, listeners, responseFilters, sessionState } = await loadBackground({
+      tabsGetImplementation: async () => pendingTab.promise,
+    });
+    const masterRequest = {
+      ...dedicatedMasterRequest(tabId, "contextless-master-observer", undefined),
+      documentUrl: undefined,
+      originUrl: undefined,
+    };
+
+    listeners.onMessage({ type: "chzzk.live-page-ready" }, { tab: { id: tabId } });
+    assert.equal(listeners.onBeforeRequest(masterRequest), undefined);
+    assert.equal(sessionState().masterObservers, 1);
+
+    pendingTab.resolve({ id: tabId, url: liveUrl });
+    await waitForDiagnosticsQueue();
+    assert.equal(
+      sessionState().masterObservers,
+      1,
+      "binding the concrete live context must retain the eligible master observer",
+    );
+
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      masterRequest.requestId,
+      DEDICATED_MASTER_URL,
+      DEDICATED_MASTER_BODY,
+    );
+    const cached = listeners.onBeforeRequest(
+      highBitrateLowQualityRequest(tabId, "contextless-master-cached", liveUrl),
+    );
+
+    assert.equal(
+      typeof cached?.then,
+      "undefined",
+      "the observer must finish under the adopted live context without a cold numeric probe",
+    );
+    assert.match(plain(cached).redirectUrl, /chunklist_1080p_highbitrate\.m3u8/);
+    assert.deepEqual(fetches, []);
+  });
+
   it("evicts stale tab trust when explicit request metadata proves a non-CHZZK document", async () => {
     const tabId = 514;
     const { listeners, storage } = await loadBackground({ availableQualities: new Set(["1080p"]) });
@@ -2345,6 +2696,43 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     assert.deepEqual(fetches, [], "master response scoring must not issue a second master request");
   });
 
+  it("keeps a successful master filter alive when completion precedes filter stop", async () => {
+    const family = "master-completion-before-filter-stop";
+    const masterUrl = `https://edge.pstatic.net/chzzk/${family}/hls_playlist.m3u8?Policy=synthetic`;
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p.m3u8?Policy=synthetic
+`;
+    const { fetches, listeners, responseFilters, sessionState } = await loadBackground();
+    const requestId = "completed-observed-master";
+    const request = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      requestId,
+      tabId: 440,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    };
+
+    listeners.onBeforeRequest(request);
+    listeners.onHeadersReceived({ requestId, statusCode: 200, url: masterUrl });
+    listeners.onCompleted({ requestId, statusCode: 200, url: masterUrl });
+    assert.equal(
+      sessionState().masterObservers,
+      1,
+      "the attached response filter owns successful body termination",
+    );
+    assert.equal(deliverFilteredResponse(responseFilters, requestId, masterPlaylist), masterPlaylist);
+    assert.equal(sessionState().masterObservers, 0);
+    assert.match(
+      plain(listeners.onBeforeRequest(familyRequest(440, family, "rendition-after-completion-race")))
+        .redirectUrl,
+      /chunklist_1080p\.m3u8/,
+    );
+    assert.deepEqual(fetches, []);
+  });
+
   it("does not seed a target from a non-success master response even when its body looks valid", async () => {
     const masterUrl =
       "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
@@ -2373,6 +2761,218 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
 
     const firstRendition = plain(await listeners.onBeforeRequest(firstLowQualityRequest(434)));
     assert.match(firstRendition.redirectUrl, /chunklist_720p\.m3u8/);
+  });
+
+  it("releases more than 500 terminal master 304 observers and still attaches the next filter", async () => {
+    const family = "terminal-master-observers";
+    const masterUrl = `https://edge.pstatic.net/chzzk/${family}/hls_playlist.m3u8?Policy=synthetic`;
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p.m3u8?Policy=synthetic
+`;
+    const { fetches, listeners, responseFilters, sessionState } = await loadBackground();
+    const request = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      tabId: 436,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    };
+
+    for (let index = 0; index < 501; index += 1) {
+      const requestId = `terminal-master-${index}`;
+      assert.equal(listeners.onBeforeRequest({ ...request, requestId }), undefined);
+      listeners.onHeadersReceived({ requestId, statusCode: 304, url: masterUrl });
+      assert.equal(sessionState().masterObservers, 0);
+      listeners.onCompleted({ requestId, statusCode: 304, url: masterUrl });
+    }
+    assert.equal(sessionState().masterObservers, 0);
+
+    assert.equal(
+      listeners.onBeforeRequest({ ...request, requestId: "master-after-terminal-capacity" }),
+      undefined,
+    );
+    assert.equal(
+      deliverObservedMasterResponse(
+        listeners,
+        responseFilters,
+        "master-after-terminal-capacity",
+        masterUrl,
+        masterPlaylist,
+      ),
+      masterPlaylist,
+    );
+    assert.equal(sessionState().masterObservers, 0);
+    assert.match(
+      plain(listeners.onBeforeRequest(familyRequest(436, family, "rendition-after-terminal-capacity")))
+        .redirectUrl,
+      /chunklist_1080p\.m3u8/,
+    );
+    assert.deepEqual(fetches, []);
+  });
+
+  it("retains master observers only across eligible redirects and releases every other terminal path", async () => {
+    const family = "master-redirect-lifecycle";
+    const firstMasterUrl = `https://edge.pstatic.net/chzzk/${family}/master.m3u8?Policy=synthetic`;
+    const redirectedMasterUrl = `https://edge.pstatic.net/chzzk/${family}/hls_playlist.m3u8?Policy=synthetic`;
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p.m3u8?Policy=synthetic
+`;
+    const { listeners, responseFilters, sessionState } = await loadBackground();
+    const request = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      tabId: 437,
+      type: "xmlhttprequest",
+      url: firstMasterUrl,
+    };
+
+    listeners.onBeforeRequest({ ...request, requestId: "eligible-master-redirect" });
+    listeners.onHeadersReceived({
+      requestId: "eligible-master-redirect",
+      statusCode: 302,
+      url: firstMasterUrl,
+    });
+    listeners.onBeforeRedirect({
+      ...request,
+      redirectUrl: redirectedMasterUrl,
+      requestId: "eligible-master-redirect",
+      statusCode: 302,
+    });
+    assert.equal(sessionState().masterObservers, 1);
+    listeners.onBeforeRequest({
+      ...request,
+      requestId: "eligible-master-redirect",
+      url: redirectedMasterUrl,
+    });
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      "eligible-master-redirect",
+      redirectedMasterUrl,
+      masterPlaylist,
+    );
+    assert.equal(sessionState().masterObservers, 0);
+
+    listeners.onBeforeRequest({ ...request, requestId: "ineligible-master-redirect" });
+    listeners.onHeadersReceived({
+      requestId: "ineligible-master-redirect",
+      statusCode: 302,
+      url: firstMasterUrl,
+    });
+    listeners.onBeforeRedirect({
+      ...request,
+      redirectUrl: `https://edge.pstatic.net/chzzk/${family}/not-a-playlist`,
+      requestId: "ineligible-master-redirect",
+      statusCode: 302,
+    });
+    assert.equal(sessionState().masterObservers, 0);
+
+    listeners.onBeforeRequest({ ...request, requestId: "terminal-master-redirect" });
+    listeners.onHeadersReceived({
+      requestId: "terminal-master-redirect",
+      statusCode: 302,
+      url: firstMasterUrl,
+    });
+    assert.equal(sessionState().masterObservers, 1);
+    listeners.onCompleted({
+      requestId: "terminal-master-redirect",
+      statusCode: 302,
+      url: firstMasterUrl,
+    });
+    assert.equal(sessionState().masterObservers, 0);
+
+    listeners.onBeforeRequest({ ...request, requestId: "errored-master" });
+    listeners.onErrorOccurred({
+      error: "NS_ERROR_NET_RESET",
+      requestId: "errored-master",
+      tabId: request.tabId,
+      url: firstMasterUrl,
+    });
+    assert.equal(sessionState().masterObservers, 0);
+
+    listeners.onBeforeRequest({ ...request, requestId: "migrated-master" });
+    listeners.onUpdated(request.tabId, { url: "https://chzzk.naver.com/lives" });
+    assert.equal(sessionState().masterObservers, 0);
+
+    listeners.onBeforeRequest({
+      ...request,
+      requestId: "closed-tab-master",
+      tabId: 438,
+    });
+    listeners.onRemoved(438);
+    assert.equal(sessionState().masterObservers, 0);
+  });
+
+  it("keeps valid master authority over a synthetic numeric promotion until a later master advertises it", async () => {
+    const family = "master-authority";
+    const tabId = 439;
+    const pendingNumeric = deferred();
+    const masterUrl = `https://edge.pstatic.net/chzzk/${family}/hls_playlist.m3u8?Policy=synthetic`;
+    const master1080 = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+chunklist_1080p.m3u8?Policy=synthetic
+`;
+    const master2160 = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=20000000,RESOLUTION=3840x2160,FRAME-RATE=60.00
+chunklist_2160p.m3u8?Policy=synthetic
+`;
+    const { advanceClock, fetches, listeners, responseFilters, storage } = await loadBackground({
+      fetchImplementation: async () => pendingNumeric.promise,
+    });
+    const numericRequest = familyRequest(tabId, family, "pending-numeric-promotion");
+    const pendingDecision = listeners.onBeforeRequest(numericRequest);
+    await waitForDiagnosticsQueue(10);
+    assert.match(fetches[0], /chunklist_2160p\.m3u8/);
+
+    const masterRequest = {
+      documentUrl: "https://chzzk.naver.com/live/example-channel",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      requestId: "authoritative-master-1080",
+      tabId,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    };
+    listeners.onBeforeRequest(masterRequest);
+    deliverObservedMasterResponse(listeners, responseFilters, masterRequest.requestId, masterUrl, master1080);
+    pendingNumeric.resolve(playlistResponse(fetches[0]));
+
+    assert.match(plain(await pendingDecision).redirectUrl, /chunklist_1080p\.m3u8/);
+    await waitForDiagnosticsQueue();
+    assert.equal(storage.chzzkDiagnostics.runtimeTransitions.at(-1).action, "blocked");
+    assert.equal(storage.chzzkDiagnostics.runtimeTransitions.at(-1).reason, "master-authority");
+
+    const fetchCountAfterBlockedPromotion = fetches.length;
+    advanceClock(60_001);
+    const retained = listeners.onBeforeRequest(familyRequest(tabId, family, "master-authority-retained"));
+    assert.equal(typeof retained?.then, "undefined");
+    assert.match(plain(retained).redirectUrl, /chunklist_1080p\.m3u8/);
+    await waitForDiagnosticsQueue(20);
+    assert.equal(
+      fetches.length,
+      fetchCountAfterBlockedPromotion,
+      "master-derived targets must not launch numeric upward refreshes",
+    );
+
+    listeners.onBeforeRequest({
+      ...masterRequest,
+      requestId: "authoritative-master-2160",
+    });
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      "authoritative-master-2160",
+      masterUrl,
+      master2160,
+    );
+    assert.match(
+      plain(listeners.onBeforeRequest(familyRequest(tabId, family, "master-authority-promoted"))).redirectUrl,
+      /chunklist_2160p\.m3u8/,
+    );
   });
 
   it("does not let a later lower master response overwrite a valid higher target", async () => {
@@ -2529,6 +3129,40 @@ chunklist_720p_highbitrate.m3u8?Policy=redacted
     const promoted = plain(await listeners.onBeforeRequest(lowRequest));
     assert.match(promoted.redirectUrl, /chunklist_1080p/);
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 44: "1080p" });
+  });
+
+  it("lets trusted master evidence demote an earlier numeric target while preserving master monotonicity", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p.m3u8?Policy=redacted
+`;
+    const lowRequest = firstLowQualityRequest(45);
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["2160p"]),
+      responsesByUrl: new Map([[masterUrl, masterPlaylist]]),
+    });
+
+    const numeric = plain(await listeners.onBeforeRequest(lowRequest));
+    assert.match(numeric.redirectUrl, /chunklist_2160p/);
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        documentUrl: "https://chzzk.naver.com/live/example-channel",
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        tabId: 45,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    await waitForDiagnosticsQueue(20);
+
+    const authoritative = plain(listeners.onBeforeRequest(lowRequest));
+    assert.match(authoritative.redirectUrl, /chunklist_1080p/);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 45: "1080p" });
   });
 
   it("lets newer master-playlist evidence supersede an older numeric probe", async () => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -7,9 +7,13 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  MAX_SIGNED_SMOKE_RESULT_BYTES,
   assertTrustedPermanentAddon,
   bindGeckodriverService,
   buildProductionFirefoxCapabilities,
+  createFirefoxSignedSmokeEvidence,
+  persistFirefoxSignedSmokeResult,
+  startGeckodriver,
   validateSignedSmokeInputs,
 } from "../../scripts/lib/firefox-signed-smoke.js";
 import { RELEASE_PACKAGE_FILES } from "../../scripts/lib/release-artifacts.js";
@@ -60,6 +64,16 @@ function makeInputFiles() {
     newSignedXpiPath,
     oldSignedXpiPath,
   };
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
 }
 
 describe("stock Firefox AMO-signed release smoke gate", () => {
@@ -118,6 +132,54 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
     }
   });
 
+  it("uses POSIX executable bits only on POSIX and accepts native Windows executables", () => {
+    const files = makeInputFiles();
+    try {
+      chmodSync(files.firefoxBinary, 0o600);
+      chmodSync(files.geckodriverBinary, 0o600);
+      assert.doesNotThrow(() =>
+        validateSignedSmokeInputs({ ...files, mode: "update" }, { platform: "win32" }),
+      );
+      assert.throws(
+        () => validateSignedSmokeInputs({ ...files, mode: "update" }, { platform: "linux" }),
+        /must be executable/i,
+      );
+      assert.throws(
+        () => validateSignedSmokeInputs({ ...files, mode: "update" }, { platform: "synthetic-unknown" }),
+        /platform.*unsupported/i,
+      );
+    } finally {
+      files.cleanup();
+    }
+  });
+
+  it(
+    "terminates and awaits geckodriver when startup readiness times out",
+    { skip: process.platform === "win32" },
+    async () => {
+      const directory = mkdtempSync(join(repoRoot, ".chzzk-geckodriver-startup-"));
+      const binary = join(directory, "fake-geckodriver");
+      const pidPath = join(directory, "pid");
+      writeFileSync(
+        binary,
+        `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+setInterval(() => {}, 1000);
+`,
+      );
+      chmodSync(binary, 0o700);
+      try {
+        await assert.rejects(startGeckodriver(binary, { readinessTimeoutMs: 500 }), /timed out/i);
+        const pid = Number(readFileSync(pidPath, "utf8"));
+        assert.equal(Number.isSafeInteger(pid), true);
+        assert.equal(processExists(pid), false);
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("binds the reserved geckodriver port into every disposable Firefox session", () => {
     const input = { firefoxBinary: "/opt/firefox/firefox" };
     assert.deepEqual(bindGeckodriverService(input, { port: 28_282 }), { ...input, port: 28_282 });
@@ -148,6 +210,7 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
       expectedVersion: "0.1.5",
       securityState: {
         appName: "Firefox",
+        appVersion: "152.0.6",
         expectedSignedState: 2,
         signaturePreferenceHasUserValue: false,
         signaturesRequired: true,
@@ -188,6 +251,52 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
     }
   });
 
+  it("persists only bounded fixed-schema signed-smoke evidence without overwriting", () => {
+    const directory = mkdtempSync(join(tmpdir(), "chzzk-signed-smoke-result-"));
+    const resultPath = join(directory, "signed-smoke-result.json");
+    const rawResult = {
+      finalVersion: "0.1.5",
+      firefoxVersion: "152.0.6",
+      installedState: "permanent-signed-active",
+      mode: "update",
+      permanent: true,
+      signedState: 2,
+      update: {
+        noUpdateResult: {
+          status: "no-update",
+          uiState: "none-found",
+        },
+      },
+    };
+    try {
+      const expected = {
+        extensionVersion: "0.1.5",
+        finalUpdateState: "none-found",
+        firefoxVersion: "152.0.6",
+        installedState: "permanent-signed-active",
+        mode: "update",
+        schemaVersion: 1,
+        status: "passed",
+      };
+      assert.deepEqual(createFirefoxSignedSmokeEvidence(rawResult), expected);
+      assert.deepEqual(persistFirefoxSignedSmokeResult(rawResult, resultPath), expected);
+      assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), expected);
+      assert.equal(statSync(resultPath).size <= MAX_SIGNED_SMOKE_RESULT_BYTES, true);
+      assert.equal(statSync(resultPath).mode & 0o777, 0o600);
+      assert.throws(() => persistFirefoxSignedSmokeResult(rawResult, resultPath), /exist|EEXIST/i);
+      assert.throws(
+        () =>
+          createFirefoxSignedSmokeEvidence({
+            ...rawResult,
+            update: { noUpdateResult: { uiState: "installed" } },
+          }),
+        /final update state/i,
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
   it("fails clearly when release-use signed artifacts are absent", () => {
     const result = spawnSync(process.execPath, ["scripts/firefox-signed-smoke.js"], {
       cwd: repoRoot,
@@ -203,12 +312,44 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
   it("labels the unsigned Firefox E2E as functional-only and exposes the signed gate separately", () => {
     const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
     const functionalE2e = readFileSync(join(repoRoot, "tests/e2e/firefox-update-playback.mjs"), "utf8");
+    const ciWorkflow = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
     assert.equal(
       packageJson.scripts["test:firefox-functional-e2e"],
       "node tests/e2e/firefox-update-playback.mjs",
     );
     assert.equal(packageJson.scripts["test:firefox-signed-smoke"], "node scripts/firefox-signed-smoke.js");
     assert.match(functionalE2e, /functionalOnly:\s*true/);
+    assert.match(ciWorkflow, /for iteration in 1 2 3/);
+  });
+
+  it("provides a native Windows update runner that requires and validates bounded evidence", () => {
+    const wrapper = readFileSync(join(repoRoot, "scripts/firefox-signed-smoke.windows.ps1"), "utf8");
+    const testingDocs = readFileSync(join(repoRoot, "docs/TESTING.md"), "utf8");
+    assert.match(wrapper, /\$env:OS\s+-ne\s+"Windows_NT"/);
+    assert.match(wrapper, /CHZZK_SIGNED_SMOKE_MODE"\s*=\s*"update"/);
+    assert.match(wrapper, /CHZZK_SIGNED_SMOKE_RESULT/);
+    assert.match(wrapper, /finalUpdateState\s+-ne\s+"none-found"/);
+    assert.match(wrapper, /permanent-signed-active/);
+    assert.match(wrapper, /4096/);
+    for (const name of [
+      "NODE_EXTRA_CA_CERTS",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+      "OPENSSL_CONF",
+      "SSL_CERT_DIR",
+      "SSL_CERT_FILE",
+    ]) {
+      assert.match(wrapper, new RegExp(`"${name}"`));
+    }
+    const environmentClear = wrapper.indexOf(
+      'foreach ($name in $nodeStartupEnvironmentNames) {\n        [Environment]::SetEnvironmentVariable($name, $null, "Process")',
+    );
+    const versionProbe = wrapper.indexOf("$nodeMajor = & $node.Source");
+    const smokeRun = wrapper.indexOf("& $node.Source $runner");
+    assert.ok(environmentClear >= 0);
+    assert.ok(environmentClear < versionProbe);
+    assert.ok(versionProbe < smokeRun);
+    assert.match(testingDocs, /-ExecutionPolicy Bypass -File/);
   });
 
   it("drives the user-visible about:addons update path and checks every completion state", () => {

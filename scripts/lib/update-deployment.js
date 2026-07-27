@@ -26,6 +26,7 @@ const MANAGED_LINK_NAMES = Object.freeze(["current", "index.html", "provenance.j
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const TRANSACTION_ID_RE = /^[a-f0-9]{16}$/;
 const LOCK_ACQUIRE_TIMEOUT_MS = 5000;
+const LOCK_CONFLICT_WAIT_SECONDS = "1";
 const LOCK_RELEASE_TIMEOUT_MS = 5000;
 const LOCK_TERMINATION_TIMEOUT_MS = 1000;
 
@@ -148,7 +149,8 @@ function startProcessBoundLock(lockPath) {
     "/usr/bin/flock",
     [
       "--exclusive",
-      "--nonblock",
+      "--timeout",
+      LOCK_CONFLICT_WAIT_SECONDS,
       "--conflict-exit-code",
       "75",
       lockPath,

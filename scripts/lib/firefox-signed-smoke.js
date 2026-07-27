@@ -1,12 +1,34 @@
 import { spawn } from "node:child_process";
-import { chmodSync, lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { MAX_AMO_JSON_BYTES, MAX_SIGNED_XPI_BYTES, assertReleaseMetadata } from "./amo-client.js";
 
+export const MAX_SIGNED_SMOKE_RESULT_BYTES = 4096;
 const SIGNED_XPI_NAME_RE = /^chzzk-(\d+\.\d+\.\d+)-signed\.xpi$/;
+const SUPPORTED_NODE_PLATFORMS = new Set([
+  "aix",
+  "android",
+  "darwin",
+  "freebsd",
+  "linux",
+  "openbsd",
+  "sunos",
+  "win32",
+]);
 const WEB_ELEMENT_ID = "element-6066-11e4-a52e-4f735466cecf";
 
 function resolveInputPath(path, environmentName) {
@@ -14,7 +36,11 @@ function resolveInputPath(path, environmentName) {
   return resolve(path);
 }
 
-function assertRegularInput(path, environmentName, { executable = false, maxBytes = null } = {}) {
+function assertRegularInput(
+  path,
+  environmentName,
+  { executable = false, maxBytes = null, platform = process.platform } = {},
+) {
   if (typeof path !== "string" || !path) throw new Error(`${environmentName} is required`);
   let stat;
   try {
@@ -28,7 +54,7 @@ function assertRegularInput(path, environmentName, { executable = false, maxByte
   if (stat.size <= 0 || (maxBytes !== null && stat.size > maxBytes)) {
     throw new Error(`${environmentName} has an invalid size`);
   }
-  if (executable && (stat.mode & 0o111) === 0) {
+  if (executable && platform !== "win32" && (stat.mode & 0o111) === 0) {
     throw new Error(`${environmentName} must be executable`);
   }
   return stat;
@@ -50,14 +76,13 @@ function compareVersions(left, right) {
   return 0;
 }
 
-export function validateSignedSmokeInputs({
-  firefoxBinary,
-  geckodriverBinary,
-  metadataPath,
-  mode,
-  newSignedXpiPath,
-  oldSignedXpiPath,
-}) {
+export function validateSignedSmokeInputs(
+  { firefoxBinary, geckodriverBinary, metadataPath, mode, newSignedXpiPath, oldSignedXpiPath },
+  { platform = process.platform } = {},
+) {
+  if (!SUPPORTED_NODE_PLATFORMS.has(platform)) {
+    throw new Error("Signed-smoke input validation platform is unsupported");
+  }
   if (!new Set(["install", "update"]).has(mode)) {
     throw new Error("CHZZK_SIGNED_SMOKE_MODE must be install or update");
   }
@@ -68,8 +93,11 @@ export function validateSignedSmokeInputs({
   if (mode === "update") {
     oldSignedXpiPath = resolveInputPath(oldSignedXpiPath, "CHZZK_OLD_SIGNED_XPI");
   }
-  assertRegularInput(firefoxBinary, "FIREFOX_BINARY", { executable: true });
-  assertRegularInput(geckodriverBinary, "GECKODRIVER_BINARY", { executable: true });
+  assertRegularInput(firefoxBinary, "FIREFOX_BINARY", { executable: true, platform });
+  assertRegularInput(geckodriverBinary, "GECKODRIVER_BINARY", {
+    executable: true,
+    platform,
+  });
   assertRegularInput(metadataPath, "CHZZK_RELEASE_METADATA", { maxBytes: MAX_AMO_JSON_BYTES });
   assertRegularInput(newSignedXpiPath, "CHZZK_SIGNED_XPI", { maxBytes: MAX_SIGNED_XPI_BYTES });
 
@@ -138,6 +166,10 @@ export function assertTrustedPermanentAddon({
   securityState,
 }) {
   if (securityState?.appName !== "Firefox") throw new Error("Smoke gate requires stock Firefox");
+  const firefoxVersion = String(securityState?.appVersion ?? "");
+  if (!/^[0-9][0-9A-Za-z.+-]{0,31}$/.test(firefoxVersion)) {
+    throw new Error("Firefox version is invalid");
+  }
   if (securityState.signaturesRequired !== true) {
     throw new Error("Firefox signature enforcement is not enabled");
   }
@@ -159,7 +191,87 @@ export function assertTrustedPermanentAddon({
   if (addon.updateURL !== expectedUpdateUrl) {
     throw new Error("Installed add-on update URL does not match release metadata");
   }
-  return addon;
+  return { ...addon, firefoxVersion };
+}
+
+export function createFirefoxSignedSmokeEvidence(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("Firefox signed-smoke result is invalid");
+  }
+  const mode = result.mode;
+  if (!new Set(["install", "update"]).has(mode)) {
+    throw new Error("Firefox signed-smoke result mode is invalid");
+  }
+  const firefoxVersion = String(result.firefoxVersion ?? "");
+  const extensionVersion = String(result.finalVersion ?? "");
+  if (!/^[0-9][0-9A-Za-z.+-]{0,31}$/.test(firefoxVersion)) {
+    throw new Error("Firefox signed-smoke result version is invalid");
+  }
+  if (!/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(extensionVersion)) {
+    throw new Error("Firefox signed-smoke extension version is invalid");
+  }
+  if (
+    result.installedState !== "permanent-signed-active" ||
+    result.permanent !== true ||
+    !Number.isSafeInteger(result.signedState)
+  ) {
+    throw new Error("Firefox signed-smoke installed state is invalid");
+  }
+  const finalUpdateState = mode === "update" ? result.update?.noUpdateResult?.uiState : "not-run";
+  if (mode === "update" && finalUpdateState !== "none-found") {
+    throw new Error("Firefox signed-smoke final update state is invalid");
+  }
+  return {
+    extensionVersion,
+    finalUpdateState,
+    firefoxVersion,
+    installedState: "permanent-signed-active",
+    mode,
+    schemaVersion: 1,
+    status: "passed",
+  };
+}
+
+export function persistFirefoxSignedSmokeResult(result, outputPath) {
+  outputPath = resolveInputPath(outputPath, "CHZZK_SIGNED_SMOKE_RESULT");
+  const parent = lstatSync(dirname(outputPath));
+  if (!parent.isDirectory() || parent.isSymbolicLink()) {
+    throw new Error("CHZZK_SIGNED_SMOKE_RESULT parent must be a real directory");
+  }
+  const evidence = createFirefoxSignedSmokeEvidence(result);
+  const payload = `${JSON.stringify(evidence)}\n`;
+  if (Buffer.byteLength(payload) > MAX_SIGNED_SMOKE_RESULT_BYTES) {
+    throw new Error("Firefox signed-smoke result exceeds the size limit");
+  }
+
+  let created = false;
+  let descriptor = null;
+  try {
+    descriptor = openSync(outputPath, "wx", 0o600);
+    created = true;
+    writeFileSync(descriptor, payload, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
+    chmodSync(outputPath, 0o600);
+  } catch (error) {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the original write failure.
+      }
+    }
+    if (created) {
+      try {
+        unlinkSync(outputPath);
+      } catch {
+        // Preserve the original write failure.
+      }
+    }
+    throw error;
+  }
+  return evidence;
 }
 
 function delay(milliseconds) {
@@ -265,6 +377,7 @@ AddonManager.getAddonByID(addonId).then((addon) => done({
   } : null,
   securityState: {
     appName: Services.appinfo.name,
+    appVersion: Services.appinfo.version,
     expectedSignedState: AddonManager.SIGNEDSTATE_SIGNED,
     signaturePreferenceHasUserValue: Services.prefs.prefHasUserValue(signaturePreference),
     signaturesRequired: Services.prefs.getBoolPref(signaturePreference, false),
@@ -510,7 +623,32 @@ async function reservePort() {
   return port;
 }
 
-async function startGeckodriver(binary) {
+function geckodriverHasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForGeckodriverExit(child, timeoutMs) {
+  if (geckodriverHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer !== null) clearTimeout(timer);
+      child.off("error", handleExit);
+      child.off("exit", handleExit);
+      resolve(exited);
+    };
+    const handleExit = () => finish(true);
+    child.once("error", handleExit);
+    child.once("exit", handleExit);
+    if (geckodriverHasExited(child)) {
+      finish(true);
+      return;
+    }
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+export async function startGeckodriver(binary, { readinessTimeoutMs = 10_000 } = {}) {
   const port = await reservePort();
   const logs = [];
   const child = spawn(binary, ["--host", "127.0.0.1", "--port", String(port)], {
@@ -524,27 +662,36 @@ async function startGeckodriver(binary) {
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => logs.push(chunk));
   }
-  await poll(
-    async () => {
-      if (processError) throw processError;
-      if (child.exitCode !== null) throw new Error(`geckodriver exited with status ${child.exitCode}`);
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/status`);
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
-    { timeoutMs: 10_000 },
-  );
-  return { child, logs, port };
+  try {
+    await poll(
+      async () => {
+        if (processError) throw processError;
+        if (geckodriverHasExited(child)) {
+          throw new Error(`geckodriver exited with status ${child.exitCode ?? child.signalCode}`);
+        }
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/status`);
+          return response.ok;
+        } catch {
+          return false;
+        }
+      },
+      { timeoutMs: readinessTimeoutMs },
+    );
+    return { child, logs, port };
+  } catch (error) {
+    await stopGeckodriver(child);
+    throw error;
+  }
 }
 
-async function stopGeckodriver(child) {
-  if (child.exitCode !== null) return;
+export async function stopGeckodriver(child) {
+  if (geckodriverHasExited(child)) return;
   child.kill("SIGTERM");
-  await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(3000)]);
-  if (child.exitCode === null) child.kill("SIGKILL");
+  if (await waitForGeckodriverExit(child, 3000)) return;
+  child.kill("SIGKILL");
+  if (await waitForGeckodriverExit(child, 3000)) return;
+  throw new Error("geckodriver did not terminate after SIGKILL");
 }
 
 async function withDisposableFirefox({ firefoxBinary, port }, action) {
@@ -653,6 +800,8 @@ export async function runFirefoxSignedSmoke(rawInput) {
     return {
       addOnId: finalInstall.id,
       finalVersion: finalInstall.version,
+      firefoxVersion: finalInstall.firefoxVersion,
+      installedState: "permanent-signed-active",
       mode: input.mode,
       permanent: !finalInstall.temporarilyInstalled,
       signedState: finalInstall.signedState,

@@ -7,6 +7,7 @@
 - [ ] Diagnostics do not store signed query/hash values.
 - [ ] `npm run verify` passes.
 - [ ] Generated runtime files are refreshed before manual distribution.
-- [ ] I reviewed the final diff directly; no separate bot-review round is required.
-- [ ] Every actionable review thread is resolved, and checks were rerun after the last push.
+- [ ] This PR remained draft while the final exact-head Codex review was pending.
+- [ ] The completed review names the current PR head SHA; no source commit was pushed afterward.
+- [ ] Every actionable review thread is resolved, and checks were rerun after the last source push.
 - [ ] High-risk release, permissions, deployment, or security-policy changes are identified explicitly in the PR body.

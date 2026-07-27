@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 
-import { runFirefoxSignedSmoke } from "./lib/firefox-signed-smoke.js";
+import { persistFirefoxSignedSmokeResult, runFirefoxSignedSmoke } from "./lib/firefox-signed-smoke.js";
 
 function configuredPath(name) {
   return process.env[name] ? resolve(process.env[name]) : undefined;
@@ -16,6 +16,8 @@ try {
     newSignedXpiPath: configuredPath("CHZZK_SIGNED_XPI"),
     oldSignedXpiPath: configuredPath("CHZZK_OLD_SIGNED_XPI"),
   });
+  const resultPath = configuredPath("CHZZK_SIGNED_SMOKE_RESULT");
+  if (resultPath) persistFirefoxSignedSmokeResult(result, resultPath);
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(`Stock Firefox signed-release smoke failed: ${error.message}`);
