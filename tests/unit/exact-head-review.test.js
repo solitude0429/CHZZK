@@ -15,7 +15,9 @@ function passingSnapshot() {
       nodes: [
         {
           author: { login: "chatgpt-codex-connector[bot]" },
-          body: `Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+          body:
+            `Codex Review: Didn't find any major issues. :tada:\n\n` +
+            `**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
         },
       ],
       pageInfo: { hasNextPage: false, hasPreviousPage: false },
@@ -35,7 +37,9 @@ function passingSnapshot() {
 
 describe("exact-head review verification", () => {
   it("extracts and matches reviewed commit evidence", () => {
-    const body = `Codex Review: Didn't find any major issues.\nReviewed commit: \`${headSha.slice(0, 12)}\``;
+    const body =
+      `Codex Review: Didn't find any major issues.\n` +
+      `Reviewed commit: \`${headSha.slice(0, 12)}\``;
     assert.equal(reviewedCommit(body), headSha.slice(0, 12));
     assert.equal(evidenceMatchesHead(body, headSha), true);
     assert.equal(evidenceMatchesHead(body, `f${headSha.slice(1)}`), false);
