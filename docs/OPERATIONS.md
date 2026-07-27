@@ -16,7 +16,16 @@ npm run test:firefox-functional-e2e
 ```
 
 4. Open a draft PR. The protected branch requires the five GitHub-Actions-bound checks `verify`, `firefox-e2e`, `dependency-review`, `analyze` (CodeQL), and `exact-head-review`, plus zero unresolved review threads.
-5. After the last source push, keep the PR draft while the active Codex task reviews the final diff. Record the exact reviewed head SHA and any high-risk release, permissions, deployment, or security-policy impact in the PR body only after the review result exists. If any source commit is pushed afterward, return to draft and repeat the exact-head review. Mark ready only when the recorded reviewed SHA equals the current PR head, the source-bound `exact-head-review` check succeeds for that SHA, and every actionable thread is resolved. A self-approval or approval-count gate is not required for this sole-owner repository.
+5. After the last source push, keep the PR draft and record every high-risk release, permissions, deployment, or security-policy impact in the PR body. Resolve all known actionable threads, refresh the remote base, and then have the PR author or configured `RELEASE_OPERATOR_LOGIN` create one new, unedited top-level comment in this exact form:
+
+```text
+@codex review
+
+head: `<full current PR head SHA>`
+base: `main@<full current base SHA>`
+```
+
+The request must be created after the named head entered the PR. Codex success is accepted only as a thumbs-up from the configured Codex connector on that same comment while its body and the bound head/base remain unchanged. Do not edit or delete the request. A later source push, force-push, base retarget, or base-SHA mismatch invalidates it. If Codex opens actionable threads, resolve them, make any required source changes, and submit a fresh exact-diff request. Mark the PR ready only after the source-bound `exact-head-review` check succeeds for the current head/base and every conversation is resolved. A self-approval or approval-count gate is not required for this sole-owner repository.
 6. Merge through protected `main`.
 7. Refresh the external operator bootstrap from the protected exact `main` blob as described in `docs/SIGNING.md`.
 8. From the clean exact-`main` checkout, run the fully sanitized, bounded `release` command in `docs/SIGNING.md` once. Do not replace it with a checkout script, npm command, or ambient `gh workflow run`.
@@ -43,7 +52,7 @@ npm run deploy:updates:internal
 
 ## Repository settings
 
-Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the five source-bound checks `analyze`, `dependency-review`, `exact-head-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The repository-owned `exact-head-review` context is the required qualitative-review gate: it accepts only successful Codex evidence naming the exact 40-character current head SHA, rejects unresolved threads and incomplete pagination, and publishes through a trusted-base workflow path. Do not replace it with an unbound status context or an approval-count gate.
+Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the five source-bound checks `analyze`, `dependency-review`, `exact-head-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, requires strict up-to-date status checks, and requires resolved conversations without a self-approval rule. The repository-owned `exact-head-review` context is the qualitative-review gate: it accepts only an unedited author/operator request created after the current head entered the PR, binds the exact 40-character head SHA to the current base ref and 40-character base SHA, requires a Codex-connector thumbs-up on that same comment, rejects head/base transitions, and fails closed on incomplete timeline, reaction, or review-thread pagination. Conversation resolution remains a separate native branch-protection requirement. Do not replace this gate with an unbound status context or an approval-count rule.
 
 ```bash
 CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
