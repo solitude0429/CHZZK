@@ -827,6 +827,47 @@ describe("background runtime quality resolution", () => {
     assert.equal(responseFilters.has("generic-master-live-to-mini"), false);
   });
 
+  it("drops a dedicated master observer while its pending redirect points at a generic CDN", async () => {
+    const tabId = 650;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const genericRedirectUrl =
+      "https://edge.pstatic.net/chzzk/pending-generic-master/hls_playlist.m3u8?Policy=synthetic";
+    const { listeners, responseFilters, sessionState } = await loadBackground();
+    const request = dedicatedMasterRequest(tabId, "dedicated-master-pending-generic-redirect", liveUrl);
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(request);
+    listeners.onHeadersReceived({
+      requestId: request.requestId,
+      statusCode: 302,
+      url: request.url,
+    });
+    listeners.onBeforeRedirect({
+      ...request,
+      redirectUrl: genericRedirectUrl,
+      statusCode: 302,
+    });
+    assert.equal(
+      sessionState().masterObservers,
+      1,
+      "the observer must remain pending until Firefox starts the redirected request",
+    );
+
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      sessionState().masterObservers,
+      0,
+      "a pending generic-CDN redirect must not consume a mini-player observer slot",
+    );
+    listeners.onHeadersReceived({
+      requestId: request.requestId,
+      statusCode: 200,
+      url: genericRedirectUrl,
+    });
+    assert.equal(responseFilters.has(request.requestId), false);
+  });
+
   it("renews successful mini-player redirects without periodic blocking re-probes", async () => {
     const availableQualities = new Set(["2160p"]);
     const { advanceClock, fetches, listeners, responseFilters } = await loadBackground({

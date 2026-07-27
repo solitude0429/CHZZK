@@ -324,12 +324,32 @@ setInterval(() => {}, 1000);
 
   it("provides a native Windows update runner that requires and validates bounded evidence", () => {
     const wrapper = readFileSync(join(repoRoot, "scripts/firefox-signed-smoke.windows.ps1"), "utf8");
+    const testingDocs = readFileSync(join(repoRoot, "docs/TESTING.md"), "utf8");
     assert.match(wrapper, /\$env:OS\s+-ne\s+"Windows_NT"/);
     assert.match(wrapper, /CHZZK_SIGNED_SMOKE_MODE"\s*=\s*"update"/);
     assert.match(wrapper, /CHZZK_SIGNED_SMOKE_RESULT/);
     assert.match(wrapper, /finalUpdateState\s+-ne\s+"none-found"/);
     assert.match(wrapper, /permanent-signed-active/);
     assert.match(wrapper, /4096/);
+    for (const name of [
+      "NODE_EXTRA_CA_CERTS",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+      "OPENSSL_CONF",
+      "SSL_CERT_DIR",
+      "SSL_CERT_FILE",
+    ]) {
+      assert.match(wrapper, new RegExp(`"${name}"`));
+    }
+    const environmentClear = wrapper.indexOf(
+      'foreach ($name in $nodeStartupEnvironmentNames) {\n        [Environment]::SetEnvironmentVariable($name, $null, "Process")',
+    );
+    const versionProbe = wrapper.indexOf("$nodeMajor = & $node.Source");
+    const smokeRun = wrapper.indexOf("& $node.Source $runner");
+    assert.ok(environmentClear >= 0);
+    assert.ok(environmentClear < versionProbe);
+    assert.ok(versionProbe < smokeRun);
+    assert.match(testingDocs, /-ExecutionPolicy Bypass -File/);
   });
 
   it("drives the user-visible about:addons update path and checks every completion state", () => {

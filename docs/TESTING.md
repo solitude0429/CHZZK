@@ -91,7 +91,7 @@ The Linux authenticity gate does not replace the client-network boundary. Releas
 Run the repository-owned native Windows gate from a clean exact-`main` checkout after deployment:
 
 ```powershell
-powershell.exe -NoProfile -File .\scripts\firefox-signed-smoke.windows.ps1 `
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\firefox-signed-smoke.windows.ps1 `
   -FirefoxBinary "C:\Program Files\Mozilla Firefox\firefox.exe" `
   -GeckodriverBinary "C:\path\to\geckodriver.exe" `
   -ReleaseMetadata "C:\path\to\chzzk-<version>-release-metadata.json" `
@@ -100,7 +100,7 @@ powershell.exe -NoProfile -File .\scripts\firefox-signed-smoke.windows.ps1 `
   -ResultPath "$env:TEMP\chzzk-<version>-signed-smoke-result.json"
 ```
 
-The wrapper always runs update mode. It drives the visible, interactability-enforcing `about:addons` controls from the older Mozilla-signed XPI to the intended version, then requires a second visible `none-found` result. On success it creates, without overwriting, one UTF-8 result no larger than 4 KiB. The exact schema contains only `schemaVersion`, `status`, `mode`, `firefoxVersion`, `extensionVersion`, `installedState`, and `finalUpdateState`; it contains no profile path, URL, identifier, or raw driver log. Copy that result into the protected release evidence, then delete the task-created Windows result and inputs. The disposable profiles and geckodriver process are removed by the runner, and the user's running profile is never opened or modified.
+The command's execution-policy bypass is process-scoped and does not change the machine or user policy. The wrapper always runs update mode. Before either Node invocation it temporarily removes Node startup and trust-injection environment variables, including `NODE_OPTIONS` and `NODE_PATH`, and restores every prior process value in `finally`. It drives the visible, interactability-enforcing `about:addons` controls from the older Mozilla-signed XPI to the intended version, then requires a second visible `none-found` result. On success it creates, without overwriting, one UTF-8 result no larger than 4 KiB. The exact schema contains only `schemaVersion`, `status`, `mode`, `firefoxVersion`, `extensionVersion`, `installedState`, and `finalUpdateState`; it contains no profile path, URL, identifier, or raw driver log. Copy that result into the protected release evidence, then delete the task-created Windows result and inputs. The disposable profiles and geckodriver process are removed by the runner, and the user's running profile is never opened or modified.
 
 ## Manual Firefox smoke test
 

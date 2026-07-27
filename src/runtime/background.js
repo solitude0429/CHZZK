@@ -843,14 +843,24 @@ function tabHasQualityState(tabId) {
   );
 }
 
+function masterResponseObserverCanMigrateAcrossContext(record) {
+  const currentOrPendingNetworkUrl =
+    record?.expectedRedirectNetworkUrl ?? record?.finalNetworkUrl;
+  return Boolean(
+    record &&
+      !record.settled &&
+      record.session.dedicatedHls &&
+      record.streamFailed !== true &&
+      isDedicatedChzzkHlsPlaylistUrl(currentOrPendingNetworkUrl, policy),
+  );
+}
+
 function tabHasMigratableContextlessMasterObserver(tabId) {
   return [...masterResponseObserversById.values()].some(
     (record) =>
-      !record.settled &&
       record.session.tabId === tabId &&
       record.session.contextKey === "trusted-request" &&
-      record.session.dedicatedHls &&
-      record.streamFailed !== true,
+      masterResponseObserverCanMigrateAcrossContext(record),
   );
 }
 
@@ -967,9 +977,7 @@ function migrateMasterResponseObserversAcrossContext(
   for (const record of [...masterResponseObserversById.values()]) {
     if (record.session.tabId !== tabId) continue;
     if (
-      record.settled ||
-      !record.session.dedicatedHls ||
-      record.streamFailed === true ||
+      !masterResponseObserverCanMigrateAcrossContext(record) ||
       (sourceContextKey && record.session.contextKey !== sourceContextKey)
     ) {
       settleMasterResponseObserver(record);

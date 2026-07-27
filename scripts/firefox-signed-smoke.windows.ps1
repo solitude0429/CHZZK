@@ -73,11 +73,14 @@ if (Test-Path -LiteralPath $result) {
 }
 
 $node = Get-Command -Name $NodeBinary -CommandType Application -ErrorAction Stop
-$nodeMajor = & $node.Source -p "process.versions.node.split('.')[0]"
-if ($LASTEXITCODE -ne 0 -or [int]$nodeMajor -lt 20) {
-    throw "Node.js 20 or newer is required."
-}
-
+$nodeStartupEnvironmentNames = @(
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "OPENSSL_CONF",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE"
+)
 $environmentValues = [ordered]@{
     "CHZZK_OLD_SIGNED_XPI" = $oldSigned
     "CHZZK_RELEASE_METADATA" = $metadata
@@ -91,9 +94,24 @@ $previousEnvironment = @{}
 $completed = $false
 $resultCreated = $false
 
+foreach ($name in $nodeStartupEnvironmentNames) {
+    $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+foreach ($name in $environmentValues.Keys) {
+    $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+
 try {
+    foreach ($name in $nodeStartupEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+
+    $nodeMajor = & $node.Source -p "process.versions.node.split('.')[0]"
+    if ($LASTEXITCODE -ne 0 -or [int]$nodeMajor -lt 20) {
+        throw "Node.js 20 or newer is required."
+    }
+
     foreach ($name in $environmentValues.Keys) {
-        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
         [Environment]::SetEnvironmentVariable(
             $name,
             $environmentValues[$name],
@@ -151,6 +169,13 @@ try {
 }
 finally {
     foreach ($name in $environmentValues.Keys) {
+        [Environment]::SetEnvironmentVariable(
+            $name,
+            $previousEnvironment[$name],
+            "Process"
+        )
+    }
+    foreach ($name in $nodeStartupEnvironmentNames) {
         [Environment]::SetEnvironmentVariable(
             $name,
             $previousEnvironment[$name],
