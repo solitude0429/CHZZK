@@ -25,7 +25,7 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - run: npx prettier --write .github/workflows/exact-head-review.yml docs/TESTING.md package.json scripts/configure-exact-head-review.js scripts/configure-repository-all.js scripts/firefox-signed-smoke.windows.ps1 scripts/verify-exact-head-review.js tests/unit/exact-head-review-protection.test.js tests/unit/exact-head-review.test.js tests/unit/firefox-signed-smoke.test.js tests/unit/windows-wrapper-policy.test.js
+      - run: npx prettier --write .github/workflows/exact-head-review.yml docs/TESTING.md package.json scripts/configure-exact-head-review.js scripts/configure-repository-all.js scripts/verify-exact-head-review.js tests/unit/exact-head-review-protection.test.js tests/unit/exact-head-review.test.js tests/unit/firefox-signed-smoke.test.js tests/unit/windows-wrapper-policy.test.js
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           if-no-files-found: error
