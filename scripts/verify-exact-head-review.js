@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 const REVIEW_BOT_LOGINS = new Set(["chatgpt-codex-connector", "chatgpt-codex-connector[bot]"]);
 const SUCCESS_RE = /Codex Review:\s*Didn['’]t find any major issues/i;
 const REVIEWED_COMMIT_RE = /Reviewed commit:\*?\*?\s*`?([a-f0-9]{40})`?/i;
+const REVIEW_REQUEST_RE = /(?:^|\s)@codex\s+review(?:\s|$)/i;
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -21,6 +22,24 @@ export function evidenceMatchesHead(body, headSha) {
   if (!SUCCESS_RE.test(body)) return false;
   const reviewed = reviewedCommit(body);
   return Boolean(reviewed && reviewed === headSha.toLowerCase());
+}
+
+export function reviewRequestMatchesHead(body, headSha) {
+  if (typeof body !== "string" || typeof headSha !== "string") return false;
+  return REVIEW_REQUEST_RE.test(body) && body.toLowerCase().includes(headSha.toLowerCase());
+}
+
+function reactionUsers(group) {
+  const users = group?.users;
+  if (users?.pageInfo?.hasNextPage) return null;
+  return asArray(users?.nodes);
+}
+
+function hasSuccessfulBotReaction(entry) {
+  const thumbsUp = asArray(entry?.reactionGroups).find((group) => group?.content === "THUMBS_UP");
+  const users = reactionUsers(thumbsUp);
+  if (users === null) return null;
+  return users.some((user) => REVIEW_BOT_LOGINS.has(user?.login));
 }
 
 export function evaluateExactHeadReview(snapshot) {
@@ -66,14 +85,39 @@ export function evaluateExactHeadReview(snapshot) {
     };
   }
 
-  const exactEvidence = asArray(comments?.nodes).find(
+  const nodes = asArray(comments?.nodes);
+  const exactSuccessComment = nodes.find(
     (entry) => REVIEW_BOT_LOGINS.has(entry?.author?.login) && evidenceMatchesHead(entry?.body, headSha),
   );
-  if (!exactEvidence) {
+  const pullRequestAuthor = snapshot?.author?.login;
+  let reactionEvidence = false;
+  for (const entry of nodes) {
+    if (
+      typeof pullRequestAuthor !== "string" ||
+      entry?.author?.login !== pullRequestAuthor ||
+      !reviewRequestMatchesHead(entry?.body, headSha)
+    ) {
+      continue;
+    }
+    const reacted = hasSuccessfulBotReaction(entry);
+    if (reacted === null) {
+      return {
+        conclusion: "failure",
+        headSha,
+        summary: "Codex reaction pagination exceeded the verifier limit; refusing an incomplete result.",
+      };
+    }
+    if (reacted) {
+      reactionEvidence = true;
+      break;
+    }
+  }
+
+  if (!exactSuccessComment && !reactionEvidence) {
     return {
       conclusion: "failure",
       headSha,
-      summary: `No successful Codex issue-comment review names the exact current head ${headSha.slice(0, 12)}.`,
+      summary: `No successful Codex review evidence names the exact current head ${headSha.slice(0, 12)}.`,
     };
   }
 
@@ -109,11 +153,23 @@ export async function loadPullRequestSnapshot({ owner, pullRequestNumber, reposi
     query($owner: String!, $repository: String!, $number: Int!) {
       repository(owner: $owner, name: $repository) {
         pullRequest(number: $number) {
+          author { login }
           headRefOid
           isDraft
           comments(last: 100) {
             pageInfo { hasNextPage hasPreviousPage }
-            nodes { author { login } body createdAt }
+            nodes {
+              author { login }
+              body
+              createdAt
+              reactionGroups {
+                content
+                users(first: 100) {
+                  pageInfo { hasNextPage }
+                  nodes { login }
+                }
+              }
+            }
           }
           reviewThreads(first: 100) {
             pageInfo { hasNextPage }
