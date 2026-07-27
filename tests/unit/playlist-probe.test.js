@@ -120,6 +120,25 @@ chunklist_1080p.m3u8?Policy=synthetic
     });
   });
 
+  it("does not cap an advertised master quality to the numeric fallback candidate grid", async () => {
+    const masterUrl = "https://edge.pstatic.net/chzzk/channel/hls_playlist.m3u8?Policy=synthetic";
+    const master = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=40000000,RESOLUTION=7680x4320,FRAME-RATE=60.0
+chunklist_4320p.m3u8?Policy=synthetic
+#EXT-X-STREAM-INF:BANDWIDTH=20000000,RESOLUTION=3840x2160,FRAME-RATE=60.0
+chunklist_2160p.m3u8?Policy=synthetic
+`;
+    const probe = createPlaylistProbe({
+      fetchImpl: async (url) => playlistResponse(url, master),
+      policy,
+    });
+
+    assert.deepEqual(await probe.resolveBestVariantFromMaster({ url: masterUrl }), {
+      evidenceKind: "master",
+      targetQuality: "4320p",
+    });
+  });
+
   it("rejects oversized streamed bodies and cancels the reader", async () => {
     let cancelled = false;
     const reader = {

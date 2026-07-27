@@ -145,6 +145,17 @@ describe("highest-supported-quality helpers", () => {
     assert.doesNotMatch(family, /synthetic|Policy|Signature|Token|hdntl|360p|480p|1080p/i);
   });
 
+  it("groups CHZZK HLS master names with their numeric rendition family", () => {
+    const rendition =
+      "https://livecloud.akamaized.net/chzzk/session-a/720p/segment/chunklist_720p.m3u8?Policy=synthetic";
+    const hlsMaster = "https://livecloud.akamaized.net/chzzk/session-a/hls_playlist.m3u8?Policy=synthetic";
+    const lowLatencyMaster =
+      "https://livecloud.akamaized.net/chzzk/session-a/llhls_playlist.m3u8?Policy=synthetic";
+
+    assert.equal(playlistFamilyKey(hlsMaster), playlistFamilyKey(rendition));
+    assert.equal(playlistFamilyKey(lowLatencyMaster), playlistFamilyKey(rendition));
+  });
+
   it("separates safe same-root playlist names while stripping signed path tails", () => {
     const generic =
       "https://edge.pstatic.net/chzzk/session-a/360p/segment/chunklist_480p.m3u8?Policy=synthetic";

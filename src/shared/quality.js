@@ -88,7 +88,10 @@ function playlistNameDiscriminator(segment) {
 
   let stem = decoded.slice(0, -".m3u8".length);
   stem = stem.replace(/(^|[_-])\d{3,4}p(?=$|[_-])/gi, "$1{quality}");
-  stem = stem.replace(/^(?:chunklist(?:_\{quality\})?|index|manifest|master|media|playlist)(?:[_-]+|$)/i, "");
+  stem = stem.replace(
+    /^(?:chunklist(?:_\{quality\})?|(?:ll)?hls(?:[_-]+(?:master|playlist))*|index|manifest|master|media|playlist)(?:[_-]+|$)/i,
+    "",
+  );
   stem = stem.replace(/\{quality\}/gi, "").replace(/^[-_.]+|[-_.]+$/g, "");
   return stem ? encodeURIComponent(stem) : "";
 }
