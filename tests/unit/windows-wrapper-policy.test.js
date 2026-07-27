@@ -21,7 +21,7 @@ describe("Windows signed-smoke and exact-head review policy", () => {
   it("publishes a dedicated exact-head-review check without executing pull-request code in the write job", () => {
     const workflow = read(".github/workflows/exact-head-review.yml");
     assert.match(workflow, /name:\s*Exact head review/);
-    assert.match(workflow, /name:\s*"?exact-head-review"?/);
+    assert.match(workflow, /"name":\s*"exact-head-review"/);
     assert.match(workflow, /checks:\s*write/);
     assert.match(workflow, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
     const publishJob = workflow.slice(workflow.indexOf("  publish:"));
