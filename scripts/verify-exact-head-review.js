@@ -96,12 +96,12 @@ export function reviewRequestMatchesSnapshot(body, snapshot) {
   const identity = pullRequestIdentity(snapshot);
   return Boolean(
     request &&
-      identity.headSha &&
-      identity.baseRefName &&
-      identity.baseSha &&
-      request.headSha === identity.headSha &&
-      request.baseRefName === identity.baseRefName &&
-      request.baseSha === identity.baseSha,
+    identity.headSha &&
+    identity.baseRefName &&
+    identity.baseSha &&
+    request.headSha === identity.headSha &&
+    request.baseRefName === identity.baseRefName &&
+    request.baseSha === identity.baseSha,
   );
 }
 

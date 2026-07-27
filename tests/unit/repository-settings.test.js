@@ -16,6 +16,8 @@ function protectedState() {
       enabled: true,
     },
     branchProtection: {
+      allow_deletions: { enabled: false },
+      allow_force_pushes: { enabled: false },
       enforce_admins: { enabled: true },
       required_conversation_resolution: { enabled: true },
       required_pull_request_reviews: null,

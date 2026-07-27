@@ -63,10 +63,7 @@ function passingSnapshot() {
       pageInfo: { hasNextPage: false },
     },
     timelineItems: {
-      nodes: [
-        { __typename: "PullRequestCommit", commit: { oid: headSha } },
-        requestComment(),
-      ],
+      nodes: [{ __typename: "PullRequestCommit", commit: { oid: headSha } }, requestComment()],
       pageInfo: { hasNextPage: false, hasPreviousPage: false },
     },
   };

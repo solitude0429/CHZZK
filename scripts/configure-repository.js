@@ -202,6 +202,8 @@ export function planRepositorySettings(state, githubActionsAppId, releaseOperato
     changes.push({ checks, kind: "status-checks", strict: true });
   }
   if (
+    state.branchProtection.allow_deletions?.enabled !== false ||
+    state.branchProtection.allow_force_pushes?.enabled !== false ||
     state.branchProtection.required_conversation_resolution?.enabled !== true ||
     state.branchProtection.required_pull_request_reviews != null
   ) {
@@ -246,8 +248,8 @@ function fullProtectionUpdate(protection) {
           strict: protection.required_status_checks.strict,
         };
   return {
-    allow_deletions: enabledProtection(protection, "allow_deletions"),
-    allow_force_pushes: enabledProtection(protection, "allow_force_pushes"),
+    allow_deletions: false,
+    allow_force_pushes: false,
     allow_fork_syncing: enabledProtection(protection, "allow_fork_syncing"),
     block_creations: enabledProtection(protection, "block_creations"),
     enforce_admins: enabledProtection(protection, "enforce_admins"),
