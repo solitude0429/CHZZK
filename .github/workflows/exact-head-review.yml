@@ -151,6 +151,7 @@ jobs:
           current_head = pull_request["head"]["sha"]
           current_base_ref = pull_request["base"]["ref"]
           current_base_sha = pull_request["base"]["sha"]
+          current_draft = pull_request["draft"]
           evaluated_head = os.environ.get("CHZZK_HEAD_SHA", "").strip().lower()
           evaluated_base_ref = os.environ.get("CHZZK_BASE_REF", "").strip()
           evaluated_base_sha = os.environ.get("CHZZK_BASE_SHA", "").strip().lower()
@@ -178,6 +179,9 @@ jobs:
           elif evaluated_base_ref != current_base_ref or evaluated_base_sha != current_base_sha:
               conclusion = "failure"
               summary = "Review evaluation did not match the current pull-request base."
+          elif conclusion == "success" and current_draft is not True:
+              conclusion = "failure"
+              summary = "Pull request left draft before the review attestation was published."
           elif conclusion == "success" and (
               evidence_id is None
               or request_comment_id is None
