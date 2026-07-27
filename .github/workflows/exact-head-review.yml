@@ -4,12 +4,10 @@ on:
   issue_comment:
     types: [created, edited, deleted]
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
+    types: [opened, reopened, synchronize, edited]
 
 concurrency:
-  group: exact-head-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  group: exact-head-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}-${{ github.event.comment.id || 'pr-state' }}
   cancel-in-progress: true
 
 permissions:
@@ -18,7 +16,19 @@ permissions:
 jobs:
   evaluate-exact-head-review:
     name: exact-head-review-evaluation
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (
+        github.event.issue.pull_request &&
+        (
+          github.event.comment.user.login == github.event.issue.user.login ||
+          github.event.comment.user.login == vars.RELEASE_OPERATOR_LOGIN
+        ) &&
+        (
+          contains(github.event.comment.body, '@codex review') ||
+          contains(github.event.changes.body.from, '@codex review')
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 12
     permissions:
@@ -26,8 +36,11 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
+      base_ref: ${{ steps.review.outputs.base_ref }}
+      base_sha: ${{ steps.review.outputs.base_sha }}
       conclusion: ${{ steps.review.outputs.conclusion }}
       head_sha: ${{ steps.review.outputs.head_sha }}
+      should_publish: ${{ steps.review.outputs.should_publish }}
       summary_base64: ${{ steps.review.outputs.summary_base64 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,35 +52,26 @@ jobs:
         with:
           node-version: 22
       - id: review
-        name: Evaluate exact-head Codex evidence
-        continue-on-error: true
+        name: Evaluate exact-diff Codex evidence
         env:
+          CHZZK_EVENT_ACTION: ${{ github.event.action }}
+          CHZZK_EVENT_COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          CHZZK_EVENT_COMMENT_BODY: ${{ github.event.comment.body }}
+          CHZZK_EVENT_COMMENT_ID: ${{ github.event.comment.id }}
+          CHZZK_EVENT_NAME: ${{ github.event_name }}
+          CHZZK_EVENT_PREVIOUS_BODY: ${{ github.event.changes.body.from }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          CHZZK_WAIT_FOR_CODEX: ${{ github.event_name == 'issue_comment' && github.event.action == 'created' && contains(github.event.comment.body, '@codex review') }}
+          CHZZK_WAIT_ATTEMPTS: 40
+          CHZZK_TRUSTED_REVIEW_REQUESTER: ${{ vars.RELEASE_OPERATOR_LOGIN }}
+          CHZZK_WAIT_INTERVAL_MS: 15000
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          attempts=1
-          if [ "$CHZZK_WAIT_FOR_CODEX" = "true" ]; then
-            attempts=40
-          fi
-
-          status=1
-          for attempt in $(seq 1 "$attempts"); do
-            echo "Exact-head review evidence attempt ${attempt}/${attempts}"
-            if node scripts/verify-exact-head-review.js; then
-              status=0
-              break
-            else
-              status=$?
-            fi
-            if [ "$attempt" -lt "$attempts" ]; then
-              sleep 15
-            fi
-          done
-          exit "$status"
+        run: node scripts/verify-exact-head-review.js
 
   publish-exact-head-review:
-    if: always() && needs.evaluate-exact-head-review.result != 'skipped'
+    if: >-
+      always() &&
+      needs.evaluate-exact-head-review.result != 'skipped' &&
+      needs.evaluate-exact-head-review.outputs.should_publish == 'true'
     needs: evaluate-exact-head-review
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -78,18 +82,21 @@ jobs:
     steps:
       - name: Publish exact-head status
         env:
+          CHZZK_BASE_REF: ${{ needs.evaluate-exact-head-review.outputs.base_ref }}
+          CHZZK_BASE_SHA: ${{ needs.evaluate-exact-head-review.outputs.base_sha }}
           CHZZK_CONCLUSION: ${{ needs.evaluate-exact-head-review.outputs.conclusion }}
           CHZZK_HEAD_SHA: ${{ needs.evaluate-exact-head-review.outputs.head_sha }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           CHZZK_SUMMARY_BASE64: ${{ needs.evaluate-exact-head-review.outputs.summary_base64 }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64
           import json
           import os
+          import re
           import urllib.request
 
           repository = os.environ["GITHUB_REPOSITORY"]
@@ -112,7 +119,11 @@ jobs:
 
           pull_request = request("GET", f"/repos/{repository}/pulls/{pr_number}")
           current_head = pull_request["head"]["sha"]
-          evaluated_head = os.environ.get("CHZZK_HEAD_SHA", "").strip()
+          current_base_ref = pull_request["base"]["ref"]
+          current_base_sha = pull_request["base"]["sha"]
+          evaluated_head = os.environ.get("CHZZK_HEAD_SHA", "").strip().lower()
+          evaluated_base_ref = os.environ.get("CHZZK_BASE_REF", "").strip()
+          evaluated_base_sha = os.environ.get("CHZZK_BASE_SHA", "").strip().lower()
           conclusion = os.environ.get("CHZZK_CONCLUSION", "failure")
           if conclusion not in {"success", "failure"}:
               conclusion = "failure"
@@ -122,21 +133,28 @@ jobs:
           except Exception:
               summary = "Verifier produced malformed output."
               conclusion = "failure"
+
+          valid_evaluated_head = re.fullmatch(r"[a-f0-9]{40}", evaluated_head) is not None
+          target_head = evaluated_head if valid_evaluated_head else current_head
           if evaluated_head != current_head:
               conclusion = "failure"
               summary = "Review evaluation did not match the current pull-request head."
+          elif evaluated_base_ref != current_base_ref or evaluated_base_sha != current_base_sha:
+              conclusion = "failure"
+              summary = "Review evaluation did not match the current pull-request base."
 
           request(
               "POST",
               f"/repos/{repository}/check-runs",
               {
                   "name": "exact-head-review",
-                  "head_sha": current_head,
+                  "head_sha": target_head,
                   "status": "completed",
                   "conclusion": conclusion,
                   "details_url": f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/{pr_number}",
+                  "external_id": f"{pr_number}:{evaluated_base_ref}:{evaluated_base_sha}:{evaluated_head}",
                   "output": {
-                      "title": "Exact-head review verification",
+                      "title": "Exact-diff review verification",
                       "summary": summary,
                   },
               },
