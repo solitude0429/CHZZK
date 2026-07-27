@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const REVIEW_BOT_LOGINS = new Set([
   "chatgpt-codex-connector",
@@ -168,7 +170,7 @@ async function main() {
   if (result.conclusion !== "success") process.exitCode = 1;
 }
 
-const isMain = process.argv[1] && new URL(`file://${process.argv[1]}`).href === import.meta.url;
+const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   main().catch((error) => {
     console.error(`Exact-head review verification failed: ${error.message}`);
