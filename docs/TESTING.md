@@ -88,10 +88,11 @@ Update mode deliberately uses the older XPI's canonical production `update_url`;
 
 The Linux authenticity gate does not replace the client-network boundary. Release readiness also requires an operator-automated disposable profile on the actual current Windows client using its installed Firefox ESR, normal DNS, and production TLS path. `validateSignedSmokeInputs` applies POSIX executable-bit validation only on POSIX; native `firefox.exe` and `geckodriver.exe` are validated as nonempty regular files and then proven by successful process launch.
 
-Run the repository-owned native Windows gate from a clean exact-`main` checkout after deployment:
+Run the repository-owned native Windows gate from a clean exact-`main` checkout after deployment. Pass the trusted Node executable as an explicit absolute path; the wrapper does not search `PATH`, and it rejects a directory, reparse point, relative path, or empty file.
 
 ```powershell
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\firefox-signed-smoke.windows.ps1 `
+  -NodeBinary "C:\Program Files\nodejs\node.exe" `
   -FirefoxBinary "C:\Program Files\Mozilla Firefox\firefox.exe" `
   -GeckodriverBinary "C:\path\to\geckodriver.exe" `
   -ReleaseMetadata "C:\path\to\chzzk-<version>-release-metadata.json" `

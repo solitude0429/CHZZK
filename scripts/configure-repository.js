@@ -2,7 +2,13 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const REQUIRED_GITHUB_ACTIONS_CHECKS = ["analyze", "dependency-review", "firefox-e2e", "verify"];
+export const REQUIRED_GITHUB_ACTIONS_CHECKS = [
+  "analyze",
+  "dependency-review",
+  "exact-head-review",
+  "firefox-e2e",
+  "verify",
+];
 
 const OBSOLETE_LABELS = ["release-review-required", "security-review-required"];
 const OBSOLETE_VARIABLES = ["AUTOMATED_REVIEW_LOGIN"];

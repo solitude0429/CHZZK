@@ -27,7 +27,32 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - run: npm run verify
+      - name: Check formatting
+        run: npm run format:check
+      - name: Check generated runtime
+        run: npm run check:generated
+      - name: Validate manifest
+        run: npm run validate:manifest
+      - name: Validate project cleanliness
+        run: npm run validate:project
+      - name: Validate workflows
+        run: npm run validate:workflows
+      - name: Run ESLint
+        run: npm run lint
+      - name: Run web-ext lint
+        run: npm run lint:webext
+      - name: Run unit tests
+        run: npm test
+      - name: Check coverage
+        run: npm run test:coverage
+      - name: Run audit fuzzing
+        run: npm run test:audit-fuzz
+      - name: Audit dependencies
+        run: npm run audit:deps
+      - name: Build extension
+        run: npm run build
+      - name: Audit package
+        run: npm run audit:package
 
   firefox-e2e:
     permissions:

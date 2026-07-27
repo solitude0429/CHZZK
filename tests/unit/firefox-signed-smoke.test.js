@@ -344,8 +344,8 @@ setInterval(() => {}, 1000);
     const environmentClear = wrapper.indexOf(
       'foreach ($name in $nodeStartupEnvironmentNames) {\n        [Environment]::SetEnvironmentVariable($name, $null, "Process")',
     );
-    const versionProbe = wrapper.indexOf("$nodeMajor = & $node.Source");
-    const smokeRun = wrapper.indexOf("& $node.Source $runner");
+    const versionProbe = wrapper.indexOf("$nodeMajorOutput = & $node -p");
+    const smokeRun = wrapper.indexOf("& $node $runner");
     assert.ok(environmentClear >= 0);
     assert.ok(environmentClear < versionProbe);
     assert.ok(versionProbe < smokeRun);

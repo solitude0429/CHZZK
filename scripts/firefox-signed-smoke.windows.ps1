@@ -3,6 +3,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
+    [string]$NodeBinary,
+
+    [Parameter(Mandatory = $true)]
     [string]$FirefoxBinary,
 
     [Parameter(Mandatory = $true)]
@@ -18,9 +21,7 @@ param(
     [string]$OldSignedXpi,
 
     [Parameter(Mandatory = $true)]
-    [string]$ResultPath,
-
-    [string]$NodeBinary = "node.exe"
+    [string]$ResultPath
 )
 
 Set-StrictMode -Version Latest
@@ -36,8 +37,24 @@ function Resolve-RegularFile {
         [string]$Path,
 
         [Parameter(Mandatory = $true)]
-        [string]$Label
+        [string]$Label,
+
+        [switch]$RequireAbsolute
     )
+
+    if ($RequireAbsolute) {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        if (
+            -not [IO.Path]::IsPathRooted($Path) -or
+            -not [string]::Equals(
+                $fullPath,
+                $Path,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            throw "$Label must be an explicit canonical absolute path."
+        }
+    }
 
     $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
     $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
@@ -54,6 +71,7 @@ function Resolve-RegularFile {
 $runner = Resolve-RegularFile `
     -Path (Join-Path $PSScriptRoot "firefox-signed-smoke.js") `
     -Label "signed-smoke runner"
+$node = Resolve-RegularFile -Path $NodeBinary -Label "NodeBinary" -RequireAbsolute
 $firefox = Resolve-RegularFile -Path $FirefoxBinary -Label "FirefoxBinary"
 $geckodriver = Resolve-RegularFile -Path $GeckodriverBinary -Label "GeckodriverBinary"
 $metadata = Resolve-RegularFile -Path $ReleaseMetadata -Label "ReleaseMetadata"
@@ -72,7 +90,6 @@ if (Test-Path -LiteralPath $result) {
     throw "ResultPath must not already exist."
 }
 
-$node = Get-Command -Name $NodeBinary -CommandType Application -ErrorAction Stop
 $nodeStartupEnvironmentNames = @(
     "NODE_EXTRA_CA_CERTS",
     "NODE_OPTIONS",
@@ -106,8 +123,14 @@ try {
         [Environment]::SetEnvironmentVariable($name, $null, "Process")
     }
 
-    $nodeMajor = & $node.Source -p "process.versions.node.split('.')[0]"
-    if ($LASTEXITCODE -ne 0 -or [int]$nodeMajor -lt 20) {
+    $nodeMajorOutput = & $node -p "process.versions.node.split('.')[0]"
+    $nodeVersionExitCode = $LASTEXITCODE
+    $nodeMajorText = ([string]$nodeMajorOutput).Trim()
+    if (
+        $nodeVersionExitCode -ne 0 -or
+        $nodeMajorText -notmatch "^[0-9]{1,3}$" -or
+        [int]$nodeMajorText -lt 20
+    ) {
         throw "Node.js 20 or newer is required."
     }
 
@@ -119,7 +142,7 @@ try {
         )
     }
 
-    & $node.Source $runner | Out-Null
+    & $node $runner | Out-Null
     $runnerExitCode = $LASTEXITCODE
     $resultCreated = Test-Path -LiteralPath $result -PathType Leaf
     if ($runnerExitCode -ne 0) {
