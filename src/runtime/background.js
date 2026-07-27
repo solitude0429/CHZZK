@@ -3,6 +3,7 @@ import {
   normalizeDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
+  recordRuntimeTransition,
   updateRuntimeRedirectDiagnostics,
 } from "../shared/diagnostics.js";
 import {
@@ -35,6 +36,7 @@ const activeLiveTabIds = new Set();
 const liveContextByTab = new Map();
 const miniPlayerTabIds = new Set();
 const pendingTrustValidationByTab = new Map();
+const masterResponseObserversById = new Map();
 const redirectedRequestsById = new Map();
 const tabContextTokenByTab = new Map();
 const {
@@ -52,9 +54,10 @@ const {
   redirectedRequestsById,
 });
 const {
+  fetchPlaylistEvidence,
   playlistEvidenceSupportsExpectedQuality,
   probeMaxBytes,
-  resolveBestVariantFromMaster,
+  resolveBestVariantFromEvidence,
   resolveHighestSupportedQuality,
   urlQualityMarkersMatch,
 } = createPlaylistProbe({ policy });
@@ -64,6 +67,10 @@ const MIN_UPGRADE_PROBE_INTERVAL_MS = 30_000;
 const MAX_UPGRADE_PROBE_INTERVAL_MS = 10 * 60_000;
 const MAX_TRACKED_REDIRECT_REQUESTS = 500;
 const MAX_VALIDATED_TARGET_URLS = 16;
+const CLIENT_CANCELLED_REQUEST_ERRORS = new Set([
+  "NS_BINDING_ABORTED",
+  "NS_ERROR_ABORT",
+]);
 const HIGHEST_CONFIGURED_TARGET_NUMBER = qualityNumber(
   highestQualityCandidate(policy.qualityCandidates, {
     minRedirectQuality: policy.minRedirectQuality,
@@ -218,6 +225,19 @@ function scheduleRedirectDiagnostics(lastError = null) {
   );
 }
 
+function scheduleRuntimeTransition(transition) {
+  enqueueDiagnosticsMutation((diagnostics) => {
+    recordRuntimeTransition(diagnostics, transition);
+  }).catch((error) =>
+    console.warn("[CHZZK] failed to persist runtime transition diagnostics", error),
+  );
+}
+
+function resolutionDiagnosticSource(resolution) {
+  if (resolution?.source === "master-response") return "master-response";
+  return resolution?.evidenceKind === "master" ? "master-probe" : "numeric-probe";
+}
+
 function liveContextKey(url) {
   if (!isChzzkLiveUrl(url, policy)) return null;
   try {
@@ -261,6 +281,16 @@ function playlistSession(details) {
   };
 }
 
+function sessionForMasterResolution(session, resolution) {
+  if (!session || typeof resolution?.targetFamilyKey !== "string") return session;
+  return {
+    ...session,
+    dedicatedHls: resolution.targetDedicatedHls === true,
+    familyKey: resolution.targetFamilyKey,
+    key: JSON.stringify([session.tabId, session.contextKey, resolution.targetFamilyKey]),
+  };
+}
+
 function resolutionContextIsCurrent(tabId, contextKey) {
   const adoptedContext = liveContextByTab.get(tabId);
   return contextKey === "trusted-request" ? !adoptedContext : adoptedContext === contextKey;
@@ -301,6 +331,24 @@ function failedTargetsForSession(session) {
   return new Set(state.targets.keys());
 }
 
+function earliestFailedHigherTargetRetryAt(session, targetQuality, now) {
+  const targetNumber = qualityNumber(targetQuality);
+  const state = failedTargetsBySession.get(session.key);
+  if (!targetNumber || !(state?.targets instanceof Map)) return null;
+  let retryAt = null;
+  for (const [quality, expiresAt] of state.targets) {
+    if (
+      Number.isFinite(expiresAt) &&
+      expiresAt > now &&
+      (qualityNumber(quality) ?? 0) > targetNumber &&
+      (retryAt == null || expiresAt < retryAt)
+    ) {
+      retryAt = expiresAt;
+    }
+  }
+  return retryAt;
+}
+
 function canReuseSessionTarget(previous, targetQuality, now) {
   return Boolean(
     previous?.resolved &&
@@ -309,14 +357,36 @@ function canReuseSessionTarget(previous, targetQuality, now) {
   );
 }
 
-async function setSessionTarget(session, resolution, token) {
+function setSessionTarget(session, resolution, token) {
   const targetQuality = resolution?.targetQuality;
   if (!targetQuality || tabContextTokenByTab.get(session.tabId) !== token) return false;
   if (!resolutionContextIsCurrent(session.tabId, session.contextKey)) return false;
   if (failedTargetsForSession(session).has(targetQuality)) return false;
 
   const now = Date.now();
-  const previous = activeTargetsBySession.get(session.key);
+  let previous = activeTargetsBySession.get(session.key);
+  if (previous?.expiresAt != null && previous.expiresAt <= now) {
+    activeTargetsBySession.delete(session.key);
+    forgetRedirectedRequestsForSession(session.key);
+    previous = null;
+  }
+  const previousTargetNumber = qualityNumber(previous?.targetQuality);
+  const targetNumber = qualityNumber(targetQuality);
+  if (
+    previous?.resolved &&
+    previousTargetNumber &&
+    targetNumber &&
+    targetNumber < previousTargetNumber
+  ) {
+    scheduleRuntimeTransition({
+      action: "blocked",
+      fromQuality: previous.targetQuality,
+      reason: "lower-quality",
+      source: resolutionDiagnosticSource(resolution),
+      toQuality: targetQuality,
+    });
+    return false;
+  }
   const reusePrevious = canReuseSessionTarget(previous, targetQuality, now);
   const targetEpoch = reusePrevious ? previous.targetEpoch : {};
   const validatedNetworkUrls =
@@ -334,11 +404,13 @@ async function setSessionTarget(session, resolution, token) {
     (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
       ? "master"
       : resolution.evidenceKind;
-  const targetNumber = qualityNumber(targetQuality);
   const canUpgrade =
     targetNumber &&
     HIGHEST_CONFIGURED_TARGET_NUMBER &&
     targetNumber < HIGHEST_CONFIGURED_TARGET_NUMBER;
+  const failedHigherRetryAt = canUpgrade
+    ? earliestFailedHigherTargetRetryAt(session, targetQuality, now)
+    : null;
   const state = touchSessionState({
     ...session,
     evidenceKind,
@@ -349,7 +421,7 @@ async function setSessionTarget(session, resolution, token) {
     nextUpgradeProbeAt: canUpgrade
       ? reusePrevious && Number.isFinite(previous.nextUpgradeProbeAt)
         ? previous.nextUpgradeProbeAt
-        : now + upgradeProbeIntervalMs()
+        : Math.min(now + upgradeProbeIntervalMs(), failedHigherRetryAt ?? Number.POSITIVE_INFINITY)
       : null,
     resolved: true,
     targetEpoch,
@@ -358,7 +430,19 @@ async function setSessionTarget(session, resolution, token) {
   });
   activeTargetsBySession.set(session.key, state);
   enforceSessionStateLimits(session.key);
-  if (previous?.targetQuality !== targetQuality || !previous?.resolved) scheduleRedirectDiagnostics();
+  if (previous?.targetQuality !== targetQuality || !previous?.resolved) {
+    scheduleRuntimeTransition({
+      action: "selected",
+      fromQuality: previous?.targetQuality ?? null,
+      reason:
+        previousTargetNumber && targetNumber && targetNumber > previousTargetNumber
+          ? "higher-quality"
+          : "initial-selection",
+      source: resolutionDiagnosticSource(resolution),
+      toQuality: targetQuality,
+    });
+    scheduleRedirectDiagnostics();
+  }
   return true;
 }
 
@@ -423,11 +507,11 @@ function startSessionResolution(
       ) {
         return null;
       }
-      const stored = await setSessionTarget(
-        sessionFromResolutionState(state),
-        resolution,
-        state.token,
-      );
+      const resolutionSession =
+        state.resolverKind === "master"
+          ? sessionForMasterResolution(sessionFromResolutionState(state), resolution)
+          : sessionFromResolutionState(state);
+      const stored = await setSessionTarget(resolutionSession, resolution, state.token);
       return stored ? resolution.targetQuality : null;
     })
     .catch((error) => {
@@ -460,10 +544,201 @@ function startHighestTargetResolution(details, decision, options = {}) {
 function startMasterTargetResolution(details) {
   return startSessionResolution(
     details,
-    ({ signal, skipTargetQualities }) =>
-      resolveBestVariantFromMaster(details, { signal, skipTargetQualities }),
+    async ({ signal }) => {
+      const evidence = await fetchPlaylistEvidence(details.url, { signal });
+      if (!evidence || signal.aborted) return null;
+      const initialResolution = resolveBestVariantFromEvidence(evidence);
+      if (!initialResolution) return null;
+      const targetSession = sessionForMasterResolution(
+        playlistSession(details),
+        initialResolution,
+      );
+      return resolveBestVariantFromEvidence(evidence, {
+        skipTargetQualities: failedTargetsForSession(targetSession),
+      });
+    },
     "master",
   );
+}
+
+function forgetMasterResponseObserver(record) {
+  if (masterResponseObserversById.get(record.requestId) === record) {
+    masterResponseObserversById.delete(record.requestId);
+  }
+}
+
+function attachMasterResponseObserver(details) {
+  if (
+    typeof api.webRequest.filterResponseData !== "function" ||
+    typeof api.webRequest.onHeadersReceived?.addListener !== "function"
+  ) {
+    return false;
+  }
+  const requestId = details?.requestId == null ? null : String(details.requestId);
+  const session = playlistSession(details);
+  const finalNetworkUrl = networkRequestUrl(details?.url);
+  if (
+    !requestId ||
+    requestId.length > 128 ||
+    !session ||
+    !finalNetworkUrl
+  ) {
+    return false;
+  }
+
+  const existing = masterResponseObserversById.get(requestId);
+  if (existing && !existing.settled) {
+    if (
+      existing.token !== tabContextTokenByTab.get(session.tabId) ||
+      existing.session.tabId !== session.tabId ||
+      existing.session.contextKey !== session.contextKey
+    ) {
+      return true;
+    }
+    existing.details = details;
+    existing.finalNetworkUrl = finalNetworkUrl;
+    existing.session = session;
+    return true;
+  }
+  if (masterResponseObserversById.size >= MAX_TRACKED_REDIRECT_REQUESTS) return false;
+
+  masterResponseObserversById.set(requestId, {
+    details,
+    filterAttached: false,
+    finalNetworkUrl,
+    requestId,
+    session,
+    settled: false,
+    token: currentTabContextToken(session.tabId),
+  });
+  return true;
+}
+
+function attachMasterResponseFilter(record) {
+  let filter;
+  try {
+    filter = api.webRequest.filterResponseData(record.requestId);
+  } catch {
+    return false;
+  }
+
+  const decoder = new TextDecoder();
+  const maxBytes = probeMaxBytes();
+  const textChunks = [];
+  record.filterAttached = true;
+  record.oversized = false;
+  record.streamFailed = false;
+  record.totalBytes = 0;
+
+  filter.ondata = (event) => {
+    try {
+      filter.write(event.data);
+      const bytes = new Uint8Array(event.data);
+      if (!record.oversized) {
+        record.totalBytes += bytes.byteLength;
+        if (record.totalBytes <= maxBytes) {
+          textChunks.push(decoder.decode(bytes, { stream: true }));
+        } else {
+          record.oversized = true;
+          textChunks.length = 0;
+        }
+      }
+    } catch {
+      record.streamFailed = true;
+      textChunks.length = 0;
+    }
+  };
+  filter.onstop = () => {
+    if (record.settled) {
+      try {
+        filter.close();
+      } catch {
+        record.streamFailed = true;
+      }
+      return;
+    }
+    record.settled = true;
+    forgetMasterResponseObserver(record);
+    try {
+      if (
+        !record.streamFailed &&
+        !record.oversized &&
+        record.totalBytes > 0
+      ) {
+        textChunks.push(decoder.decode());
+        let resolution = resolveBestVariantFromEvidence(
+          {
+            finalUrl: record.finalNetworkUrl,
+            text: textChunks.join(""),
+          },
+        );
+        if (resolution) {
+          let targetSession = sessionForMasterResolution(record.session, resolution);
+          resolution = resolveBestVariantFromEvidence(
+            {
+              finalUrl: record.finalNetworkUrl,
+              text: textChunks.join(""),
+            },
+            {
+              skipTargetQualities: failedTargetsForSession(targetSession),
+            },
+          );
+          if (resolution) {
+            targetSession = sessionForMasterResolution(record.session, resolution);
+            setSessionTarget(
+              targetSession,
+              { ...resolution, source: "master-response" },
+              record.token,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      reportRedirectError(error).catch(() => {});
+      console.warn("[CHZZK] failed to score observed HLS master response", error);
+    } finally {
+      try {
+        filter.close();
+      } catch {
+        record.streamFailed = true;
+      }
+    }
+  };
+  filter.onerror = () => {
+    record.streamFailed = true;
+    record.settled = true;
+    forgetMasterResponseObserver(record);
+  };
+  return true;
+}
+
+function handleMasterResponseHeaders(details) {
+  const requestId = details?.requestId == null ? null : String(details.requestId);
+  if (!requestId) return;
+  const record = masterResponseObserversById.get(requestId);
+  if (!record || record.settled) return;
+  const statusCode = Number(details.statusCode);
+  const exactSuccessfulResponse =
+    networkRequestUrl(details.url) === record.finalNetworkUrl &&
+    Number.isSafeInteger(statusCode) &&
+    statusCode >= 200 &&
+    statusCode <= 299 &&
+    statusCode !== 204 &&
+    statusCode !== 205;
+  if (exactSuccessfulResponse) {
+    if (!record.filterAttached && !attachMasterResponseFilter(record)) {
+      record.settled = true;
+      forgetMasterResponseObserver(record);
+      startMasterTargetResolution(record.details).catch((error) => {
+        reportRedirectError(error).catch(() => {});
+        console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+      });
+    }
+    return;
+  }
+  if (Number.isSafeInteger(statusCode) && statusCode >= 300 && statusCode <= 399) return;
+  record.settled = true;
+  forgetMasterResponseObserver(record);
 }
 
 function scheduleUpwardTargetResolution(details, decision, targetState) {
@@ -521,6 +796,12 @@ function dropTabQualityState(tabId, { dropToken = false } = {}) {
     if (state.tabId === tabId) {
       state.settled = true;
       redirectedRequestsById.delete(requestId);
+    }
+  }
+  for (const [requestId, state] of masterResponseObserversById) {
+    if (state.session.tabId === tabId) {
+      state.settled = true;
+      masterResponseObserversById.delete(requestId);
     }
   }
   if (dropToken) {
@@ -847,7 +1128,7 @@ function settleRedirectedRequest(record) {
   if (record.networkFailed) {
     record.settled = true;
     forgetRedirectedRequest(record);
-    invalidateRedirectedTarget(record);
+    invalidateRedirectedTarget(record, "network-error");
     return;
   }
   // Body completion can precede webRequest.onCompleted. In particular, a
@@ -864,7 +1145,7 @@ function settleRedirectedRequest(record) {
     ) {
       renewSuccessfulRedirectTarget(record);
     } else {
-      invalidateRedirectedTarget(record);
+      invalidateRedirectedTarget(record, "response-body");
     }
     return;
   }
@@ -873,14 +1154,16 @@ function settleRedirectedRequest(record) {
     statusCode === 205 ||
     (statusCode >= 300 && statusCode <= 399) ||
     (statusCode >= 400 && statusCode <= 599);
-  if (
-    statusFailed ||
-    record.bodyEvidence === "empty" ||
-    record.bodyEvidence === "invalid"
-  ) {
+  if (statusFailed) {
     record.settled = true;
     forgetRedirectedRequest(record);
-    invalidateRedirectedTarget(record);
+    invalidateRedirectedTarget(record, "response-status");
+    return;
+  }
+  if (record.bodyEvidence === "empty" || record.bodyEvidence === "invalid") {
+    record.settled = true;
+    forgetRedirectedRequest(record);
+    invalidateRedirectedTarget(record, "response-body");
     return;
   }
   if (statusCode < 200 || statusCode > 299) return;
@@ -890,7 +1173,7 @@ function settleRedirectedRequest(record) {
   if (record.bodyEvidence === "valid") {
     renewSuccessfulRedirectTarget(record);
   } else {
-    invalidateRedirectedTarget(record);
+    invalidateRedirectedTarget(record, "response-body");
   }
 }
 
@@ -1050,7 +1333,7 @@ function hasNewerPendingVerification(record) {
   return false;
 }
 
-function invalidateRedirectedTarget(record) {
+function invalidateRedirectedTarget(record, reason = "response-body") {
   const current = currentTargetMatchesRecord(record);
   if (!current) return;
   if (
@@ -1084,6 +1367,13 @@ function invalidateRedirectedTarget(record) {
       redirectedRequestsById.delete(requestId);
     }
   }
+  scheduleRuntimeTransition({
+    action: "invalidated",
+    fromQuality: record.targetQuality,
+    reason,
+    source: "redirect-response",
+    toQuality: null,
+  });
   scheduleRedirectDiagnostics();
 }
 
@@ -1125,8 +1415,26 @@ function handleRedirectCompleted(details) {
 function handleRedirectError(details) {
   const requestId = details?.requestId == null ? null : String(details.requestId);
   if (!requestId) return;
+  const masterObserver = masterResponseObserversById.get(requestId);
+  if (masterObserver) {
+    masterObserver.settled = true;
+    forgetMasterResponseObserver(masterObserver);
+  }
   const record = redirectedRequestsById.get(requestId);
   if (!record) return;
+  const normalizedError = String(details?.error ?? "").trim().toUpperCase();
+  if (CLIENT_CANCELLED_REQUEST_ERRORS.has(normalizedError)) {
+    record.settled = true;
+    forgetRedirectedRequest(record);
+    scheduleRuntimeTransition({
+      action: "ignored",
+      fromQuality: record.targetQuality,
+      reason: "client-cancelled",
+      source: "redirect-response",
+      toQuality: record.targetQuality,
+    });
+    return;
+  }
   record.networkFailed = true;
   settleRedirectedRequest(record);
 }
@@ -1261,10 +1569,12 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
     }
   }
   if (isTrustedMasterPlaylistRequest(details, policy, redirectOptions)) {
-    startMasterTargetResolution(details).catch((error) => {
-      reportRedirectError(error).catch(() => {});
-      console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
-    });
+    if (!attachMasterResponseObserver(details)) {
+      startMasterTargetResolution(details).catch((error) => {
+        reportRedirectError(error).catch(() => {});
+        console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+      });
+    }
   }
   scheduleRequestDiagnostics(details, decision, shouldRecord);
   return undefined;
@@ -1321,6 +1631,11 @@ const WEB_REQUEST_FILTER = {
 
 api.webRequest.onBeforeRequest.addListener(
   handleRequestSafely,
+  WEB_REQUEST_FILTER,
+  ["blocking"],
+);
+api.webRequest.onHeadersReceived?.addListener(
+  handleMasterResponseHeaders,
   WEB_REQUEST_FILTER,
   ["blocking"],
 );

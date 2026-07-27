@@ -39,10 +39,10 @@ npm run test:firefox-functional-e2e
 The test exercises real Firefox rather than a VM mock:
 
 1. Installs synthetic version `0.1.3` through geckodriver.
-2. Opens a CHZZK-shaped live fixture and issues a `480p` HLS request.
-3. Confirms the extension probes candidates and Firefox requests the available `1080p` URL.
-4. Confirms the signed-style query remains byte-for-byte unchanged and a client-only fragment does not make the real `Response.url` comparison reject a valid higher-quality probe.
-5. Moves the live page to the same-site `/lives` mini-player route with `history.pushState`, keeps Firefox's observed original-live `documentUrl`, changes routes repeatedly, and confirms unavailable candidates are not re-probed.
+2. Opens a CHZZK-shaped live fixture, streams a trusted master response through the extension, and confirms the first numeric request goes directly from `480p` to the master-advertised `1080p` without `2160p`/`1440p` fallback probes.
+3. Cancels one redirected 1080p request through `AbortController`, exercises Firefox's client-abort path, and confirms subsequent playback remains at 1080p instead of entering failure backoff.
+4. Confirms the signed-style query remains byte-for-byte unchanged and a client-only fragment does not affect network-URL comparison.
+5. Moves the live page to the same-site `/lives` mini-player route with `history.pushState`, keeps Firefox's observed original-live `documentUrl`, changes routes repeatedly, and confirms the observed master still selects `1080p` without numeric fallback scans across playlist cycles.
 6. Revalidates the selected playlist with an empty HTTP 304 and confirms the cached target remains usable.
 7. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.
 8. Calls `AddonManager.findUpdates` and confirms the installed version becomes `0.1.4`.
@@ -105,7 +105,7 @@ Checklist:
 5. Confirm the popup shows `eligible-chzzk-hls-quality` or a clear fail-closed reason.
 6. Confirm the player menu is not relabeled.
 7. Confirm subsequent lower playlist requests use the highest available target while keeping the original URL path shape and signed query/hash.
-8. Confirm diagnostics contain only an allowlisted host, quality, structured media shape, and local counters.
+8. Confirm diagnostics contain only allowlisted hosts, normalized qualities, structured media shapes, local counters, and fixed runtime-transition enums.
 
 ## Regression fixtures
 

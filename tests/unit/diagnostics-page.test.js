@@ -61,6 +61,17 @@ describe("diagnostics popup", () => {
         targetsByTab: { 7: "1080p" },
         updatedAt: timestamp,
       },
+      runtimeTransitions: [
+        {
+          action: "ignored",
+          fromQuality: "1080p",
+          reason: "client-cancelled",
+          seenAt: timestamp,
+          source: "redirect-response",
+          toQuality: "1080p",
+          unknown: "drop-me",
+        },
+      ],
       samples: [
         {
           quality: "720p",
@@ -81,6 +92,7 @@ describe("diagnostics popup", () => {
       "maxSamples",
       "qualities",
       "runtimeRedirects",
+      "runtimeTransitions",
       "samples",
       "totalHlsRequests",
     ]);
@@ -88,5 +100,6 @@ describe("diagnostics popup", () => {
     assert.equal(rendered.totalHlsRequests, 0);
     assert.equal(rendered.samples[0].url, "https://pstatic.net/[redacted-path]/720p.m3u8?[redacted]");
     assert.equal("unknown" in rendered.samples[0], false);
+    assert.equal("unknown" in rendered.runtimeTransitions[0], false);
   });
 });

@@ -8,6 +8,7 @@ import {
   normalizeDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
+  recordRuntimeTransition,
   updateRuntimeRedirectDiagnostics,
 } from "../../src/shared/diagnostics.js";
 
@@ -70,6 +71,13 @@ describe("diagnostics helpers", () => {
       },
       { type: "media", url: "https://cdn.test/live/chunklist_720p.m3u8?Policy=example" },
     );
+    recordRuntimeTransition(diagnostics, {
+      action: "selected",
+      fromQuality: null,
+      reason: "initial-selection",
+      source: "master-response",
+      toQuality: "1440p",
+    });
 
     const snapshot = createDiagnosticsSnapshot(diagnostics);
     assert.deepEqual(snapshot.runtimeRedirects.activeTabIds, [7]);
@@ -79,6 +87,24 @@ describe("diagnostics helpers", () => {
     assert.equal(snapshot.decisions[0].reason, "eligible-chzzk-hls-quality");
     assert.equal(snapshot.decisions[0].targetQuality, "1440p");
     assert.equal(snapshot.decisions[0].redirectedCurrentRequest, true);
+    assert.deepEqual(
+      snapshot.runtimeTransitions.map(({ action, fromQuality, reason, source, toQuality }) => ({
+        action,
+        fromQuality,
+        reason,
+        source,
+        toQuality,
+      })),
+      [
+        {
+          action: "selected",
+          fromQuality: null,
+          reason: "initial-selection",
+          source: "master-response",
+          toQuality: "1440p",
+        },
+      ],
+    );
   });
 
   it("normalizes persisted diagnostics to an exact bounded schema and tail-trims arrays", () => {
@@ -121,6 +147,25 @@ describe("diagnostics helpers", () => {
           targetsByTab: { 7: "1080p", 8: "invalid", bad: "2160p" },
           updatedAt: "not-a-date",
         },
+        runtimeTransitions: [
+          {
+            action: "blocked",
+            extra: "drop-me",
+            fromQuality: "1440p",
+            reason: "lower-quality",
+            seenAt: timestamp,
+            source: "master-probe",
+            toQuality: "720p",
+          },
+          {
+            action: "invented",
+            fromQuality: "1440p",
+            reason: "secret-bearing arbitrary reason",
+            seenAt: timestamp,
+            source: "unknown",
+            toQuality: "720p",
+          },
+        ],
         samples: [validSample, validSample, { ...validSample, quality: [] }],
         totalHlsRequests: "7",
         unknownTopLevel: "drop-me",
@@ -134,6 +179,7 @@ describe("diagnostics helpers", () => {
       "maxSamples",
       "qualities",
       "runtimeRedirects",
+      "runtimeTransitions",
       "samples",
       "totalHlsRequests",
     ]);
@@ -164,6 +210,16 @@ describe("diagnostics helpers", () => {
       "lastError",
       "targetsByTab",
       "updatedAt",
+    ]);
+    assert.deepEqual(normalized.runtimeTransitions, [
+      {
+        action: "blocked",
+        fromQuality: "1440p",
+        reason: "lower-quality",
+        seenAt: timestamp,
+        source: "master-probe",
+        toQuality: "720p",
+      },
     ]);
   });
 

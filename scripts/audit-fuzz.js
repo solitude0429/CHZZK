@@ -7,6 +7,7 @@ import {
   normalizeDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
+  recordRuntimeTransition,
 } from "../src/shared/diagnostics.js";
 import { isLikelyHlsPlaylist, isUtf8TextWithinByteLimit } from "../src/shared/playlist-evidence.js";
 import {
@@ -54,6 +55,7 @@ const DIAGNOSTIC_TOP_LEVEL_KEYS = Object.freeze([
   "maxSamples",
   "qualities",
   "runtimeRedirects",
+  "runtimeTransitions",
   "samples",
   "totalHlsRequests",
 ]);
@@ -69,6 +71,14 @@ const DIAGNOSTIC_DECISION_KEYS = Object.freeze([
   "targetQuality",
   "type",
   "url",
+]);
+const DIAGNOSTIC_TRANSITION_KEYS = Object.freeze([
+  "action",
+  "fromQuality",
+  "reason",
+  "seenAt",
+  "source",
+  "toQuality",
 ]);
 const RAW_TAIL_PIECES = Object.freeze([
   "A",
@@ -115,6 +125,7 @@ const defaultImplementation = Object.freeze({
   playlistFamilyKey,
   recordDecision,
   recordDiagnosticUrl,
+  recordRuntimeTransition,
   redactMediaUrl,
   replaceQualityInUrl,
   shouldRecordDiagnostics,
@@ -945,9 +956,18 @@ function assertExactDiagnosticsSchema(context, snapshot, secret) {
     Number.isSafeInteger(snapshot.totalHlsRequests) && snapshot.totalHlsRequests >= 0,
     "diagnostics total counter was not normalized",
   );
-  trackCollection(snapshot.samples, snapshot.decisions, snapshot.runtimeRedirects.activeTabIds);
+  trackCollection(
+    snapshot.samples,
+    snapshot.decisions,
+    snapshot.runtimeRedirects.activeTabIds,
+    snapshot.runtimeTransitions,
+  );
   check(snapshot.samples.length <= snapshot.maxSamples, "diagnostic samples exceeded maxSamples");
   check(snapshot.decisions.length <= snapshot.maxSamples, "diagnostic decisions exceeded maxSamples");
+  check(
+    snapshot.runtimeTransitions.length <= snapshot.maxSamples,
+    "diagnostic transitions exceeded maxSamples",
+  );
   check(
     snapshot.runtimeRedirects.activeTabIds.length <= snapshot.maxSamples,
     "diagnostic active tabs exceeded maxSamples",
@@ -959,6 +979,12 @@ function assertExactDiagnosticsSchema(context, snapshot, secret) {
     check(
       arraysEqual(Object.keys(decision), DIAGNOSTIC_DECISION_KEYS),
       "diagnostic decision schema was not exact",
+    );
+  }
+  for (const transition of snapshot.runtimeTransitions) {
+    check(
+      arraysEqual(Object.keys(transition), DIAGNOSTIC_TRANSITION_KEYS),
+      "diagnostic transition schema was not exact",
     );
   }
   for (const count of Object.values(snapshot.qualities)) {
@@ -1044,6 +1070,25 @@ function runDiagnosticsCase(context) {
       targetsByTab: { [tabId]: `${quality}p`, bad: secret },
       updatedAt: index % 2 === 0 ? timestamp : "invalid-date",
     },
+    runtimeTransitions: [
+      {
+        action: "blocked",
+        extra: secret,
+        fromQuality: "2160p",
+        reason: "lower-quality",
+        seenAt: timestamp,
+        source: "master-response",
+        toQuality: `${quality}p`,
+      },
+      {
+        action: secret,
+        fromQuality: "2160p",
+        reason: secret,
+        seenAt: timestamp,
+        source: secret,
+        toQuality: `${quality}p`,
+      },
+    ],
     samples,
     totalHlsRequests:
       index % 4 === 0
@@ -1073,6 +1118,17 @@ function runDiagnosticsCase(context) {
       targetQuality: "2160p",
     },
     { tabId, type: "media", url: sensitiveUrl },
+    { now: new Date(timestamp) },
+  );
+  implementation.recordRuntimeTransition(
+    normalized,
+    {
+      action: "ignored",
+      fromQuality: `${quality}p`,
+      reason: "client-cancelled",
+      source: "redirect-response",
+      toQuality: `${quality}p`,
+    },
     { now: new Date(timestamp) },
   );
   const snapshot = implementation.createDiagnosticsSnapshot(normalized);

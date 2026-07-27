@@ -29,6 +29,7 @@ function renderTargetSummary(runtimeRedirects) {
 function render(value) {
   const diagnostics = normalizeDiagnostics(value, NORMALIZATION_OPTIONS);
   const runtimeRedirects = diagnostics.runtimeRedirects;
+  const lastTransition = diagnostics.runtimeTransitions.at(-1);
   const decisions = diagnostics.decisions;
   const lastDecision = decisions.at(-1);
   const qualities = renderQualitySummary(diagnostics);
@@ -39,6 +40,9 @@ function render(value) {
     `targetsByTab: ${renderTargetSummary(runtimeRedirects)}`,
     `runtimeRedirectsUpdatedAt: ${runtimeRedirects.updatedAt}`,
     `lastRuntimeRedirectError: ${runtimeRedirects.lastError ?? "none"}`,
+    lastTransition
+      ? `lastRuntimeTransition: ${lastTransition.action} / ${lastTransition.reason} / ${lastTransition.fromQuality ?? "none"} -> ${lastTransition.toQuality ?? "none"} / ${lastTransition.source}`
+      : "lastRuntimeTransition: none",
     lastDecision
       ? `lastDecision: ${lastDecision.ok ? "ok" : "blocked"} / ${lastDecision.reason} / tab ${lastDecision.tabId ?? "n/a"}`
       : "lastDecision: none",

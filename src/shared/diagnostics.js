@@ -13,6 +13,22 @@ const MAX_DIAGNOSTIC_QUALITY_KEYS = 64;
 const MAX_DIAGNOSTIC_REASON_LENGTH = 64;
 const MAX_DIAGNOSTIC_TYPE_LENGTH = 32;
 const MAX_DIAGNOSTIC_URL_INPUT_LENGTH = 4096;
+const RUNTIME_TRANSITION_ACTIONS = new Set(["blocked", "ignored", "invalidated", "selected"]);
+const RUNTIME_TRANSITION_REASONS = new Set([
+  "client-cancelled",
+  "higher-quality",
+  "initial-selection",
+  "lower-quality",
+  "network-error",
+  "response-body",
+  "response-status",
+]);
+const RUNTIME_TRANSITION_SOURCES = new Set([
+  "master-probe",
+  "master-response",
+  "numeric-probe",
+  "redirect-response",
+]);
 
 function normalizedMaxSamples(value, fallback = 200) {
   const normalizedFallback =
@@ -114,6 +130,31 @@ function normalizeDecision(value) {
   };
 }
 
+function normalizeRuntimeTransition(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const fromQuality = normalizedQuality(value.fromQuality, { nullable: true });
+  const toQuality = normalizedQuality(value.toQuality, { nullable: true });
+  const seenAt = normalizedIsoTimestamp(value.seenAt);
+  if (
+    !RUNTIME_TRANSITION_ACTIONS.has(value.action) ||
+    fromQuality === undefined ||
+    toQuality === undefined ||
+    !RUNTIME_TRANSITION_REASONS.has(value.reason) ||
+    seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO ||
+    !RUNTIME_TRANSITION_SOURCES.has(value.source)
+  ) {
+    return null;
+  }
+  return {
+    action: value.action,
+    fromQuality,
+    reason: value.reason,
+    seenAt,
+    source: value.source,
+    toQuality,
+  };
+}
+
 function normalizeQualityCounters(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const counters = {};
@@ -175,6 +216,12 @@ export function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
       targetsByTab: normalizeTargetsByTab(runtimeSource.targetsByTab, effectiveMaxSamples),
       updatedAt: normalizedIsoTimestamp(runtimeSource.updatedAt),
     },
+    runtimeTransitions: (Array.isArray(source.runtimeTransitions)
+      ? source.runtimeTransitions.slice(-effectiveMaxSamples)
+      : []
+    )
+      .map(normalizeRuntimeTransition)
+      .filter(Boolean),
     samples: (Array.isArray(source.samples) ? source.samples.slice(-effectiveMaxSamples) : [])
       .map(normalizeSample)
       .filter(Boolean),
@@ -194,6 +241,7 @@ export function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
       targetsByTab: {},
       updatedAt: EPOCH_ISO,
     },
+    runtimeTransitions: [],
     samples: [],
     totalHlsRequests: 0,
   };
@@ -249,6 +297,27 @@ export function recordDecision(diagnostics, decision, details = {}, { now = new 
   if (!entry) return false;
   diagnostics.decisions.push(entry);
   capList(diagnostics.decisions, normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES));
+  diagnostics.generatedAt = now.toISOString();
+  return true;
+}
+
+export function recordRuntimeTransition(
+  diagnostics,
+  transition,
+  { now = new Date() } = {},
+) {
+  if (!diagnostics || !transition) return false;
+  if (!Array.isArray(diagnostics.runtimeTransitions)) diagnostics.runtimeTransitions = [];
+  const entry = normalizeRuntimeTransition({
+    ...transition,
+    seenAt: now.toISOString(),
+  });
+  if (!entry) return false;
+  diagnostics.runtimeTransitions.push(entry);
+  capList(
+    diagnostics.runtimeTransitions,
+    normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES),
+  );
   diagnostics.generatedAt = now.toISOString();
   return true;
 }

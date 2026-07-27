@@ -83,6 +83,10 @@ async function makeExtensionXpi({
         run_at: "document_start",
       },
     ],
+    background: {
+      persistent: true,
+      scripts: ["background.js", "e2e-error-observer.js"],
+    },
     browser_specific_settings: {
       gecko: {
         ...productionManifest.browser_specific_settings.gecko,
@@ -107,6 +111,22 @@ async function makeExtensionXpi({
     date: fixedZipDate,
     unixPermissions: 0o100644,
   });
+  zip.file(
+    "e2e-error-observer.js",
+    Buffer.from(`browser.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    browser.storage.local.set({
+      chzzkE2eLastWebRequestError: String(details.error ?? ""),
+    });
+  },
+  {
+    types: ["media", "other", "xmlhttprequest"],
+    urls: ["https://*.pstatic.net/*"],
+  },
+);
+`),
+    { date: fixedZipDate, unixPermissions: 0o100644 },
+  );
   for (const [name, path] of files) {
     zip.file(name, readFileSync(path), { date: fixedZipDate, unixPermissions: 0o100644 });
   }
@@ -209,8 +229,26 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 <script>
 (async () => {
   try {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/hls_playlist.m3u8?Policy=synthetic-master";
+    const masterResponse = await fetch(masterUrl);
+    const masterBody = await masterResponse.text();
+    if (!masterResponse.ok || !masterBody.startsWith("#EXTM3U")) {
+      throw new Error("master fixture failed");
+    }
     const mediaUrl =
       "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F#client-only-fragment";
+    const cancelledUrl = mediaUrl.replace(
+      "#client-only-fragment",
+      "&cancel=1#client-only-fragment",
+    );
+    const controller = new AbortController();
+    const cancelledRequest = fetch(cancelledUrl, { signal: controller.signal })
+      .then(() => "unexpected-success", (error) => error.name);
+    setTimeout(() => controller.abort(), 300);
+    if (await cancelledRequest !== "AbortError") {
+      throw new Error("cancel fixture failed");
+    }
     let finalBody = "";
     let finalStatus = 0;
     for (let index = 0; index < 4; index += 1) {
@@ -234,24 +272,43 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       }
 
       if (host === "nvelop-livecloud.pstatic.net" && requestUrl.pathname.endsWith(".m3u8")) {
+        if (requestUrl.pathname.endsWith("/hls_playlist.m3u8")) {
+          response.statusCode = 200;
+          response.setHeader("content-type", "application/vnd.apple.mpegurl");
+          response.end(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
+720p/segment/chunklist_720p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
+`);
+          return;
+        }
         const quality = requestUrl.pathname.match(
           /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i,
         )?.[1];
         if (quality === "1080p" || quality === "720p" || quality === "480p") {
           const etag = `"fixture-${quality}"`;
-          response.setHeader("cache-control", "no-cache");
-          response.setHeader("etag", etag);
-          if (request.headers["if-none-match"] === etag) {
-            requestRecord.cacheRevalidation = true;
-            response.statusCode = 304;
-            response.end();
-            return;
+          const finishPlaylist = () => {
+            if (response.destroyed || response.writableEnded) return;
+            response.setHeader("cache-control", "no-cache");
+            response.setHeader("etag", etag);
+            if (request.headers["if-none-match"] === etag) {
+              requestRecord.cacheRevalidation = true;
+              response.statusCode = 304;
+              response.end();
+              return;
+            }
+            response.statusCode = 200;
+            response.setHeader("content-type", "application/vnd.apple.mpegurl");
+            response.end(
+              `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
+            );
+          };
+          if (requestUrl.searchParams.get("cancel") === "1") {
+            setTimeout(finishPlaylist, 1000);
+          } else {
+            finishPlaylist();
           }
-          response.statusCode = 200;
-          response.setHeader("content-type", "application/vnd.apple.mpegurl");
-          response.end(
-            `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
-          );
         } else {
           response.statusCode = 404;
           response.end("not available");
@@ -512,8 +569,17 @@ async function main() {
     assert.equal(before?.version, "0.1.3");
     assert.match(before?.baseUrl ?? "", /^moz-extension:\/\//);
 
-    const requestCountBeforePlayback = requests.length;
     await driver.setContext("content");
+    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+    await poll(
+      async () => {
+        const payload = await driver.execute("return document.getElementById('payload')?.value || null;");
+        return payload ? true : null;
+      },
+      { timeoutMs: 5000 },
+    );
+
+    const requestCountBeforePlayback = requests.length;
     await driver.command("POST", "/url", { url: `https://www.chzzk.naver.com:${state.port}/live/test` });
     const playbackResult = await poll(
       async () => {
@@ -533,15 +599,46 @@ async function main() {
         },
         { timeoutMs: 5000 },
       );
+      const observedWebRequestError = await driver.executeAsync(
+        `const done = arguments[arguments.length - 1];
+browser.storage.local.get("chzzkE2eLastWebRequestError").then(
+  (stored) => done(stored.chzzkE2eLastWebRequestError ?? null),
+  (error) => done("storage-error:" + String(error)),
+);`,
+      );
       throw new Error(
-        `Firefox playback stayed below 1080p: ${playbackResult}\nDiagnostics: ${diagnosticsPayload}`,
+        `Firefox playback stayed below 1080p: ${playbackResult}\nObserved webRequest error: ${observedWebRequestError}\nDiagnostics: ${diagnosticsPayload}`,
+      );
+    }
+    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+    const playbackDiagnostics = await poll(
+      async () => {
+        const value = await driver.execute("return document.getElementById('payload')?.value || null;");
+        return value ? value : null;
+      },
+      { timeoutMs: 5000 },
+    );
+    const parsedPlaybackDiagnostics = JSON.parse(playbackDiagnostics);
+    const observedWebRequestError = await driver.executeAsync(
+      `const done = arguments[arguments.length - 1];
+browser.storage.local.get("chzzkE2eLastWebRequestError").then(
+  (stored) => done(stored.chzzkE2eLastWebRequestError ?? null),
+  (error) => done("storage-error:" + String(error)),
+);`,
+    );
+    if (observedWebRequestError !== null) {
+      assert.equal(
+        ["NS_BINDING_ABORTED", "NS_ERROR_ABORT"].includes(observedWebRequestError),
+        true,
+        `Firefox emitted an unclassified cancellation error: ${observedWebRequestError}`,
       );
     }
     const redirectedRequest = requests.find(
       (request) =>
         request.host === "nvelop-livecloud.pstatic.net" &&
         request.path.includes("/1080p/") &&
-        request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+        request.path.includes("chunklist_1080p_highbitrate.m3u8") &&
+        !request.search.includes("cancel=1"),
     );
     assert.ok(redirectedRequest, "Firefox did not issue the redirected 1080p playlist request");
     assert.equal(
@@ -551,17 +648,48 @@ async function main() {
     );
     const liveToMiniRequests = requests.slice(requestCountBeforePlayback);
     for (const unavailableQuality of ["2160p", "1440p"]) {
-      assert.equal(
-        liveToMiniRequests.filter(
-          (request) =>
-            request.host === "nvelop-livecloud.pstatic.net" &&
-            request.path.includes(`/${unavailableQuality}/`),
-        ).length,
-        1,
-        `live-to-mini transition re-probed ${unavailableQuality} after the target was verified`,
-      );
+      const fallbackProbeCount = liveToMiniRequests.filter(
+        (request) =>
+          request.host === "nvelop-livecloud.pstatic.net" && request.path.includes(`/${unavailableQuality}/`),
+      ).length;
+      if (fallbackProbeCount !== 0) {
+        throw new Error(
+          `Observed master evidence triggered ${fallbackProbeCount} ${unavailableQuality} fallback probe(s): ${playbackDiagnostics}`,
+        );
+      }
     }
+    const cancellationReachedFixture = liveToMiniRequests.some(
+      (request) =>
+        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.path.includes("/1080p/") &&
+        request.search.includes("cancel=1"),
+    );
+    const cancellationReportedNeutral = parsedPlaybackDiagnostics.runtimeTransitions.some(
+      (transition) =>
+        transition.action === "ignored" &&
+        transition.fromQuality === "1080p" &&
+        transition.reason === "client-cancelled" &&
+        transition.source === "redirect-response" &&
+        transition.toQuality === "1080p",
+    );
+    assert.equal(
+      cancellationReachedFixture || cancellationReportedNeutral,
+      true,
+      `Firefox did not exercise the client-cancelled redirected request: ${playbackDiagnostics}`,
+    );
+    assert.equal(
+      parsedPlaybackDiagnostics.runtimeTransitions.some(
+        (transition) =>
+          transition.action === "invalidated" &&
+          transition.fromQuality === "1080p" &&
+          transition.reason === "network-error",
+      ),
+      false,
+      `Firefox client cancellation invalidated the selected 1080p target: ${playbackDiagnostics}`,
+    );
 
+    await driver.setContext("content");
+    await driver.command("POST", "/url", { url: "about:blank" });
     const updateResult = await triggerAddonUpdate(driver);
     if (updateResult?.status !== "installed" || updateResult?.version !== "0.1.4") {
       throw new Error(`Firefox update failed: ${JSON.stringify({ before, updateResult })}`);
@@ -627,8 +755,8 @@ async function main() {
             request.host === "nvelop-livecloud.pstatic.net" &&
             request.path.includes(`/${unavailableQuality}/`),
         ).length,
-        1,
-        `mini-player re-probed ${unavailableQuality} after a streamed HLS body should have renewed the target`,
+        0,
+        `observed mini-player master evidence triggered a ${unavailableQuality} fallback probe`,
       );
     }
     assert.equal(
@@ -645,6 +773,7 @@ async function main() {
     console.log(
       JSON.stringify({
         cacheRevalidation: "304",
+        clientCancellation: `${observedWebRequestError ?? "no-terminal-error"}-neutral`,
         clientFragmentNormalized: true,
         firefox: basename(firefoxBinary),
         functionalOnly: true,
@@ -652,6 +781,7 @@ async function main() {
         installedAfter: after.version,
         installedBefore: before.version,
         liveToMiniTransition: "pushState",
+        masterResponsePreselection: true,
         miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
         miniPlayerRouteChanges: 3,
