@@ -17,17 +17,13 @@ function passingSnapshot() {
           author: { login: "chatgpt-codex-connector[bot]" },
           body:
             `Codex Review: Didn't find any major issues. :tada:\n\n` +
-            `**Reviewed commit:** \`${headSha.slice(0, 10)}\``,
+            `**Reviewed commit:** \`${headSha}\``,
         },
       ],
       pageInfo: { hasNextPage: false, hasPreviousPage: false },
     },
     headRefOid: headSha,
     isDraft: false,
-    reviews: {
-      nodes: [],
-      pageInfo: { hasNextPage: false, hasPreviousPage: false },
-    },
     reviewThreads: {
       nodes: [],
       pageInfo: { hasNextPage: false },
@@ -36,15 +32,21 @@ function passingSnapshot() {
 }
 
 describe("exact-head review verification", () => {
-  it("extracts and matches reviewed commit evidence", () => {
-    const body =
-      `Codex Review: Didn't find any major issues.\n` + `Reviewed commit: \`${headSha.slice(0, 12)}\``;
-    assert.equal(reviewedCommit(body), headSha.slice(0, 12));
+  it("extracts and matches only a full reviewed commit SHA", () => {
+    const body = `Codex Review: Didn't find any major issues.\nReviewed commit: \`${headSha}\``;
+    assert.equal(reviewedCommit(body), headSha);
     assert.equal(evidenceMatchesHead(body, headSha), true);
     assert.equal(evidenceMatchesHead(body, `f${headSha.slice(1)}`), false);
+    assert.equal(
+      evidenceMatchesHead(
+        `Codex Review: Didn't find any major issues.\nReviewed commit: \`${headSha.slice(0, 12)}\``,
+        headSha,
+      ),
+      false,
+    );
   });
 
-  it("accepts only successful bot evidence for the current head with no unresolved threads", () => {
+  it("accepts only successful bot issue-comment evidence for the exact head", () => {
     assert.deepEqual(evaluateExactHeadReview(passingSnapshot()), {
       conclusion: "success",
       headSha,
@@ -54,7 +56,7 @@ describe("exact-head review verification", () => {
 
   it("rejects stale, user-authored, draft, unresolved, and incomplete evidence", () => {
     const stale = passingSnapshot();
-    stale.comments.nodes[0].body = stale.comments.nodes[0].body.replace(headSha.slice(0, 10), "aaaaaaaaaa");
+    stale.comments.nodes[0].body = stale.comments.nodes[0].body.replace(headSha, "a".repeat(40));
     assert.equal(evaluateExactHeadReview(stale).conclusion, "failure");
 
     const spoofed = passingSnapshot();
