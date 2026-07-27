@@ -372,6 +372,10 @@ function setSessionTarget(session, resolution, token) {
   }
   const previousTargetNumber = qualityNumber(previous?.targetQuality);
   const targetNumber = qualityNumber(targetQuality);
+  const incomingMasterReplacesNumeric =
+    previous?.resolved &&
+    resolution.evidenceKind === "master" &&
+    previous.evidenceKind !== "master";
   if (
     previous?.resolved &&
     previous.evidenceKind === "master" &&
@@ -393,7 +397,8 @@ function setSessionTarget(session, resolution, token) {
     previous?.resolved &&
     previousTargetNumber &&
     targetNumber &&
-    targetNumber < previousTargetNumber
+    targetNumber < previousTargetNumber &&
+    !incomingMasterReplacesNumeric
   ) {
     scheduleRuntimeTransition({
       action: "blocked",

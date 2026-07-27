@@ -2786,6 +2786,40 @@ chunklist_2160p.m3u8?Policy=synthetic
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 44: "1080p" });
   });
 
+  it("lets trusted master evidence demote an earlier numeric target while preserving master monotonicity", async () => {
+    const masterUrl =
+      "https://nvelop-livecloud.pstatic.net/chzzk/lip2_kr/example/hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/chunklist_1080p.m3u8?Policy=redacted
+`;
+    const lowRequest = firstLowQualityRequest(45);
+    const { listeners, storage } = await loadBackground({
+      availableQualities: new Set(["2160p"]),
+      responsesByUrl: new Map([[masterUrl, masterPlaylist]]),
+    });
+
+    const numeric = plain(await listeners.onBeforeRequest(lowRequest));
+    assert.match(numeric.redirectUrl, /chunklist_2160p/);
+
+    assert.equal(
+      await listeners.onBeforeRequest({
+        documentUrl: "https://chzzk.naver.com/live/example-channel",
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        tabId: 45,
+        type: "xmlhttprequest",
+        url: masterUrl,
+      }),
+      undefined,
+    );
+    await waitForDiagnosticsQueue(20);
+
+    const authoritative = plain(listeners.onBeforeRequest(lowRequest));
+    assert.match(authoritative.redirectUrl, /chunklist_1080p/);
+    assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 45: "1080p" });
+  });
+
   it("lets newer master-playlist evidence supersede an older numeric probe", async () => {
     const pendingNumeric = deferred();
     const masterUrl =

@@ -13,6 +13,7 @@ import {
   buildProductionFirefoxCapabilities,
   createFirefoxSignedSmokeEvidence,
   persistFirefoxSignedSmokeResult,
+  startGeckodriver,
   validateSignedSmokeInputs,
 } from "../../scripts/lib/firefox-signed-smoke.js";
 import { RELEASE_PACKAGE_FILES } from "../../scripts/lib/release-artifacts.js";
@@ -63,6 +64,16 @@ function makeInputFiles() {
     newSignedXpiPath,
     oldSignedXpiPath,
   };
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
 }
 
 describe("stock Firefox AMO-signed release smoke gate", () => {
@@ -141,6 +152,33 @@ describe("stock Firefox AMO-signed release smoke gate", () => {
       files.cleanup();
     }
   });
+
+  it(
+    "terminates and awaits geckodriver when startup readiness times out",
+    { skip: process.platform === "win32" },
+    async () => {
+      const directory = mkdtempSync(join(repoRoot, ".chzzk-geckodriver-startup-"));
+      const binary = join(directory, "fake-geckodriver");
+      const pidPath = join(directory, "pid");
+      writeFileSync(
+        binary,
+        `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+setInterval(() => {}, 1000);
+`,
+      );
+      chmodSync(binary, 0o700);
+      try {
+        await assert.rejects(startGeckodriver(binary, { readinessTimeoutMs: 500 }), /timed out/i);
+        const pid = Number(readFileSync(pidPath, "utf8"));
+        assert.equal(Number.isSafeInteger(pid), true);
+        assert.equal(processExists(pid), false);
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("binds the reserved geckodriver port into every disposable Firefox session", () => {
     const input = { firefoxBinary: "/opt/firefox/firefox" };

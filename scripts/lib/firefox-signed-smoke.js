@@ -623,7 +623,32 @@ async function reservePort() {
   return port;
 }
 
-async function startGeckodriver(binary) {
+function geckodriverHasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForGeckodriverExit(child, timeoutMs) {
+  if (geckodriverHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer !== null) clearTimeout(timer);
+      child.off("error", handleExit);
+      child.off("exit", handleExit);
+      resolve(exited);
+    };
+    const handleExit = () => finish(true);
+    child.once("error", handleExit);
+    child.once("exit", handleExit);
+    if (geckodriverHasExited(child)) {
+      finish(true);
+      return;
+    }
+    timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+export async function startGeckodriver(binary, { readinessTimeoutMs = 10_000 } = {}) {
   const port = await reservePort();
   const logs = [];
   const child = spawn(binary, ["--host", "127.0.0.1", "--port", String(port)], {
@@ -637,27 +662,36 @@ async function startGeckodriver(binary) {
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => logs.push(chunk));
   }
-  await poll(
-    async () => {
-      if (processError) throw processError;
-      if (child.exitCode !== null) throw new Error(`geckodriver exited with status ${child.exitCode}`);
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/status`);
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
-    { timeoutMs: 10_000 },
-  );
-  return { child, logs, port };
+  try {
+    await poll(
+      async () => {
+        if (processError) throw processError;
+        if (geckodriverHasExited(child)) {
+          throw new Error(`geckodriver exited with status ${child.exitCode ?? child.signalCode}`);
+        }
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/status`);
+          return response.ok;
+        } catch {
+          return false;
+        }
+      },
+      { timeoutMs: readinessTimeoutMs },
+    );
+    return { child, logs, port };
+  } catch (error) {
+    await stopGeckodriver(child);
+    throw error;
+  }
 }
 
-async function stopGeckodriver(child) {
-  if (child.exitCode !== null) return;
+export async function stopGeckodriver(child) {
+  if (geckodriverHasExited(child)) return;
   child.kill("SIGTERM");
-  await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(3000)]);
-  if (child.exitCode === null) child.kill("SIGKILL");
+  if (await waitForGeckodriverExit(child, 3000)) return;
+  child.kill("SIGKILL");
+  if (await waitForGeckodriverExit(child, 3000)) return;
+  throw new Error("geckodriver did not terminate after SIGKILL");
 }
 
 async function withDisposableFirefox({ firefoxBinary, port }, action) {
