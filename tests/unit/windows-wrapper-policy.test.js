@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
-
-const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 function read(path) {
   return readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
@@ -12,10 +9,7 @@ function read(path) {
 describe("Windows signed-smoke and exact-head review policy", () => {
   it("requires an explicit absolute Node executable and never resolves Node through PATH", () => {
     const wrapper = read("scripts/firefox-signed-smoke.windows.ps1");
-    assert.match(
-      wrapper,
-      /\[Parameter\(Mandatory = \$true\)\]\s*\[string\]\$NodeBinary/,
-    );
+    assert.match(wrapper, /\[Parameter\(Mandatory = \$true\)\]\s*\[string\]\$NodeBinary/);
     assert.match(wrapper, /IsPathFullyQualified\(\$Path\)/);
     assert.match(wrapper, /Resolve-RegularFile -Path \$NodeBinary -Label "NodeBinary" -RequireAbsolute/);
     assert.doesNotMatch(wrapper, /Get-Command\s+-Name\s+\$NodeBinary/);
