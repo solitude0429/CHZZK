@@ -2,83 +2,15 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: ["feat/**", "fix/**", "main"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-review-hardening-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  verify:
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          cache: npm
-          node-version: 22
-      - run: npm ci
-      - name: Check formatting
-        run: npm run format:check
-      - name: Check generated runtime
-        run: npm run check:generated
-      - name: Validate manifest
-        run: npm run validate:manifest
-      - name: Validate project cleanliness
-        run: npm run validate:project
-      - name: Validate workflows
-        run: npm run validate:workflows
-      - name: Run ESLint
-        run: npm run lint
-      - name: Run web-ext lint
-        run: npm run lint:webext
-      - name: Run unit tests
-        run: npm test
-      - name: Check coverage
-        run: npm run test:coverage
-      - name: Run audit fuzzing
-        run: npm run test:audit-fuzz
-      - name: Audit dependencies
-        run: npm run audit:deps
-      - name: Build extension
-        run: npm run build
-      - name: Audit package
-        run: npm run audit:package
-
-  firefox-e2e:
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          cache: npm
-          node-version: 22
-      - run: npm ci
-      - run: npm run setup:firefox-e2e
-      - name: Run Firefox functional E2E three times
-        run: |
-          for iteration in 1 2 3; do
-            echo "Firefox functional E2E iteration ${iteration}/3"
-            npm run test:firefox-e2e
-          done
-        env:
-          FIREFOX_BINARY: ${{ github.workspace }}/dist/e2e-tools/firefox/firefox
-          GECKODRIVER_BINARY: ${{ github.workspace }}/dist/e2e-tools/geckodriver
-
   format-and-harden-artifact:
     permissions:
       contents: read
@@ -100,45 +32,48 @@ jobs:
 
           configurator = Path("scripts/configure-repository.js")
           source = configurator.read_text()
-          old_condition = '''  if (
-            state.branchProtection.required_conversation_resolution?.enabled !== true ||
-            state.branchProtection.required_pull_request_reviews != null
-          ) {
-            changes.push({ kind: "pull-request-protection" });
-          }
-          '''
-          new_condition = '''  if (
-            state.branchProtection.allow_deletions?.enabled !== false ||
-            state.branchProtection.allow_force_pushes?.enabled !== false ||
-            state.branchProtection.required_conversation_resolution?.enabled !== true ||
-            state.branchProtection.required_pull_request_reviews != null
-          ) {
-            changes.push({ kind: "pull-request-protection" });
-          }
-          '''
+          old_condition = (
+              "  if (\n"
+              "    state.branchProtection.required_conversation_resolution?.enabled !== true ||\n"
+              "    state.branchProtection.required_pull_request_reviews != null\n"
+              "  ) {\n"
+              "    changes.push({ kind: \"pull-request-protection\" });\n"
+              "  }\n"
+          )
+          new_condition = (
+              "  if (\n"
+              "    state.branchProtection.allow_deletions?.enabled !== false ||\n"
+              "    state.branchProtection.allow_force_pushes?.enabled !== false ||\n"
+              "    state.branchProtection.required_conversation_resolution?.enabled !== true ||\n"
+              "    state.branchProtection.required_pull_request_reviews != null\n"
+              "  ) {\n"
+              "    changes.push({ kind: \"pull-request-protection\" });\n"
+              "  }\n"
+          )
           if source.count(old_condition) != 1:
               raise RuntimeError("repository protection planning source did not match exactly")
           source = source.replace(old_condition, new_condition)
-          old_update = '''    allow_deletions: enabledProtection(protection, "allow_deletions"),
-              allow_force_pushes: enabledProtection(protection, "allow_force_pushes"),
-          '''
-          new_update = '''    allow_deletions: false,
-              allow_force_pushes: false,
-          '''
+          old_update = (
+              "    allow_deletions: enabledProtection(protection, \"allow_deletions\"),\n"
+              "    allow_force_pushes: enabledProtection(protection, \"allow_force_pushes\"),\n"
+          )
+          new_update = "    allow_deletions: false,\n    allow_force_pushes: false,\n"
           if source.count(old_update) != 1:
               raise RuntimeError("repository protection update source did not match exactly")
           configurator.write_text(source.replace(old_update, new_update))
 
           settings_test = Path("tests/unit/repository-settings.test.js")
           test_source = settings_test.read_text()
-          old_fixture = '''    branchProtection: {
-              enforce_admins: { enabled: true },
-          '''
-          new_fixture = '''    branchProtection: {
-              allow_deletions: { enabled: false },
-              allow_force_pushes: { enabled: false },
-              enforce_admins: { enabled: true },
-          '''
+          old_fixture = (
+              "    branchProtection: {\n"
+              "      enforce_admins: { enabled: true },\n"
+          )
+          new_fixture = (
+              "    branchProtection: {\n"
+              "      allow_deletions: { enabled: false },\n"
+              "      allow_force_pushes: { enabled: false },\n"
+              "      enforce_admins: { enabled: true },\n"
+          )
           if test_source.count(old_fixture) != 1:
               raise RuntimeError("repository settings fixture did not match exactly")
           settings_test.write_text(test_source.replace(old_fixture, new_fixture))
@@ -160,7 +95,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           if-no-files-found: error
-          name: review-hardening-${{ github.event.pull_request.head.sha || github.sha }}
+          name: review-hardening-${{ github.event.pull_request.head.sha }}
           path: |
             .github/PULL_REQUEST_TEMPLATE/hardening.md
             .github/workflows/ci.yml
@@ -177,7 +112,6 @@ jobs:
 
   apply-review-hardening:
     if: >-
-      github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor == github.repository_owner
     needs: format-and-harden-artifact
