@@ -13,6 +13,8 @@ function repositoryState(checks) {
   return {
     actionsPermissions: { allowed_actions: "selected", enabled: true },
     branchProtection: {
+      allow_deletions: { enabled: false },
+      allow_force_pushes: { enabled: false },
       enforce_admins: { enabled: true },
       required_conversation_resolution: { enabled: true },
       required_pull_request_reviews: null,
@@ -69,11 +71,27 @@ describe("exact-head review branch protection", () => {
     ]);
   });
 
-  it("is idempotent when the full source-bound check set is installed", () => {
+  it("is idempotent when the full source-bound check set and protected history are installed", () => {
     assert.deepEqual(
       planRepositorySettings(repositoryState(desiredChecks()), githubActionsAppId, "release-operator"),
       [],
     );
+  });
+
+  it("repairs force-push or deletion drift through the atomic protection update", () => {
+    const state = repositoryState(desiredChecks());
+    state.branchProtection.allow_force_pushes.enabled = true;
+    state.branchProtection.allow_deletions.enabled = true;
+    assert.deepEqual(planRepositorySettings(state, githubActionsAppId, "release-operator"), [
+      { kind: "pull-request-protection" },
+    ]);
+
+    const configurator = readFileSync(
+      new URL("../../scripts/configure-repository.js", import.meta.url),
+      "utf8",
+    );
+    assert.match(configurator, /allow_deletions:\s*false/);
+    assert.match(configurator, /allow_force_pushes:\s*false/);
   });
 
   it("routes the public configure command directly through the atomic configurator", () => {
