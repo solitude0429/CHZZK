@@ -42,6 +42,9 @@ describe("Windows signed-smoke and exact-head review policy", () => {
       /if:\s*always\(\) && needs\.evaluate-exact-head-review\.result != 'skipped'/,
     );
     assert.doesNotMatch(publishCondition, /should_publish/);
+    assert.match(publishJob, /current_draft = pull_request\["draft"\]/);
+    assert.match(publishJob, /conclusion == "success" and current_draft is not True/);
+    assert.match(publishJob, /Pull request left draft before the review attestation was published\./);
     assert.match(publishJob, /Review verifier did not produce durable Codex evidence\./);
     assert.match(publishJob, /request:\{request_comment_id or 0\}:reaction:\{evidence_id or 0\}/);
     assert.doesNotMatch(publishJob, /actions\/checkout@/);
