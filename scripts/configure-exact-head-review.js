@@ -47,7 +47,10 @@ function parseJson(text, label) {
 
 function requiredRepository() {
   const repository = process.env.CHZZK_GITHUB_REPOSITORY;
-  if (typeof repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+  if (
+    typeof repository !== "string" ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
+  ) {
     throw new Error("CHZZK_GITHUB_REPOSITORY must be owner/name");
   }
   return repository;
@@ -75,18 +78,29 @@ function normalizedChecks(value) {
 export function planExactHeadReviewCheck(statusProtection) {
   const checks = normalizedChecks(statusProtection);
   const existing = checks.find((check) => check.context === REQUIRED_CONTEXT);
-  if (existing) return { changed: false, checks, strict: statusProtection.strict === true };
+  if (existing) {
+    return {
+      changed: false,
+      checks,
+      strict: statusProtection.strict === true,
+    };
+  }
 
   const source = checks.find(
-    (check) => check.context === "verify" && Number.isSafeInteger(check.app_id) && check.app_id > 0,
+    (check) =>
+      check.context === "verify" &&
+      Number.isSafeInteger(check.app_id) &&
+      check.app_id > 0,
   );
   if (!source) {
-    throw new Error("Cannot bind exact-head-review to the GitHub Actions app without the verify check");
+    throw new Error(
+      "Cannot bind exact-head-review to the GitHub Actions app without the verify check",
+    );
   }
   return {
     changed: true,
-    checks: [...checks, { app_id: source.app_id, context: REQUIRED_CONTEXT }].sort((left, right) =>
-      left.context.localeCompare(right.context, "en"),
+    checks: [...checks, { app_id: source.app_id, context: REQUIRED_CONTEXT }].sort(
+      (left, right) => left.context.localeCompare(right.context, "en"),
     ),
     strict: true,
   };
@@ -95,24 +109,37 @@ export function planExactHeadReviewCheck(statusProtection) {
 function main() {
   const apply = process.argv.slice(2).includes("--apply");
   const repository = requiredRepository();
-  const repositoryState = parseJson(ghApi("GET", `repos/${repository}`), "Repository lookup");
+  const repositoryState = parseJson(
+    ghApi("GET", `repos/${repository}`),
+    "Repository lookup",
+  );
   const branch = repositoryState.default_branch;
-  if (typeof branch !== "string" || !branch) throw new Error("Repository default branch is invalid");
+  if (typeof branch !== "string" || !branch) {
+    throw new Error("Repository default branch is invalid");
+  }
 
-  const endpoint = `repos/${repository}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`;
-  const statusProtection = parseJson(ghApi("GET", endpoint), "Required status checks");
+  const endpoint =
+    `repos/${repository}/branches/${encodeURIComponent(branch)}/protection/` +
+    "required_status_checks";
+  const statusProtection = parseJson(
+    ghApi("GET", endpoint),
+    "Required status checks",
+  );
   const plan = planExactHeadReviewCheck(statusProtection);
   console.log(JSON.stringify({ apply, branch, repository, ...plan }, null, 2));
   if (!apply || !plan.changed) return;
   ghApi("PATCH", endpoint, { checks: plan.checks, strict: plan.strict });
 }
 
-const isMain = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+const isMain =
+  process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
   try {
     main();
   } catch (error) {
-    console.error(`Exact-head review protection configuration failed: ${error.message}`);
+    console.error(
+      `Exact-head review protection configuration failed: ${error.message}`,
+    );
     process.exitCode = 1;
   }
 }
