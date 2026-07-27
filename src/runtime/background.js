@@ -895,13 +895,19 @@ function targetHasInFlightResponseVerification(state) {
   return false;
 }
 
+function targetHasDurableMigrationEvidence(state) {
+  return Boolean(
+    state?.evidenceKind === "master" ||
+      (state?.validatedNetworkUrls instanceof Map && state.validatedNetworkUrls.size > 0) ||
+      (Number.isSafeInteger(state?.lastSuccessfulVerificationSequence) &&
+        state.lastSuccessfulVerificationSequence > 0),
+  );
+}
+
 function targetCanMigrateAcrossContext(state, now) {
   if (!state?.dedicatedHls || !state.resolved) return false;
   if (state.expiresAt != null && state.expiresAt <= now) return false;
-  return (
-    (state.validatedNetworkUrls instanceof Map && state.validatedNetworkUrls.size > 0) ||
-    targetHasInFlightResponseVerification(state)
-  );
+  return targetHasDurableMigrationEvidence(state) || targetHasInFlightResponseVerification(state);
 }
 
 function migrateFailedTargetsAcrossContext(
@@ -938,6 +944,37 @@ function migrateFailedTargetsAcrossContext(
     if (group.length !== 1) continue;
     const [{ key, state }] = group;
     failedTargetsBySession.set(key, touchSessionState(state));
+  }
+}
+
+function migrateMasterResponseObserversAcrossContext(
+  tabId,
+  destinationContextKey,
+  sourceContextKey,
+  transitionToken,
+) {
+  for (const record of [...masterResponseObserversById.values()]) {
+    if (record.session.tabId !== tabId) continue;
+    if (
+      record.settled ||
+      !record.session.dedicatedHls ||
+      record.streamFailed === true ||
+      (sourceContextKey && record.session.contextKey !== sourceContextKey)
+    ) {
+      settleMasterResponseObserver(record);
+      continue;
+    }
+    const key = JSON.stringify([
+      tabId,
+      destinationContextKey,
+      record.session.familyKey,
+    ]);
+    record.session = {
+      ...record.session,
+      contextKey: destinationContextKey,
+      key,
+    };
+    record.token = transitionToken;
   }
 }
 
@@ -1013,6 +1050,11 @@ function migrateTabQualityState(
     if (record.tabId !== tabId) continue;
     const target = preservedTargetByOldKey.get(record.key);
     if (target?.targetEpoch === record.targetEpoch && target.targetQuality === record.targetQuality) {
+      if (target.evidenceKind === "master") {
+        record.settled = true;
+        redirectedRequestsById.delete(requestId);
+        continue;
+      }
       record.contextKey = target.contextKey;
       record.key = target.key;
       continue;
@@ -1020,9 +1062,12 @@ function migrateTabQualityState(
     record.settled = true;
     redirectedRequestsById.delete(requestId);
   }
-  for (const record of masterResponseObserversById.values()) {
-    if (record.session.tabId === tabId) settleMasterResponseObserver(record);
-  }
+  migrateMasterResponseObserversAcrossContext(
+    tabId,
+    destinationContextKey,
+    sourceContextKey,
+    transitionToken,
+  );
   tabContextTokenByTab.set(tabId, transitionToken);
   enforceSessionStateLimits();
   return tabTargets.length > 0;

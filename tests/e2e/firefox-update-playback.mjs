@@ -229,9 +229,14 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 <script>
 (async () => {
   try {
+    const liveToMiniTransition = location.pathname === "/live/test";
     const masterUrl =
-      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/hls_playlist.m3u8?Policy=synthetic-master";
+      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/hls_playlist.m3u8?Policy=synthetic-master" +
+      (liveToMiniTransition ? "&transition=live-to-mini" : "");
     const masterResponse = await fetch(masterUrl);
+    if (liveToMiniTransition) {
+      history.pushState({}, "", "/lives?keyword=another-channel-live-to-mini");
+    }
     const masterBody = await masterResponse.text();
     if (!masterResponse.ok || !masterBody.startsWith("#EXTM3U")) {
       throw new Error("master fixture failed");
@@ -255,9 +260,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       const response = await fetch(mediaUrl);
       finalStatus = response.status;
       finalBody = await response.text();
-      if (location.pathname === "/live/test" && index === 0) {
-        history.pushState({}, "", "/lives?keyword=another-channel-live-to-mini");
-      } else if (location.pathname === "/lives" && index < 3) {
+      if (!liveToMiniTransition && location.pathname === "/lives" && index < 3) {
         history.pushState({}, "", "/lives?keyword=another-channel-" + (index + 1));
       }
       if (index < 3) await new Promise((resolve) => setTimeout(resolve, 700));
@@ -275,12 +278,18 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         if (requestUrl.pathname.endsWith("/hls_playlist.m3u8")) {
           response.statusCode = 200;
           response.setHeader("content-type", "application/vnd.apple.mpegurl");
-          response.end(`#EXTM3U
+          const masterBody = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
 1080p/segment/chunklist_1080p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
 #EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
 720p/segment/chunklist_720p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
-`);
+`;
+          if (requestUrl.searchParams.get("transition") === "live-to-mini") {
+            response.flushHeaders();
+            setTimeout(() => response.end(masterBody), 250);
+          } else {
+            response.end(masterBody);
+          }
           return;
         }
         const quality = requestUrl.pathname.match(
@@ -687,6 +696,16 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       false,
       `Firefox client cancellation invalidated the selected 1080p target: ${playbackDiagnostics}`,
     );
+    assert.equal(
+      liveToMiniRequests.some(
+        (request) =>
+          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.path.endsWith("/hls_playlist.m3u8") &&
+          request.search.includes("transition=live-to-mini"),
+      ),
+      true,
+      "Firefox did not exercise a master response that crossed the live-to-mini transition",
+    );
 
     await driver.setContext("content");
     await driver.command("POST", "/url", { url: "about:blank" });
@@ -780,7 +799,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
         hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,
-        liveToMiniTransition: "pushState",
+        liveToMiniTransition: "in-flight-master-pushState",
         masterResponsePreselection: true,
         miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
