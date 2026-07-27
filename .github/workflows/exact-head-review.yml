@@ -20,7 +20,7 @@ jobs:
     name: exact-head-review-evaluation
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     permissions:
       contents: read
       issues: read
@@ -39,11 +39,31 @@ jobs:
         with:
           node-version: 22
       - id: review
+        name: Evaluate exact-head Codex evidence
         continue-on-error: true
-        run: node scripts/verify-exact-head-review.js
         env:
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          CHZZK_WAIT_FOR_CODEX: ${{ github.event_name == 'issue_comment' && github.event.action == 'created' && contains(github.event.comment.body, '@codex review') }}
           GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          attempts=1
+          if [ "$CHZZK_WAIT_FOR_CODEX" = "true" ]; then
+            attempts=40
+          fi
+
+          status=1
+          for attempt in $(seq 1 "$attempts"); do
+            echo "Exact-head review evidence attempt ${attempt}/${attempts}"
+            node scripts/verify-exact-head-review.js
+            status=$?
+            if [ "$status" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -lt "$attempts" ]; then
+              sleep 15
+            fi
+          done
+          exit "$status"
 
   publish-exact-head-review:
     if: always() && needs.evaluate-exact-head-review.result != 'skipped'
