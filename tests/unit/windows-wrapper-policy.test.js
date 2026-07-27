@@ -20,9 +20,13 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(wrapper, /& \$node \$runner/);
   });
 
-  it("publishes a dedicated exact-head-review check without executing pull-request code in the write job", () => {
+  it("publishes a dedicated exact-diff check without executing pull-request code in the write job", () => {
     const workflow = read(".github/workflows/exact-head-review.yml");
     assert.match(workflow, /name:\s*Exact head review/);
+    assert.match(workflow, /types:\s*\[opened, reopened, synchronize, edited\]/);
+    assert.doesNotMatch(workflow, /pull_request_review_thread/);
+    assert.match(workflow, /github\.event\.comment\.id \|\| 'pr-state'/);
+    assert.match(workflow, /vars\.RELEASE_OPERATOR_LOGIN/);
     assert.match(workflow, /"name":\s*"exact-head-review"/);
     assert.match(workflow, /checks:\s*write/);
     assert.match(workflow, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
@@ -31,13 +35,19 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.doesNotMatch(publishJob, /node scripts\//);
   });
 
-  it("keeps the verifier fail-closed for pagination and unresolved threads", () => {
+  it("binds immutable review evidence to the exact head and base and fails closed", () => {
     const verifier = read("scripts/verify-exact-head-review.js");
-    assert.match(verifier, /hasPreviousPage/);
-    assert.match(verifier, /hasNextPage/);
+    assert.match(verifier, /baseRefName/);
+    assert.match(verifier, /baseRefOid/);
+    assert.match(verifier, /headRefOid/);
+    assert.match(verifier, /databaseId/);
+    assert.match(verifier, /createdAt !== comment\.updatedAt/);
+    assert.match(verifier, /PullRequestCommit/);
+    assert.match(verifier, /BaseRefChangedEvent/);
     assert.match(verifier, /isResolved !== true/);
-    assert.match(verifier, /Didn\['’\]t find any major issues/);
-    assert.match(verifier, /reviewed === headSha\.toLowerCase\(\)/);
-    assert.doesNotMatch(verifier, /startsWith\(reviewed\)/);
+    assert.match(verifier, /pageInfo\?\.hasPreviousPage/);
+    assert.match(verifier, /pageInfo\?\.hasNextPage/);
+    assert.doesNotMatch(verifier, /SUCCESS_RE/);
+    assert.doesNotMatch(verifier, /reviewedCommit/);
   });
 });
