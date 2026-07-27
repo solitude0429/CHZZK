@@ -146,6 +146,7 @@ function hasUsableLowLatencyPart(lines) {
       const duration = Number(attributes?.DURATION);
       if (
         attributes &&
+        attributes.GAP?.toUpperCase() !== "YES" &&
         /^\d+(?:\.\d+)?$/.test(attributes.DURATION ?? "") &&
         Number.isFinite(duration) &&
         duration > 0 &&
