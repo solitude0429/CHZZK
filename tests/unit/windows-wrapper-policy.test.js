@@ -9,9 +9,15 @@ function read(path) {
 describe("Windows signed-smoke and exact-head review policy", () => {
   it("requires an explicit absolute Node executable and never resolves Node through PATH", () => {
     const wrapper = read("scripts/firefox-signed-smoke.windows.ps1");
-    assert.match(wrapper, /\[Parameter\(Mandatory = \$true\)\]\s*\[string\]\$NodeBinary/);
+    assert.match(
+      wrapper,
+      /\[Parameter\(Mandatory = \$true\)\]\s*\[string\]\$NodeBinary/,
+    );
     assert.match(wrapper, /IsPathFullyQualified\(\$Path\)/);
-    assert.match(wrapper, /Resolve-RegularFile -Path \$NodeBinary -Label "NodeBinary" -RequireAbsolute/);
+    assert.match(
+      wrapper,
+      /Resolve-RegularFile -Path \$NodeBinary -Label "NodeBinary" -RequireAbsolute/,
+    );
     assert.doesNotMatch(wrapper, /Get-Command\s+-Name\s+\$NodeBinary/);
     assert.doesNotMatch(wrapper, /\$NodeBinary\s*=\s*"node\.exe"/);
     assert.match(wrapper, /& \$node -p/);
@@ -23,7 +29,10 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(workflow, /name:\s*Exact head review/);
     assert.match(workflow, /"name":\s*"exact-head-review"/);
     assert.match(workflow, /checks:\s*write/);
-    assert.match(workflow, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
+    assert.match(
+      workflow,
+      /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/,
+    );
     const publishJob = workflow.slice(workflow.indexOf("  publish:"));
     assert.doesNotMatch(publishJob, /actions\/checkout@/);
     assert.doesNotMatch(publishJob, /node scripts\//);
@@ -35,6 +44,9 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(verifier, /hasNextPage/);
     assert.match(verifier, /isResolved !== true/);
     assert.match(verifier, /Didn\['’\]t find any major issues/);
-    assert.match(verifier, /headSha\.toLowerCase\(\)\.startsWith\(reviewed\)/);
+    assert.match(
+      verifier,
+      /headSha\.toLowerCase\(\)\.startsWith\(reviewed\)/,
+    );
   });
 });
