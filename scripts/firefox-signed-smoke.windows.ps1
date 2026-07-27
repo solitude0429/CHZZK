@@ -62,19 +62,6 @@ function Resolve-RegularFile {
     return $resolved
 }
 
-function Invoke-TrustedNode {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Executable,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
-    )
-
-    & $Executable @Arguments
-    return $LASTEXITCODE
-}
-
 $runner = Resolve-RegularFile `
     -Path (Join-Path $PSScriptRoot "firefox-signed-smoke.js") `
     -Label "signed-smoke runner"
