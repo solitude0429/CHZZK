@@ -11,6 +11,7 @@ const FULL_SHA_RE = /\b[a-f0-9]{40}\b/gi;
 const INVALIDATING_TIMELINE_TYPES = new Set([
   "BaseRefChangedEvent",
   "BaseRefDeletedEvent",
+  "BaseRefForcePushedEvent",
   "BaseRefRestoredEvent",
   "HeadRefDeletedEvent",
   "HeadRefForcePushedEvent",
