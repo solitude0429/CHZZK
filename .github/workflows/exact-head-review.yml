@@ -7,7 +7,23 @@ on:
     types: [opened, reopened, synchronize, edited]
 
 concurrency:
-  group: exact-head-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}-${{ github.event.comment.id || 'pr-state' }}
+  group: >-
+    exact-head-review-${{
+      (
+        github.event_name == 'issue_comment' &&
+        !(
+          github.event.issue.pull_request &&
+          github.event.comment.user.login == github.event.issue.user.login &&
+          (
+            contains(github.event.comment.body, '@codex review') ||
+            contains(github.event.changes.body.from, '@codex review')
+          )
+        )
+      ) && github.run_id ||
+      github.event.pull_request.number ||
+      github.event.issue.number ||
+      github.run_id
+    }}
   cancel-in-progress: true
 
 permissions:
@@ -20,10 +36,7 @@ jobs:
       github.event_name != 'issue_comment' ||
       (
         github.event.issue.pull_request &&
-        (
-          github.event.comment.user.login == github.event.issue.user.login ||
-          github.event.comment.user.login == vars.RELEASE_OPERATOR_LOGIN
-        ) &&
+        github.event.comment.user.login == github.event.issue.user.login &&
         (
           contains(github.event.comment.body, '@codex review') ||
           contains(github.event.changes.body.from, '@codex review')
@@ -39,7 +52,10 @@ jobs:
       base_ref: ${{ steps.review.outputs.base_ref }}
       base_sha: ${{ steps.review.outputs.base_sha }}
       conclusion: ${{ steps.review.outputs.conclusion }}
+      evidence_created_at: ${{ steps.review.outputs.evidence_created_at }}
+      evidence_id: ${{ steps.review.outputs.evidence_id }}
       head_sha: ${{ steps.review.outputs.head_sha }}
+      request_comment_id: ${{ steps.review.outputs.request_comment_id }}
       should_publish: ${{ steps.review.outputs.should_publish }}
       summary_base64: ${{ steps.review.outputs.summary_base64 }}
     steps:
@@ -62,7 +78,6 @@ jobs:
           CHZZK_EVENT_PREVIOUS_BODY: ${{ github.event.changes.body.from }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           CHZZK_WAIT_ATTEMPTS: 40
-          CHZZK_TRUSTED_REVIEW_REQUESTER: ${{ vars.RELEASE_OPERATOR_LOGIN }}
           CHZZK_WAIT_INTERVAL_MS: 15000
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/verify-exact-head-review.js
@@ -82,8 +97,11 @@ jobs:
           CHZZK_BASE_REF: ${{ needs.evaluate-exact-head-review.outputs.base_ref }}
           CHZZK_BASE_SHA: ${{ needs.evaluate-exact-head-review.outputs.base_sha }}
           CHZZK_CONCLUSION: ${{ needs.evaluate-exact-head-review.outputs.conclusion }}
+          CHZZK_EVIDENCE_CREATED_AT: ${{ needs.evaluate-exact-head-review.outputs.evidence_created_at }}
+          CHZZK_EVIDENCE_ID: ${{ needs.evaluate-exact-head-review.outputs.evidence_id }}
           CHZZK_HEAD_SHA: ${{ needs.evaluate-exact-head-review.outputs.head_sha }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          CHZZK_REQUEST_COMMENT_ID: ${{ needs.evaluate-exact-head-review.outputs.request_comment_id }}
           CHZZK_SUMMARY_BASE64: ${{ needs.evaluate-exact-head-review.outputs.summary_base64 }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
@@ -91,6 +109,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import base64
+          import datetime
           import json
           import os
           import re
@@ -114,6 +133,20 @@ jobs:
               with urllib.request.urlopen(req, timeout=30) as response:
                   return json.load(response)
 
+          def positive_integer(value):
+              try:
+                  number = int(value)
+              except (TypeError, ValueError):
+                  return None
+              return number if number > 0 else None
+
+          def valid_datetime(value):
+              try:
+                  datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except (AttributeError, ValueError):
+                  return False
+              return True
+
           pull_request = request("GET", f"/repos/{repository}/pulls/{pr_number}")
           current_head = pull_request["head"]["sha"]
           current_base_ref = pull_request["base"]["ref"]
@@ -121,6 +154,9 @@ jobs:
           evaluated_head = os.environ.get("CHZZK_HEAD_SHA", "").strip().lower()
           evaluated_base_ref = os.environ.get("CHZZK_BASE_REF", "").strip()
           evaluated_base_sha = os.environ.get("CHZZK_BASE_SHA", "").strip().lower()
+          evidence_created_at = os.environ.get("CHZZK_EVIDENCE_CREATED_AT", "").strip()
+          evidence_id = positive_integer(os.environ.get("CHZZK_EVIDENCE_ID"))
+          request_comment_id = positive_integer(os.environ.get("CHZZK_REQUEST_COMMENT_ID"))
           conclusion = os.environ.get("CHZZK_CONCLUSION", "failure")
           if conclusion not in {"success", "failure"}:
               conclusion = "failure"
@@ -133,13 +169,28 @@ jobs:
 
           valid_evaluated_head = re.fullmatch(r"[a-f0-9]{40}", evaluated_head) is not None
           target_head = evaluated_head if valid_evaluated_head else current_head
-          if evaluated_head != current_head:
+          if not valid_evaluated_head:
+              conclusion = "failure"
+              summary = "Review verifier did not produce a valid pull-request head."
+          elif evaluated_head != current_head:
               conclusion = "failure"
               summary = "Review evaluation did not match the current pull-request head."
           elif evaluated_base_ref != current_base_ref or evaluated_base_sha != current_base_sha:
               conclusion = "failure"
               summary = "Review evaluation did not match the current pull-request base."
+          elif conclusion == "success" and (
+              evidence_id is None
+              or request_comment_id is None
+              or not valid_datetime(evidence_created_at)
+          ):
+              conclusion = "failure"
+              summary = "Review verifier did not produce durable Codex evidence."
 
+          external_id = (
+              f"{pr_number}:{evaluated_base_ref}:{evaluated_base_sha}:{evaluated_head}:"
+              f"request:{request_comment_id or 0}:reaction:{evidence_id or 0}:"
+              f"created:{evidence_created_at or 'none'}"
+          )
           request(
               "POST",
               f"/repos/{repository}/check-runs",
@@ -149,7 +200,7 @@ jobs:
                   "status": "completed",
                   "conclusion": conclusion,
                   "details_url": f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/{pr_number}",
-                  "external_id": f"{pr_number}:{evaluated_base_ref}:{evaluated_base_sha}:{evaluated_head}",
+                  "external_id": external_id,
                   "output": {
                       "title": "Exact-diff review verification",
                       "summary": summary,
