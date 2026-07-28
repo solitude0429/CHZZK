@@ -5,6 +5,8 @@ on:
     types: [created, edited, deleted]
   pull_request_target:
     types: [opened, reopened, synchronize, edited]
+  push:
+    branches: [main]
 
 concurrency:
   group: >-
@@ -165,4 +167,109 @@ jobs:
                   },
               },
           )
+          PY
+
+  invalidate-base-advance:
+    if: github.event_name == 'push' && github.event.before != github.event.after
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Invalidate exact-diff reviews for the advanced base
+        env:
+          CHZZK_BASE_AFTER: ${{ github.event.after }}
+          CHZZK_BASE_BEFORE: ${{ github.event.before }}
+          CHZZK_BASE_REF: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          base_ref = os.environ["CHZZK_BASE_REF"]
+          before = os.environ["CHZZK_BASE_BEFORE"]
+          after = os.environ["CHZZK_BASE_AFTER"]
+          if not re.fullmatch(r"[a-f0-9]{40}", before):
+              raise SystemExit("base push before SHA is invalid")
+          if not re.fullmatch(r"[a-f0-9]{40}", after) or after == "0" * 40:
+              raise SystemExit("base push after SHA is invalid")
+          if not base_ref or len(base_ref) > 255:
+              raise SystemExit("base ref is invalid")
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+              "User-Agent": "chzzk-exact-head-review",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def request(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}", data=data, headers=headers, method=method
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          page = 1
+          invalidated = 0
+          while page <= 100:
+              query = urllib.parse.urlencode(
+                  {
+                      "base": base_ref,
+                      "page": page,
+                      "per_page": 100,
+                      "state": "open",
+                  }
+              )
+              pulls = request("GET", f"/repos/{repository}/pulls?{query}")
+              if not isinstance(pulls, list):
+                  raise SystemExit("open pull-request listing returned an invalid result")
+              for pull_request in pulls:
+                  number = pull_request.get("number")
+                  head_sha = pull_request.get("head", {}).get("sha", "")
+                  if not isinstance(number, int) or number < 1:
+                      raise SystemExit("open pull request has an invalid number")
+                  if not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+                      raise SystemExit(f"pull request {number} has an invalid head SHA")
+                  request(
+                      "POST",
+                      f"/repos/{repository}/check-runs",
+                      {
+                          "name": "exact-head-review",
+                          "head_sha": head_sha,
+                          "status": "completed",
+                          "conclusion": "failure",
+                          "details_url": (
+                              f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/{number}"
+                          ),
+                          "output": {
+                              "title": "Base branch advanced",
+                              "summary": (
+                                  f"Base {base_ref} advanced from {before[:12]} to "
+                                  f"{after[:12]}. Create a new immutable review request "
+                                  "naming the current head and base SHAs."
+                              ),
+                          },
+                      },
+                  )
+                  invalidated += 1
+              if len(pulls) < 100:
+                  break
+              page += 1
+          else:
+              raise SystemExit("open pull-request pagination exceeded 100 pages")
+
+          print(f"Invalidated {invalidated} open pull request(s) targeting {base_ref}.")
           PY
