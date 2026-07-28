@@ -130,6 +130,17 @@ describe("exact-head review verification", () => {
     assertFailure(snapshot, /was not the pull-request head/i);
   });
 
+  it("recovers the current head after a pre-request ref restore", () => {
+    const snapshot = passingSnapshot();
+    snapshot.timelineItems.nodes = [
+      { __typename: "PullRequestCommit", commit: { oid: headSha } },
+      { __typename: "HeadRefDeletedEvent" },
+      { __typename: "HeadRefRestoredEvent", pullRequest: { headRefOid: headSha } },
+      { __typename: "IssueComment", id: requestId },
+    ];
+    assert.equal(evaluateExactHeadReview(snapshot).conclusion, "success");
+  });
+
   it("rejects every head or base mutation after the request", () => {
     for (const mutation of [
       { __typename: "PullRequestCommit", commit: { oid: "2".repeat(40) } },
