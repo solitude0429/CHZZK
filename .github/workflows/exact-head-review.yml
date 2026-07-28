@@ -4,12 +4,31 @@ on:
   issue_comment:
     types: [created, edited, deleted]
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
+    types: [opened, reopened, synchronize, edited]
 
 concurrency:
-  group: exact-head-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  group: >-
+    exact-head-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}-${{
+      (
+        github.event_name == 'pull_request_target' ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          github.event.comment.user.login == github.event.issue.user.login &&
+          (
+            (github.event.action == 'created' && contains(github.event.comment.body, '@codex review')) ||
+            (
+              github.event.action == 'edited' &&
+              (
+                contains(github.event.comment.body, '@codex review') ||
+                contains(github.event.changes.body.from, '@codex review')
+              )
+            ) ||
+            (github.event.action == 'deleted' && contains(github.event.comment.body, '@codex review'))
+          )
+        )
+      ) && 'protected' || github.run_id
+    }}
   cancel-in-progress: true
 
 permissions:
@@ -18,7 +37,24 @@ permissions:
 jobs:
   evaluate-exact-head-review:
     name: exact-head-review-evaluation
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        github.event.comment.user.login == github.event.issue.user.login &&
+        (
+          (github.event.action == 'created' && contains(github.event.comment.body, '@codex review')) ||
+          (
+            github.event.action == 'edited' &&
+            (
+              contains(github.event.comment.body, '@codex review') ||
+              contains(github.event.changes.body.from, '@codex review')
+            )
+          ) ||
+          (github.event.action == 'deleted' && contains(github.event.comment.body, '@codex review'))
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 12
     permissions:
@@ -26,6 +62,7 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
+      base_sha: ${{ steps.review.outputs.base_sha }}
       conclusion: ${{ steps.review.outputs.conclusion }}
       head_sha: ${{ steps.review.outputs.head_sha }}
       summary_base64: ${{ steps.review.outputs.summary_base64 }}
@@ -39,32 +76,16 @@ jobs:
         with:
           node-version: 22
       - id: review
-        name: Evaluate exact-head Codex evidence
+        name: Evaluate immutable exact-diff Codex evidence
         continue-on-error: true
         env:
+          CHZZK_COMMENT_NODE_ID: ${{ github.event.comment.node_id }}
+          CHZZK_INVALIDATE: ${{ github.event_name == 'pull_request_target' || github.event.action != 'created' }}
+          CHZZK_INVALIDATE_REASON: ${{ github.event_name }}/${{ github.event.action }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          CHZZK_WAIT_FOR_CODEX: ${{ github.event_name == 'issue_comment' && github.event.action == 'created' && contains(github.event.comment.body, '@codex review') }}
+          CHZZK_WAIT_FOR_CODEX: ${{ github.event_name == 'issue_comment' && github.event.action == 'created' }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          attempts=1
-          if [ "$CHZZK_WAIT_FOR_CODEX" = "true" ]; then
-            attempts=40
-          fi
-
-          status=1
-          for attempt in $(seq 1 "$attempts"); do
-            echo "Exact-head review evidence attempt ${attempt}/${attempts}"
-            if node scripts/verify-exact-head-review.js; then
-              status=0
-              break
-            else
-              status=$?
-            fi
-            if [ "$attempt" -lt "$attempts" ]; then
-              sleep 15
-            fi
-          done
-          exit "$status"
+        run: node scripts/verify-exact-head-review.js
 
   publish-exact-head-review:
     if: always() && needs.evaluate-exact-head-review.result != 'skipped'
@@ -78,6 +99,7 @@ jobs:
     steps:
       - name: Publish exact-head status
         env:
+          CHZZK_BASE_SHA: ${{ needs.evaluate-exact-head-review.outputs.base_sha }}
           CHZZK_CONCLUSION: ${{ needs.evaluate-exact-head-review.outputs.conclusion }}
           CHZZK_HEAD_SHA: ${{ needs.evaluate-exact-head-review.outputs.head_sha }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -112,7 +134,9 @@ jobs:
 
           pull_request = request("GET", f"/repos/{repository}/pulls/{pr_number}")
           current_head = pull_request["head"]["sha"]
+          current_base = pull_request["base"]["sha"]
           evaluated_head = os.environ.get("CHZZK_HEAD_SHA", "").strip()
+          evaluated_base = os.environ.get("CHZZK_BASE_SHA", "").strip()
           conclusion = os.environ.get("CHZZK_CONCLUSION", "failure")
           if conclusion not in {"success", "failure"}:
               conclusion = "failure"
@@ -122,9 +146,9 @@ jobs:
           except Exception:
               summary = "Verifier produced malformed output."
               conclusion = "failure"
-          if evaluated_head != current_head:
+          if evaluated_head != current_head or evaluated_base != current_base:
               conclusion = "failure"
-              summary = "Review evaluation did not match the current pull-request head."
+              summary = "Review evaluation did not match the current pull-request head and base."
 
           request(
               "POST",
@@ -136,7 +160,7 @@ jobs:
                   "conclusion": conclusion,
                   "details_url": f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/{pr_number}",
                   "output": {
-                      "title": "Exact-head review verification",
+                      "title": "Exact-diff review verification",
                       "summary": summary,
                   },
               },

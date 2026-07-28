@@ -2,117 +2,207 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  evidenceMatchesHead,
   evaluateExactHeadReview,
-  reviewedCommit,
-  reviewRequestMatchesHead,
+  reviewRequestCoordinates,
+  reviewRequestMatchesSnapshot,
+  waitForExactHeadReview,
 } from "../../scripts/verify-exact-head-review.js";
 
 const headSha = "0123456789abcdef0123456789abcdef01234567";
+const baseSha = "89abcdef0123456789abcdef0123456789abcdef";
+const requestId = "IC_kwDOsynthetic";
+const createdAt = "2026-07-28T01:00:00Z";
+const reactedAt = "2026-07-28T01:00:05Z";
 
-function passingReactionSnapshot() {
+function reviewBody({ base = baseSha, head = headSha } = {}) {
+  return `@codex review\n\nExact head: \`${head}\`\nExact base: \`${base}\``;
+}
+
+function passingSnapshot() {
   return {
     author: { login: "repository-owner" },
-    comments: {
-      nodes: [
+    baseRefOid: baseSha,
+    headRefOid: headSha,
+    isDraft: true,
+    number: 92,
+    requestComment: {
+      author: { login: "repository-owner" },
+      body: reviewBody(),
+      createdAt,
+      id: requestId,
+      lastEditedAt: null,
+      pullRequest: { number: 92 },
+      reactionGroups: [
         {
-          author: { login: "repository-owner" },
-          body: `@codex review\n\nPlease review the exact current head \`${headSha}\`.`,
-          reactionGroups: [
-            {
-              content: "THUMBS_UP",
-              users: {
-                nodes: [{ login: "chatgpt-codex-connector[bot]" }],
-                pageInfo: { hasNextPage: false },
+          content: "THUMBS_UP",
+          reactors: {
+            edges: [
+              {
+                node: { login: "chatgpt-codex-connector[bot]" },
+                reactedAt,
               },
-            },
-          ],
+            ],
+            pageInfo: { hasNextPage: false, hasPreviousPage: false },
+          },
         },
       ],
-      pageInfo: { hasNextPage: false, hasPreviousPage: false },
     },
-    headRefOid: headSha,
-    isDraft: false,
-    reviewThreads: {
-      nodes: [],
-      pageInfo: { hasNextPage: false },
+    timelineItems: {
+      nodes: [
+        { __typename: "PullRequestCommit", commit: { oid: headSha } },
+        { __typename: "IssueComment", id: requestId },
+      ],
+      pageInfo: { hasNextPage: false, hasPreviousPage: false },
     },
   };
 }
 
-function passingCommentSnapshot() {
-  const snapshot = passingReactionSnapshot();
-  snapshot.comments.nodes = [
-    {
-      author: { login: "chatgpt-codex-connector[bot]" },
-      body: `Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** \`${headSha}\``,
-      reactionGroups: [],
-    },
-  ];
-  return snapshot;
+function assertFailure(snapshot, pattern) {
+  const result = evaluateExactHeadReview(snapshot);
+  assert.equal(result.conclusion, "failure");
+  assert.match(result.summary, pattern);
+  return result;
 }
 
 describe("exact-head review verification", () => {
-  it("extracts and matches only a full reviewed commit SHA", () => {
-    const body = `Codex Review: Didn't find any major issues.\nReviewed commit: \`${headSha}\``;
-    assert.equal(reviewedCommit(body), headSha);
-    assert.equal(evidenceMatchesHead(body, headSha), true);
-    assert.equal(evidenceMatchesHead(body, `f${headSha.slice(1)}`), false);
-    assert.equal(
-      evidenceMatchesHead(
-        `Codex Review: Didn't find any major issues.\nReviewed commit: \`${headSha.slice(0, 12)}\``,
-        headSha,
-      ),
-      false,
-    );
+  it("requires one explicit full head and base SHA", () => {
+    assert.deepEqual(reviewRequestCoordinates(reviewBody()), { baseSha, headSha });
+    assert.equal(reviewRequestMatchesSnapshot(reviewBody(), headSha, baseSha), true);
+    assert.equal(reviewRequestCoordinates(`@codex review\nExact head: \`${headSha.slice(0, 12)}\`\nExact base: \`${baseSha}\``), null);
+    assert.equal(reviewRequestCoordinates(`${reviewBody()}\nExact head: \`${headSha}\``), null);
+    assert.equal(reviewRequestCoordinates(`review\nExact head: \`${headSha}\`\nExact base: \`${baseSha}\``), null);
   });
 
-  it("matches an explicit review request only to the exact full head SHA", () => {
-    const body = `@codex review\nReview exact head \`${headSha}\``;
-    assert.equal(reviewRequestMatchesHead(body, headSha), true);
-    assert.equal(reviewRequestMatchesHead(body, `f${headSha.slice(1)}`), false);
-    assert.equal(reviewRequestMatchesHead(`review ${headSha}`, headSha), false);
-  });
-
-  it("accepts a Codex thumbs-up on the owner's exact-head review request", () => {
-    assert.deepEqual(evaluateExactHeadReview(passingReactionSnapshot()), {
+  it("accepts an unedited author request whose current head existed before the request", () => {
+    assert.deepEqual(evaluateExactHeadReview(passingSnapshot()), {
+      baseSha,
       conclusion: "success",
       headSha,
-      summary: `Exact-head Codex review passed for ${headSha.slice(0, 12)} with zero unresolved threads.`,
+      retryable: false,
+      summary: `Exact-diff Codex review passed for head ${headSha.slice(0, 12)} on base ${baseSha.slice(0, 12)}.`,
     });
   });
 
-  it("retains successful bot issue-comment evidence for the exact head", () => {
-    assert.equal(evaluateExactHeadReview(passingCommentSnapshot()).conclusion, "success");
+  it("allows review evidence to succeed while the pull request remains draft", () => {
+    const snapshot = passingSnapshot();
+    snapshot.isDraft = true;
+    assert.equal(evaluateExactHeadReview(snapshot).conclusion, "success");
   });
 
-  it("rejects stale, spoofed, paginated, draft, and unresolved evidence", () => {
-    const stale = passingReactionSnapshot();
-    stale.comments.nodes[0].body = stale.comments.nodes[0].body.replace(headSha, "a".repeat(40));
-    assert.equal(evaluateExactHeadReview(stale).conclusion, "failure");
+  it("rejects edited, foreign, detached, stale, or ambiguous request comments", () => {
+    const edited = passingSnapshot();
+    edited.requestComment.lastEditedAt = "2026-07-28T01:01:00Z";
+    assertFailure(edited, /edited/i);
 
-    const spoofedRequest = passingReactionSnapshot();
-    spoofedRequest.comments.nodes[0].author.login = "other-user";
-    assert.equal(evaluateExactHeadReview(spoofedRequest).conclusion, "failure");
+    const foreign = passingSnapshot();
+    foreign.requestComment.author.login = "other-user";
+    assertFailure(foreign, /author/i);
 
-    const spoofedReaction = passingReactionSnapshot();
-    spoofedReaction.comments.nodes[0].reactionGroups[0].users.nodes[0].login = "other-bot";
-    assert.equal(evaluateExactHeadReview(spoofedReaction).conclusion, "failure");
+    const detached = passingSnapshot();
+    detached.requestComment.pullRequest.number = 93;
+    assertFailure(detached, /attached/i);
 
-    const reactionPaginated = passingReactionSnapshot();
-    reactionPaginated.comments.nodes[0].reactionGroups[0].users.pageInfo.hasNextPage = true;
-    assert.match(evaluateExactHeadReview(reactionPaginated).summary, /pagination/i);
+    const staleHead = passingSnapshot();
+    staleHead.requestComment.body = reviewBody({ head: "a".repeat(40) });
+    assertFailure(staleHead, /current head and base/i);
 
-    const draft = passingReactionSnapshot();
-    draft.isDraft = true;
-    assert.match(evaluateExactHeadReview(draft).summary, /draft/i);
+    const staleBase = passingSnapshot();
+    staleBase.requestComment.body = reviewBody({ base: "b".repeat(40) });
+    assertFailure(staleBase, /current head and base/i);
+  });
 
-    const unresolved = passingReactionSnapshot();
-    unresolved.reviewThreads.nodes.push({ isResolved: false });
-    assert.match(evaluateExactHeadReview(unresolved).summary, /unresolved/i);
+  it("rejects a future head named before it became the pull-request head", () => {
+    const snapshot = passingSnapshot();
+    const oldHead = "1".repeat(40);
+    snapshot.timelineItems.nodes = [
+      { __typename: "PullRequestCommit", commit: { oid: oldHead } },
+      { __typename: "IssueComment", id: requestId },
+      { __typename: "PullRequestCommit", commit: { oid: headSha } },
+    ];
+    assertFailure(snapshot, /was not the pull-request head/i);
+  });
 
-    const commentsPaginated = passingReactionSnapshot();
-    commentsPaginated.comments.pageInfo.hasPreviousPage = true;
-    assert.match(evaluateExactHeadReview(commentsPaginated).summary, /pagination/i);
+  it("rejects every head or base mutation after the request", () => {
+    for (const mutation of [
+      { __typename: "PullRequestCommit", commit: { oid: "2".repeat(40) } },
+      { __typename: "HeadRefForcePushedEvent", afterCommit: { oid: headSha } },
+      { __typename: "HeadRefDeletedEvent" },
+      { __typename: "HeadRefRestoredEvent" },
+    ]) {
+      const snapshot = passingSnapshot();
+      snapshot.timelineItems.nodes.push(mutation);
+      assertFailure(snapshot, /head changed/i);
+    }
+
+    for (const mutation of [
+      { __typename: "BaseRefChangedEvent" },
+      { __typename: "BaseRefDeletedEvent" },
+      { __typename: "BaseRefForcePushedEvent" },
+      { __typename: "AutomaticBaseChangeSucceededEvent" },
+    ]) {
+      const snapshot = passingSnapshot();
+      snapshot.timelineItems.nodes.push(mutation);
+      assertFailure(snapshot, /base changed/i);
+    }
+  });
+
+  it("fails closed when the timeline or reactor list is incomplete", () => {
+    const timelinePaginated = passingSnapshot();
+    timelinePaginated.timelineItems.pageInfo.hasPreviousPage = true;
+    assertFailure(timelinePaginated, /timeline pagination/i);
+
+    const reactorsPaginated = passingSnapshot();
+    reactorsPaginated.requestComment.reactionGroups[0].reactors.pageInfo.hasNextPage = true;
+    assertFailure(reactorsPaginated, /reaction pagination/i);
+  });
+
+  it("requires a Codex reaction created after the immutable request", () => {
+    const oldReaction = passingSnapshot();
+    oldReaction.requestComment.reactionGroups[0].reactors.edges[0].reactedAt = "2026-07-28T00:59:59Z";
+    const oldResult = assertFailure(oldReaction, /no successful Codex reaction/i);
+    assert.equal(oldResult.retryable, true);
+
+    const spoofed = passingSnapshot();
+    spoofed.requestComment.reactionGroups[0].reactors.edges[0].node.login = "other-bot";
+    assertFailure(spoofed, /no successful Codex reaction/i);
+  });
+
+  it("retries only missing reaction evidence and stops immediately on terminal mutation", async () => {
+    let loads = 0;
+    let sleeps = 0;
+    const success = await waitForExactHeadReview({
+      attempts: 3,
+      loadSnapshot: async () => {
+        loads += 1;
+        const snapshot = passingSnapshot();
+        if (loads === 1) snapshot.requestComment.reactionGroups = [];
+        return snapshot;
+      },
+      sleep: async () => {
+        sleeps += 1;
+      },
+    });
+    assert.equal(success.conclusion, "success");
+    assert.equal(loads, 2);
+    assert.equal(sleeps, 1);
+
+    loads = 0;
+    sleeps = 0;
+    const terminal = await waitForExactHeadReview({
+      attempts: 40,
+      loadSnapshot: async () => {
+        loads += 1;
+        const snapshot = passingSnapshot();
+        snapshot.timelineItems.nodes.push({ __typename: "PullRequestCommit", commit: { oid: "3".repeat(40) } });
+        return snapshot;
+      },
+      sleep: async () => {
+        sleeps += 1;
+      },
+    });
+    assert.equal(terminal.conclusion, "failure");
+    assert.equal(terminal.retryable, false);
+    assert.equal(loads, 1);
+    assert.equal(sleeps, 0);
   });
 });
