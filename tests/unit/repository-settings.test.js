@@ -175,7 +175,7 @@ describe("repository settings source of truth", () => {
     });
   });
 
-  it("fails closed with a value-free manual plan when signing secrets exist only at repository scope", () => {
+  it("accepts a complete repository-scoped signing pair without changing or exposing it", () => {
     const state = protectedState();
     state.repositorySecrets = REQUIRED_SIGNING_SECRET_NAMES.map((name) => ({
       created_at: "2026-07-01T00:00:00Z",
@@ -190,23 +190,15 @@ describe("repository settings source of truth", () => {
       environmentScopedSecretNames: [],
       missingEnvironmentSecretNames: REQUIRED_SIGNING_SECRET_NAMES,
       repositoryScopedSecretNames: REQUIRED_SIGNING_SECRET_NAMES,
-      safe: false,
+      safe: true,
     });
     const changes = planRepositorySettings(state, githubActionsAppId, releaseOperatorLogin);
-    assert.equal(changes.length, 1);
-    assert.equal(changes[0].action, "manual");
-    assert.equal(changes[0].kind, "signing-secret-scope");
-    assert.deepEqual(changes[0].requiredSecretNames, REQUIRED_SIGNING_SECRET_NAMES);
-    assert.match(changes[0].migrationPlan.join("\n"), /does not expose existing secret values/i);
-    assert.match(changes[0].migrationPlan.join("\n"), /delete.*repository secrets.*after/i);
+    assert.deepEqual(changes, []);
     assert.equal(JSON.stringify(changes).includes("created_at"), false);
-    assert.throws(
-      () => assertRepositoryChangesAutomatable(changes),
-      /manual changes are required before repository settings can be applied/i,
-    );
+    assert.doesNotThrow(() => assertRepositoryChangesAutomatable(changes));
   });
 
-  it("keeps a partial environment migration manual and fail-closed", () => {
+  it("keeps a partial environment override manual and fail-closed", () => {
     const state = protectedState();
     state.repositorySecrets = REQUIRED_SIGNING_SECRET_NAMES.map((name) => ({ name }));
     state.signingEnvironmentSecrets = [{ name: REQUIRED_SIGNING_SECRET_NAMES[0] }];
@@ -217,24 +209,55 @@ describe("repository settings source of truth", () => {
     assert.deepEqual(changes[0].environmentScopedSecretNames, [REQUIRED_SIGNING_SECRET_NAMES[0]]);
     assert.deepEqual(changes[0].missingEnvironmentSecretNames, [REQUIRED_SIGNING_SECRET_NAMES[1]]);
     assert.deepEqual(changes[0].repositoryScopedSecretNames, REQUIRED_SIGNING_SECRET_NAMES);
+    assert.match(changes[0].migrationPlan.join("\n"), /environment secrets take precedence by name/i);
     assert.throws(() => assertRepositoryChangesAutomatable(changes), /manual changes are required/i);
   });
 
-  it("keeps repository duplicates manual after both environment secrets exist", () => {
+  it("requires at least one complete signing-secret pair", () => {
     const state = protectedState();
-    state.repositorySecrets = REQUIRED_SIGNING_SECRET_NAMES.map((name) => ({ name }));
+    state.signingEnvironmentSecrets = [];
 
     const changes = planRepositorySettings(state, githubActionsAppId, releaseOperatorLogin);
     assert.equal(changes.length, 1);
     assert.equal(changes[0].action, "manual");
-    assert.deepEqual(changes[0].environmentScopedSecretNames, REQUIRED_SIGNING_SECRET_NAMES);
-    assert.deepEqual(changes[0].missingEnvironmentSecretNames, []);
-    assert.deepEqual(changes[0].repositoryScopedSecretNames, REQUIRED_SIGNING_SECRET_NAMES);
-    assert.match(changes[0].migrationPlan.at(-1), /delete.*only after/i);
+    assert.equal(changes[0].kind, "signing-secret-scope");
+    assert.deepEqual(changes[0].requiredSecretNames, REQUIRED_SIGNING_SECRET_NAMES);
+    assert.match(changes[0].migrationPlan.join("\n"), /one complete.*pair/i);
     assert.throws(() => assertRepositoryChangesAutomatable(changes), /manual changes are required/i);
   });
 
-  it("performs zero mutations when a manual secret migration blocks apply", () => {
+  it("accepts complete environment and repository pairs without requiring deletion", () => {
+    const state = protectedState();
+    state.repositorySecrets = REQUIRED_SIGNING_SECRET_NAMES.map((name) => ({ name }));
+
+    assert.deepEqual(inspectSigningSecretScope(state), {
+      environment: "firefox-signing",
+      environmentProtected: true,
+      environmentScopedSecretNames: REQUIRED_SIGNING_SECRET_NAMES,
+      missingEnvironmentSecretNames: [],
+      repositoryScopedSecretNames: REQUIRED_SIGNING_SECRET_NAMES,
+      safe: true,
+    });
+    const changes = planRepositorySettings(state, githubActionsAppId, releaseOperatorLogin);
+    assert.deepEqual(changes, []);
+    assert.doesNotThrow(() => assertRepositoryChangesAutomatable(changes));
+  });
+
+  it("rejects an orphan repository secret even when the environment pair is complete", () => {
+    const state = protectedState();
+    state.repositorySecrets = [{ name: REQUIRED_SIGNING_SECRET_NAMES[0] }];
+
+    const changes = planRepositorySettings(state, githubActionsAppId, releaseOperatorLogin);
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0].action, "manual");
+    assert.equal(changes[0].kind, "signing-secret-scope");
+    assert.deepEqual(changes[0].environmentScopedSecretNames, REQUIRED_SIGNING_SECRET_NAMES);
+    assert.deepEqual(changes[0].repositoryScopedSecretNames, [REQUIRED_SIGNING_SECRET_NAMES[0]]);
+    assert.match(changes[0].migrationPlan.join("\n"), /any partial scoped pair/i);
+    assert.throws(() => assertRepositoryChangesAutomatable(changes), /manual changes are required/i);
+  });
+
+  it("performs zero mutations when an incomplete signing-secret pair blocks apply", () => {
     const changes = [
       { kind: "repository" },
       {

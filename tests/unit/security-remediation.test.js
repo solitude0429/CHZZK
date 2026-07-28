@@ -44,6 +44,32 @@ describe("release and repository security guardrails", () => {
     }
 
     const release = workflow("sign-unlisted.yml");
+    assert.equal(release.jobs.sign.environment, "firefox-signing");
+    const amoSecretReferences = [];
+    for (const name of readdirSync(workflowDir).filter((entry) => /\.ya?ml$/.test(entry))) {
+      const jobs = workflow(name).jobs ?? {};
+      for (const [jobName, job] of Object.entries(jobs)) {
+        const serializedJob = JSON.stringify(job);
+        for (const secretName of ["AMO_JWT_ISSUER", "AMO_JWT_SECRET"]) {
+          amoSecretReferences.push(
+            ...Array.from(
+              serializedJob.matchAll(new RegExp(`secrets\\.${secretName}`, "g")),
+              () => `${name}:${jobName}:${secretName}`,
+            ),
+          );
+        }
+      }
+    }
+    assert.deepEqual(amoSecretReferences.sort(), [
+      "sign-unlisted.yml:sign:AMO_JWT_ISSUER",
+      "sign-unlisted.yml:sign:AMO_JWT_SECRET",
+    ]);
+    const signingStep = release.jobs.sign.steps.find(
+      (step) => step.name === "Submit exact prepared archive to AMO",
+    );
+    assert.ok(signingStep);
+    assert.equal(signingStep.env.AMO_API_KEY, "${{ secrets.AMO_JWT_ISSUER }}");
+    assert.equal(signingStep.env.AMO_API_SECRET, "${{ secrets.AMO_JWT_SECRET }}");
     assert.deepEqual(release.jobs.prepare.permissions, {
       attestations: "read",
       contents: "read",

@@ -6,18 +6,18 @@ Firefox Release/Beta에서 일반 확장처럼 설치하려면 Mozilla 서명이
 
 - Repository variable `RELEASE_OPERATOR_LOGIN`은 릴리스를 실행할 정확한 GitHub 로그인입니다.
 - `firefox-signing` environment는 protected branch에서만 접근할 수 있고, 현재 release workflow의 별도 authorization은 exact protected default-branch head만 허용합니다.
-- `AMO_JWT_ISSUER`와 `AMO_JWT_SECRET`은 `firefox-signing` environment secret으로만 존재하며 checkout이나 npm이 없는 sign step에서만 참조합니다. 같은 이름의 repository secret은 두지 않습니다.
+- `AMO_JWT_ISSUER`와 `AMO_JWT_SECRET`은 완전한 한 쌍으로 Repository Actions secret 또는 `firefox-signing` environment secret에 저장하며, checkout이나 npm이 없는 sign step에서만 참조합니다. 어느 scope에도 하나만 남은 부분 쌍을 두지 않습니다. Environment에 같은 이름의 secret이 있으면 GitHub가 그 값을 우선합니다.
 - Repository immutable releases는 활성 상태여야 합니다.
 - GitHub 관리자 token은 Actions secret으로 저장하지 않습니다. Actions의 일반 `GITHUB_TOKEN`에는 immutable-release 설정을 읽는 `Administration: read` 권한이 없기 때문입니다.
 
-Mozilla Add-ons Developer Hub의 API key 화면에서 받은 값은 다음 `firefox-signing` environment secret에 값만 저장합니다.
+Mozilla Add-ons Developer Hub의 API key 화면에서 받은 값은 다음 두 이름을 한 쌍으로 유지합니다.
 
 - `JWT issuer` → `AMO_JWT_ISSUER`
 - `JWT secret` → `AMO_JWT_SECRET`
 
 자격 증명을 argv, checkout, artifact, 로그에 기록하지 않습니다.
 
-기존 repository secret을 이전할 때는 GitHub가 저장된 secret 값을 다시 보여 주지 않으므로 Mozilla에서 보관한 원본 값을 두 environment secret에 먼저 입력합니다. Protected `main`의 signing job이 environment 값을 사용해 성공한 것을 확인한 뒤, 같은 이름의 repository secret 사본 두 개를 관리자가 정확히 삭제하고 `docs/OPERATIONS.md`의 외부 repository-settings bootstrap dry-run을 다시 실행합니다. Configurator는 secret 값이나 쓰기 API를 사용하지 않고 이름·scope·environment 정책만 읽습니다. Environment 값 하나라도 없거나 보호 정책이 다르거나 repository 사본이 남아 있으면 dry-run에 수동 migration을 표시하며, `--apply`는 다른 설정까지 포함한 전체 변경을 시작 전에 거부합니다.
+기존의 완전한 Repository secret 한 쌍은 복사하거나 삭제하지 않고 그대로 사용할 수 있습니다. 완전한 environment 한 쌍도 지원하며, 두 scope에 모두 완전한 쌍이 있으면 GitHub 규칙에 따라 environment 값이 우선합니다. Configurator는 secret 값이나 쓰기 API를 사용하지 않고 이름·scope·environment 정책만 읽습니다. `firefox-signing` 보호 정책이 다르거나, 어느 scope에도 완전한 쌍이 없거나, 어느 scope에든 하나만 남은 부분 쌍이 있는 경우에는 dry-run에 수동 복구를 표시하며 `--apply`는 다른 설정까지 포함한 전체 변경을 시작 전에 거부합니다.
 
 ## Operator bootstrap
 
