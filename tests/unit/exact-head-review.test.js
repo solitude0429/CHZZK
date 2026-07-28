@@ -68,9 +68,17 @@ describe("exact-head review verification", () => {
   it("requires one explicit full head and base SHA", () => {
     assert.deepEqual(reviewRequestCoordinates(reviewBody()), { baseSha, headSha });
     assert.equal(reviewRequestMatchesSnapshot(reviewBody(), headSha, baseSha), true);
-    assert.equal(reviewRequestCoordinates(`@codex review\nExact head: \`${headSha.slice(0, 12)}\`\nExact base: \`${baseSha}\``), null);
+    assert.equal(
+      reviewRequestCoordinates(
+        `@codex review\nExact head: \`${headSha.slice(0, 12)}\`\nExact base: \`${baseSha}\``,
+      ),
+      null,
+    );
     assert.equal(reviewRequestCoordinates(`${reviewBody()}\nExact head: \`${headSha}\``), null);
-    assert.equal(reviewRequestCoordinates(`review\nExact head: \`${headSha}\`\nExact base: \`${baseSha}\``), null);
+    assert.equal(
+      reviewRequestCoordinates(`review\nExact head: \`${headSha}\`\nExact base: \`${baseSha}\``),
+      null,
+    );
   });
 
   it("accepts an unedited author request whose current head existed before the request", () => {
@@ -193,7 +201,10 @@ describe("exact-head review verification", () => {
       loadSnapshot: async () => {
         loads += 1;
         const snapshot = passingSnapshot();
-        snapshot.timelineItems.nodes.push({ __typename: "PullRequestCommit", commit: { oid: "3".repeat(40) } });
+        snapshot.timelineItems.nodes.push({
+          __typename: "PullRequestCommit",
+          commit: { oid: "3".repeat(40) },
+        });
         return snapshot;
       },
       sleep: async () => {

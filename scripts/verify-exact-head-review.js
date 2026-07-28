@@ -26,7 +26,9 @@ function asArray(value) {
 }
 
 function normalizeSha(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
   return SHA_RE.test(normalized) ? normalized : null;
 }
 
@@ -54,10 +56,10 @@ export function reviewRequestMatchesSnapshot(body, headSha, baseSha) {
   const normalizedBase = normalizeSha(baseSha);
   return Boolean(
     coordinates &&
-      normalizedHead &&
-      normalizedBase &&
-      coordinates.headSha === normalizedHead &&
-      coordinates.baseSha === normalizedBase,
+    normalizedHead &&
+    normalizedBase &&
+    coordinates.headSha === normalizedHead &&
+    coordinates.baseSha === normalizedBase,
   );
 }
 
@@ -122,11 +124,7 @@ function successfulBotReaction(comment) {
   if (!Number.isFinite(createdAt)) return { matched: false, paginated: false };
   const matched = asArray(reactors?.edges).some((edge) => {
     const reactedAt = Date.parse(edge?.reactedAt ?? "");
-    return (
-      REVIEW_BOT_LOGINS.has(edge?.node?.login) &&
-      Number.isFinite(reactedAt) &&
-      reactedAt >= createdAt
-    );
+    return REVIEW_BOT_LOGINS.has(edge?.node?.login) && Number.isFinite(reactedAt) && reactedAt >= createdAt;
   });
   return { matched, paginated: false };
 }
@@ -324,7 +322,11 @@ function requiredEnvironment(name) {
 }
 
 function booleanEnvironment(name) {
-  return String(process.env[name] ?? "").trim().toLowerCase() === "true";
+  return (
+    String(process.env[name] ?? "")
+      .trim()
+      .toLowerCase() === "true"
+  );
 }
 
 function writeOutputs(result) {
