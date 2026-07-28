@@ -15,19 +15,16 @@ GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
 npm run test:firefox-functional-e2e
 ```
 
-4. Open a draft PR. The protected branch requires the five GitHub-Actions-bound checks `verify`, `firefox-e2e`, `dependency-review`, `analyze` (CodeQL), and `exact-head-review`, plus zero unresolved review threads.
-5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note before requesting the final review. After the last source push, keep the PR draft and create one new, unedited PR comment in this exact form, using the current 40-character PR head and base SHAs:
+4. Open a draft PR. The protected branch requires the four GitHub-Actions-bound checks `verify`, `firefox-e2e`, `dependency-review`, and `analyze` (CodeQL), plus zero unresolved review threads.
+5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note before requesting the final direct Codex review. After the last source push, keep the PR draft and request review:
 
 ```text
 @codex review
-
-Exact head: `<40-character head SHA>`
-Exact base: `<40-character base SHA>`
 ```
 
-Create the request only while its exact base SHA is the current default-branch tip, and do not edit or delete it. The source-bound `exact-head-review` check may succeed while the PR remains draft; mark the PR ready only after that check succeeds and every actionable conversation is resolved. A source push, base ref advance/change, PR reopen, PR metadata edit, or request edit/deletion invalidates the evidence and requires a fresh immutable request. The verifier binds the base to the default-branch SHA captured by the comment event, and a head ref restored before the new request is accepted only after it recovers the current restored head. GitHub's required-conversation-resolution rule remains the independent unresolved-thread gate. A self-approval or approval-count gate is not required for this sole-owner repository.
+Wait for the resulting review record and confirm that its reviewed commit is the current full PR head SHA. Resolve every actionable finding. Any source push after that review requires all four checks and a new final direct Codex review. Immediately before the manual squash merge, confirm the reviewed commit still equals the PR head, the finalized high-risk notes still describe the change, the base is current, all four protected checks pass, and GitHub reports zero unresolved conversations. A self-approval, approval-count gate, custom bot-review workflow, or commit-scoped review-completion status is not used for this sole-owner repository.
 
-6. Merge through protected `main`.
+6. The owner manually squash-merges through protected `main`; automation must not merge the PR.
 
 7. Refresh the external operator bootstrap from the protected exact `main` blob as described in `docs/SIGNING.md`.
 
@@ -55,7 +52,7 @@ npm run deploy:updates:internal
 
 ## Repository settings
 
-Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the five source-bound checks `analyze`, `dependency-review`, `exact-head-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The repository-owned `exact-head-review` context accepts only a Codex reaction on one unedited request from the PR author whose exact head and base SHAs match the current PR, whose base equals the default-branch SHA captured by the comment event, whose head was already current when the request entered the PR timeline (including recovery after a pre-request head-ref restoration), and after which no head/base mutation occurred. Per-PR writer concurrency orders successful publication with base invalidation, and a successful publisher rereads the PR and downgrades the same check if its identity changed during publication. A trusted `push` path on `main` replaces stale success with a failing check on every open PR head targeting the advanced base by taking two cursor-paginated snapshots before bounded matrix publication and reconciling each current head. Timeline and reactor pagination fail closed; the write-capable publishers execute no PR code and use only trusted repository state. Conversation resolution remains a separate native branch-protection requirement. Do not replace either control with an unbound status context or an approval-count gate.
+Repository protection is managed out of band so a pull-request workflow cannot weaken its own controls. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound deterministic checks `analyze`, `dependency-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The final direct Codex review is the single qualitative layer: its review record must name the current PR head, any later source push requires a new review, and the owner verifies that identity immediately before the manual squash merge. No custom review-completion workflow or required status represents that procedural review because GitHub check runs are commit-scoped, can be reused by another PR with the same commit, and can only react asynchronously to PR or comment metadata changes. Native required-conversation resolution remains the independent thread gate. Do not replace these controls with an unbound status context, duplicate bot review, or approval-count gate.
 
 ```bash
 CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
@@ -64,6 +61,8 @@ npm run configure:repository
 ```
 
 Add `-- --apply` only from a trusted administrator session after reviewing the dry-run JSON. Version-only dependency bot PRs are disabled; the operating agent consolidates current tooling updates into one tested maintenance PR while `npm audit`, dependency review, CodeQL, and GitHub vulnerability alerts remain active.
+
+When a workflow is retired, merge its file removal first, disable only that workflow's remaining server-side record where GitHub supports it, and verify the Actions API inventory contains exactly `ci.yml`, `codeql.yml`, `dependency-review.yml`, and `sign-unlisted.yml`. Preserve current release, verification, and provenance run evidence.
 
 ## Patch response
 
