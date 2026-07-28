@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,25 +41,48 @@ const sourcePaths = [
   "scripts/lib/update-manifest.js",
 ];
 
-function firstAvailableExecutable(candidates, name) {
+function firstProtectedExecutable(candidates) {
   for (const candidate of candidates) {
     try {
-      return realpathSync(candidate);
+      const path = realpathSync(candidate);
+      const metadata = statSync(path);
+      if (
+        metadata.isFile() &&
+        metadata.uid === 0 &&
+        (metadata.mode & 0o022) === 0 &&
+        (metadata.mode & 0o111) !== 0
+      ) {
+        return path;
+      }
     } catch {
       // Match the production bootstrap's fixed system-path fallback.
     }
   }
+  return undefined;
+}
+
+function requiredProtectedExecutable(candidates, name) {
+  const path = firstProtectedExecutable(candidates);
+  if (path !== undefined) return path;
   throw new Error(`No fixed system ${name} executable is available for bootstrap tests`);
 }
 
+const trustedGit = requiredProtectedExecutable(["/usr/bin/git", "/bin/git"], "git");
+const protectedGhExecutable = firstProtectedExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"]);
+const protectedNodeExecutable = firstProtectedExecutable(["/usr/bin/node"]);
 const trustedExecutables = Object.freeze({
-  gh: firstAvailableExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"], "gh"),
-  git: firstAvailableExecutable(["/usr/bin/git", "/bin/git"], "git"),
-  node: firstAvailableExecutable(["/usr/bin/node", "/usr/local/bin/node", "/bin/node"], "node"),
+  // Injected command harnesses do not invoke GitHub CLI, so keep npm test portable
+  // by using an already-protected fixed executable as their gh placeholder.
+  gh: trustedGit,
+  git: trustedGit,
+  // A test-only executor uses the current runtime when the production prerequisite is absent.
+  node: protectedNodeExecutable ?? trustedGit,
 });
-const cleanBootstrapFailurePattern = existsSync("/usr/bin/node")
-  ? /pinned CHZZK repository/i
-  : /\/usr\/bin\/node.*No such file or directory/i;
+const cleanBootstrapFailurePattern = !existsSync("/usr/bin/node")
+  ? /\/usr\/bin\/node.*No such file or directory/i
+  : protectedGhExecutable === undefined
+    ? /No root-owned, non-writable system gh executable is available/i
+    : /pinned CHZZK repository/i;
 
 function gitBlobSha(bytes) {
   const value = Buffer.from(bytes);
@@ -100,6 +124,51 @@ function makeInstalledBootstrap() {
   writeFileSync(path, readFileSync(bootstrapSourcePath), { mode: 0o500 });
   chmodSync(path, 0o500);
   return { directory, path };
+}
+
+function executeDeploymentWithCurrentTestRuntime({
+  checkoutRoot,
+  context,
+  jsZipBytes,
+  nodeEnvironment,
+  sourceBytes,
+  trustedExecutables: executables,
+}) {
+  const executionDir = mkdtempSync(join(tmpdir(), "chzzk-update-deploy-exec-"));
+  chmodSync(executionDir, 0o700);
+  try {
+    const artifactDir = join(executionDir, "artifacts");
+    mkdirSync(artifactDir, { mode: 0o700 });
+    const jsZipPath = join(executionDir, "jszip-3.10.1.cjs");
+    writeFileSync(jsZipPath, jsZipBytes, { flag: "wx", mode: 0o600 });
+    const entrypointUrl = buildSealedDeploymentEntrypoint(sourceBytes, pathToFileURL(jsZipPath).href);
+    const result = spawnSync(process.execPath, ["--input-type=module"], {
+      cwd: checkoutRoot,
+      encoding: "utf8",
+      env: {
+        ...nodeEnvironment,
+        CHZZK_GITHUB_REPOSITORY: context.repository,
+        CHZZK_UPDATE_DEPLOY_BOOTSTRAP_SHA: context.sourceSha,
+        CHZZK_UPDATE_DEPLOY_CHECKOUT: checkoutRoot,
+        CHZZK_UPDATE_DEPLOY_DEFAULT_BRANCH: context.defaultBranch,
+        CHZZK_UPDATE_DEPLOY_TRUSTED_GH: executables.gh,
+        CHZZK_UPDATE_DEPLOY_TRUSTED_GH_HOME: context.trustedGhHome,
+        CHZZK_UPDATE_DEPLOY_TRUSTED_GIT: executables.git,
+        CHZZK_UPDATE_DEPLOY_WORK_DIR: artifactDir,
+        CHZZK_UPDATE_DIR: context.targetDir,
+        CHZZK_VERSION: context.version,
+      },
+      input: `await import(${JSON.stringify(entrypointUrl)});\n`,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(
+        `Test protected deployment entrypoint exited with status ${result.status ?? "unknown"}: ${result.stderr}`,
+      );
+    }
+  } finally {
+    rmSync(executionDir, { force: true, recursive: true });
+  }
 }
 
 function deploymentSourceFixture() {
@@ -228,6 +297,23 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
   after(() => {
     if (originalGitHubActions === undefined) delete process.env.GITHUB_ACTIONS;
     else process.env.GITHUB_ACTIONS = originalGitHubActions;
+  });
+
+  it("does not require GitHub CLI when command execution is injected", () => {
+    const metadata = statSync(trustedExecutables.gh);
+    assert.equal(trustedExecutables.gh, trustedExecutables.git);
+    assert.equal(metadata.isFile(), true);
+    assert.equal(metadata.uid, 0);
+    assert.equal(metadata.mode & 0o022, 0);
+    assert.notEqual(metadata.mode & 0o111, 0);
+  });
+
+  it("keeps the pre-runtime launcher and JavaScript allowlist on exact /usr/bin/node", () => {
+    const source = readFileSync(bootstrapSourcePath, "utf8");
+    assert.match(source, /\/usr\/bin\/node "\$0" --chzzk-clean-bootstrap/);
+    assert.match(source, /node: Object\.freeze\(\["\/usr\/bin\/node"\]\)/);
+    assert.doesNotMatch(source, /["']\/usr\/local\/bin\/node["']/);
+    assert.doesNotMatch(source, /["']\/bin\/node["']/);
   });
 
   it("refuses library execution in GitHub Actions before side effects", async () => {
@@ -414,6 +500,8 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
       await runProtectedDeploymentEntrypoint({
         bootstrapFile: installed.path,
         checkout,
+        executeEntrypoint:
+          protectedNodeExecutable === undefined ? executeDeploymentWithCurrentTestRuntime : undefined,
         nodeEnvironment: environments.gh,
         readJsZipBundle: () => readFileSync(join(repoRoot, "node_modules/jszip/dist/jszip.min.js")),
         repository,

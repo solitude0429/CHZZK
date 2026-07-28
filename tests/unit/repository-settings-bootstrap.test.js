@@ -56,20 +56,18 @@ function requiredProtectedExecutable(candidates, name) {
 }
 
 const trustedGit = requiredProtectedExecutable(["/usr/bin/git", "/bin/git"], "git");
-const protectedNodeExecutable = firstProtectedExecutable([
-  "/usr/bin/node",
-  "/usr/local/bin/node",
-  "/bin/node",
-]);
+const protectedNodeExecutable = firstProtectedExecutable(["/usr/bin/node"]);
 const trustedExecutables = Object.freeze({
-  gh: requiredProtectedExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"], "gh"),
+  // Injected command harnesses do not invoke GitHub CLI, so keep npm test portable
+  // by reusing the already-protected fixed Git executable as their gh placeholder.
+  gh: trustedGit,
   git: trustedGit,
   // Injected tests need a protected placeholder when setup-node has no protected system Node.
   node: protectedNodeExecutable ?? trustedGit,
 });
-const cleanBootstrapFailurePattern = existsSync("/usr/bin/node")
-  ? /owner\/repository form/i
-  : /\/usr\/bin\/node.*No such file or directory/i;
+const cleanBootstrapFailurePattern = !existsSync("/usr/bin/node")
+  ? /\/usr\/bin\/node.*No such file or directory/i
+  : /owner\/repository form/i;
 
 function gitBlobSha(bytes) {
   const value = Buffer.from(bytes);
@@ -211,6 +209,23 @@ describe("protected repository settings bootstrap", { concurrency: false }, () =
   after(() => {
     if (originalGitHubActions === undefined) delete process.env.GITHUB_ACTIONS;
     else process.env.GITHUB_ACTIONS = originalGitHubActions;
+  });
+
+  it("does not require GitHub CLI when command execution is injected", () => {
+    const metadata = statSync(trustedExecutables.gh);
+    assert.equal(trustedExecutables.gh, trustedExecutables.git);
+    assert.equal(metadata.isFile(), true);
+    assert.equal(metadata.uid, 0);
+    assert.equal(metadata.mode & 0o022, 0);
+    assert.notEqual(metadata.mode & 0o111, 0);
+  });
+
+  it("keeps the pre-runtime launcher and JavaScript allowlist on exact /usr/bin/node", () => {
+    const source = readFileSync(bootstrapSourcePath, "utf8");
+    assert.match(source, /\/usr\/bin\/node "\$0" --chzzk-clean-bootstrap/);
+    assert.match(source, /node: Object\.freeze\(\["\/usr\/bin\/node"\]\)/);
+    assert.doesNotMatch(source, /["']\/usr\/local\/bin\/node["']/);
+    assert.doesNotMatch(source, /["']\/bin\/node["']/);
   });
 
   it("refuses library execution in GitHub Actions before side effects", async () => {

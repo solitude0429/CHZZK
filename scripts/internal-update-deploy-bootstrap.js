@@ -44,7 +44,7 @@ const JSZIP_BUNDLE_SHA256 = "acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae85
 const TRUSTED_EXECUTABLE_CANDIDATES = Object.freeze({
   gh: Object.freeze(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"]),
   git: Object.freeze(["/usr/bin/git", "/bin/git"]),
-  node: Object.freeze(["/usr/bin/node", "/usr/local/bin/node", "/bin/node"]),
+  node: Object.freeze(["/usr/bin/node"]),
 });
 const TRUSTED_GIT_PREFIX = Object.freeze([
   "--no-optional-locks",
@@ -676,7 +676,7 @@ async function main() {
       node: trustedExecutable("node"),
     });
     if (realpathSync(process.execPath) !== trustedExecutables.node) {
-      throw new Error("Deployment bootstrap must be launched by the allowlisted absolute system Node");
+      throw new Error("Deployment bootstrap must be launched by the required protected /usr/bin/node");
     }
     const environments = createTrustedDeploymentEnvironments(token, trustedGhHome);
     const runCommand = createTrustedCommandRunner(trustedExecutables, environments);
