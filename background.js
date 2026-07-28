@@ -20,6 +20,7 @@
     probeResolutionBudgetMs: 3e3,
     probeTimeoutMs: 1500,
     redirectFailureBackoffMs: 1e4,
+    failedTargetRecoveryProbeIntervalMs: 15e3,
     upgradeProbeIntervalMs: 6e4,
     notes: [
       "Firefox MV2 declares the CHZZK origin and trusted HLS CDN origins as required permissions so webRequest can observe dedicated livecloud playlists initiated by the site's same-origin small-player pages instead of exposing core access as optional MV3 site toggles.",
@@ -28,7 +29,7 @@
       "A trusted HLS master response is streamed to CHZZK unchanged, bounded by probeMaxBytes for local parsing, accepted only with an exact successful response URL/status, and scored before the response filter closes so its highest eligible variant is cached before the first numeric rendition request. Master-response observers are released on filter stop/error, terminal completion/error, ineligible redirect, a pending redirect from a dedicated host to a generic CDN at a context boundary, generic-CDN or destructive context migration, and tab closure. An eligible dedicated-livecloud observer is re-keyed under the new token across a same-tab, same-stream mini-player transition only while its current or pending redirect URL remains dedicated, while an eligible master redirect chain also retains it. Candidate URLs must pass the request-domain and quality-marker policy before ranking by resolution, frame rate, then bitrate; one malformed or untrusted high-ranked entry cannot hide a lower valid variant, and a valid advertised quality is not capped to the numeric fallback grid. A bounded no-credential fetch is used only when response filtering or redirect lifecycle observation cannot attach.",
       "Numeric quality replacement and response renewal use one safe pathname-marker grammar: they preserve the observed 360p-directory/chunklist_480p legacy shape, reject other marker contradictions, and preserve signed query strings and fragments byte-for-byte.",
       "Without a cached target, configured candidates are checked from highest to lowest within probeResolutionBudgetMs; only concurrent requests in the same playlist family share an in-flight resolution.",
-      "A newly observed trusted master replaces an earlier numeric-fallback target in either direction. The resulting master-derived target is authoritative for its live context: numeric evidence may match it but cannot promote it to an unadvertised rendition, while a later trusted master may promote it and a lower later master cannot demote still-valid master evidence. Numeric-fallback targets remain monotonic, so equal evidence may strengthen them and higher evidence may promote them, but a later lower numeric result cannot overwrite them. A cached numeric target below the highest configured candidate gets at most one non-blocking upward candidate refresh per upgradeProbeIntervalMs; after a genuine higher-target failure, the first retry is advanced to that target's redirectFailureBackoffMs expiry instead of waiting the full generic interval. CHZZK hls_playlist and llhls_playlist master names share the corresponding numeric rendition family.",
+      "A newly observed trusted master replaces an earlier numeric-fallback target in either direction. The resulting master-derived target is authoritative for its live context: ordinary numeric evidence may match it but cannot promote it to an unadvertised rendition, while a later trusted master may promote it and a lower later master cannot demote still-valid master evidence. The numeric promotion exception is confined to matching-lineage recovery after a genuine same-family failure: the exact advertised quality is rebuilt from the current media request and checked first, then a failed exact check may be followed by proof of configured qualities above the current fallback without crossing the advertised ceiling. No signed URL is retained in lineage or failure state, a newer master revokes stale recovery work, and a valid observed response cancels older fallback master fetches for every bounded source retained across its redirect chain before applying rendition-family authority. Numeric-fallback targets remain monotonic, so equal evidence may strengthen them and higher evidence may promote them, but a later lower numeric result cannot overwrite them. A cached numeric target below the highest configured candidate gets at most one non-blocking upward refresh per upgradeProbeIntervalMs; after a genuine higher-target failure, the first retry starts at redirectFailureBackoffMs expiry and known-failure recovery continues per failedTargetRecoveryProbeIntervalMs. CHZZK hls_playlist and llhls_playlist master names share the corresponding numeric rendition family.",
       "URL-marker-only media evidence uses markerEvidenceTtlMs as an idle TTL: Firefox passes redirected response chunks through immediately, keeps any stream-write/filter failure sticky, strips only the unsent client-side fragment for exact network-event URL comparison, and renews only after both a successful 2xx completion and a bounded streamed body prove usable HLS evidence, except that an exact-network-URL HTTP 304 renews prior validated evidence after bodyless cache revalidation. Firefox NS_BINDING_ABORTED and NS_ERROR_ABORT are treated as exact neutral client-cancellation codes because overlapping LL-HLS requests are routinely superseded; they neither renew nor invalidate the selected target. Status-only, empty/HTML/malformed or oversized non-304, other 3xx, HTTP 204/205, 4xx/5xx, final-URL mismatch, and other request-error results invalidate and suppress the failed family target for redirectFailureBackoffMs before it may be considered again.",
       "The generated quality regex matches numeric qualities lower than the resolved family target; it does not enumerate only today's menu values.",
       "CHZZK livecloud playlist hosts may resolve/use GSCdn; keep gscdn.net covered for HLS playlist requests.",
@@ -37,7 +38,7 @@
       "Candidate probes reject redirects because Firefox does not expose manual redirect hops; they compare the exact requested and final network URLs after stripping only a client-side fragment that Fetch does not send or retain in Response.url. Bodies require an exact first meaningful EXTM3U line plus a usable master variant or media segment/part structure, reject obvious HTML/JSON types, are capped by probeMaxBytes in UTF-8 bytes, and must prove the requested candidate before seeding a target.",
       "Same-URL reload clears quality state separately from authoritatively validated tab trust; full document loads, new live contexts, foreign navigation, and tab close abort pending probes and invalidate their context token so stale completions cannot restore a target, while bounded same-document mini-player transitions may re-key only eligible dedicated-host work under a fresh token.",
       "Diagnostics use an exact bounded schema with saturating non-negative safe-integer counters and canonical allowlist domain labels that discard subdomains and ports. Runtime state transitions retain only allowlisted actions, reasons, sources, qualities, and timestamps; raw browser errors, request URLs, tab identifiers, signed parameters, subdomains, and ports are never retained in that transition log.",
-      "Active targets, failed-target suppression, and in-flight resolutions are expiry-swept and LRU-bounded per tab and globally; failed-target entries retain only secret-free session identity and quality-expiry data.",
+      "Active targets, secret-free master lineage, failed-target suppression, and in-flight resolutions are expiry-swept where applicable and LRU-bounded per tab and globally; lineage retains only session identity, advertised/recovery quality, timing, and an in-memory epoch, while failed-target entries retain only secret-free session identity and quality-expiry data.",
     ],
   };
 
@@ -1273,19 +1274,26 @@
     async function resolveHighestSupportedQuality2(
       details,
       observedQuality,
-      { signal = null, skipTargetQualities = /* @__PURE__ */ new Set() } = {},
+      { maximumTargetQuality = null, signal = null, skipTargetQualities = /* @__PURE__ */ new Set() } = {},
     ) {
       const observedNumber = qualityNumber(observedQuality);
-      if (!observedNumber) return null;
+      const maximumTargetNumber = maximumTargetQuality == null ? null : qualityNumber(maximumTargetQuality);
+      if (!observedNumber || (maximumTargetQuality != null && !maximumTargetNumber)) return null;
       const candidates = normalizeQualityCandidates(policy.qualityCandidates, {
-        include: [observedQuality],
+        include: [observedQuality, maximumTargetQuality],
         minRedirectQuality: policy.minRedirectQuality,
       });
       for (const candidate of candidates) {
         if (signal?.aborted) return null;
         if (skipTargetQualities.has(candidate)) continue;
         const candidateNumber = qualityNumber(candidate);
-        if (!candidateNumber || candidateNumber < observedNumber) continue;
+        if (
+          !candidateNumber ||
+          candidateNumber < observedNumber ||
+          (maximumTargetNumber && candidateNumber > maximumTargetNumber)
+        ) {
+          continue;
+        }
         const candidateUrl = replaceQualityInUrl(details.url, candidate);
         if (!candidateUrl) continue;
         if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) {
@@ -1299,7 +1307,11 @@
           };
         }
       }
-      return signal?.aborted ? null : { evidenceKind: "url-marker", targetQuality: observedQuality };
+      return signal?.aborted ||
+        skipTargetQualities.has(observedQuality) ||
+        (maximumTargetNumber && observedNumber > maximumTargetNumber)
+        ? null
+        : { evidenceKind: "url-marker", targetQuality: observedQuality };
     }
     async function resolveBestVariantFromMaster(
       details,
@@ -1311,7 +1323,7 @@
     }
     function resolveBestVariantFromEvidence2(
       evidence,
-      { skipTargetQualities = /* @__PURE__ */ new Set() } = {},
+      { requiredFamilyKey = null, skipTargetQualities = /* @__PURE__ */ new Set() } = {},
     ) {
       if (
         !evidence ||
@@ -1327,6 +1339,7 @@
             candidateQuality &&
             typeof candidate?.url === "string" &&
             isTrustedRequestDomain(candidate.url, policy) &&
+            (!requiredFamilyKey || playlistFamilyKey(candidate.url) === requiredFamilyKey) &&
             urlQualityMarkersMatch2(candidate.url, candidateQuality),
           );
         },
@@ -1406,11 +1419,17 @@
     }
     const activeTargetsBySession2 = /* @__PURE__ */ new Map();
     const failedTargetsBySession2 = /* @__PURE__ */ new Map();
+    const masterLineageBySession2 = /* @__PURE__ */ new Map();
     const resolutionBySession2 = /* @__PURE__ */ new Map();
     let sessionAccessSequence = 0;
     function sessionStateEntries() {
       const byKey = /* @__PURE__ */ new Map();
-      for (const map of [activeTargetsBySession2, failedTargetsBySession2, resolutionBySession2]) {
+      for (const map of [
+        activeTargetsBySession2,
+        failedTargetsBySession2,
+        masterLineageBySession2,
+        resolutionBySession2,
+      ]) {
         for (const [key, state] of map) {
           const entry = byKey.get(key) ?? {
             key,
@@ -1428,7 +1447,12 @@
     }
     function normalizeAccessOrder() {
       const groupsByKey = /* @__PURE__ */ new Map();
-      for (const map of [activeTargetsBySession2, failedTargetsBySession2, resolutionBySession2]) {
+      for (const map of [
+        activeTargetsBySession2,
+        failedTargetsBySession2,
+        masterLineageBySession2,
+        resolutionBySession2,
+      ]) {
         for (const [key, state] of map) {
           const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
           group.lastTouchedOrder = Math.max(
@@ -1467,6 +1491,7 @@
     function remove(sessionKey) {
       const removedActiveTarget = activeTargetsBySession2.delete(sessionKey);
       failedTargetsBySession2.delete(sessionKey);
+      masterLineageBySession2.delete(sessionKey);
       const resolution = resolutionBySession2.get(sessionKey);
       resolution?.controller.abort();
       resolutionBySession2.delete(sessionKey);
@@ -1487,7 +1512,9 @@
           continue;
         }
         for (const [quality, expiresAt] of state.targets) {
-          if (!Number.isFinite(expiresAt) || expiresAt <= now) state.targets.delete(quality);
+          if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+            state.targets.delete(quality);
+          }
         }
         if (state.targets.size === 0) failedTargetsBySession2.delete(key);
       }
@@ -1530,6 +1557,7 @@
       enforceLimits,
       failedTargetsBySession: failedTargetsBySession2,
       forgetRedirectedRequests,
+      masterLineageBySession: masterLineageBySession2,
       remove,
       resolutionBySession: resolutionBySession2,
       sweepExpired,
@@ -1553,6 +1581,7 @@
     enforceLimits: enforceSessionStateLimits,
     failedTargetsBySession,
     forgetRedirectedRequests: forgetRedirectedRequestsForSession,
+    masterLineageBySession,
     resolutionBySession,
     sweepExpired: sweepExpiredSessionState,
     touch: touchSessionState,
@@ -1572,8 +1601,10 @@
   } = createPlaylistProbe({ policy: quality_policy_default });
   var MAX_MARKER_EVIDENCE_TTL_MS = 3e4;
   var MAX_REDIRECT_FAILURE_BACKOFF_MS = 3e4;
+  var MIN_FAILED_TARGET_RECOVERY_PROBE_INTERVAL_MS = 1e4;
   var MIN_UPGRADE_PROBE_INTERVAL_MS = 3e4;
   var MAX_UPGRADE_PROBE_INTERVAL_MS = 10 * 6e4;
+  var MAX_MASTER_OBSERVER_SOURCE_SESSIONS = 32;
   var MAX_TRACKED_REDIRECT_REQUESTS = 500;
   var MAX_VALIDATED_TARGET_URLS = 16;
   var CLIENT_CANCELLED_REQUEST_ERRORS = /* @__PURE__ */ new Set(["NS_BINDING_ABORTED", "NS_ERROR_ABORT"]);
@@ -1696,6 +1727,15 @@
       ? Math.min(Math.max(configured, MIN_UPGRADE_PROBE_INTERVAL_MS), MAX_UPGRADE_PROBE_INTERVAL_MS)
       : 6e4;
   }
+  function failedTargetRecoveryProbeIntervalMs() {
+    const configured = Number(quality_policy_default.failedTargetRecoveryProbeIntervalMs ?? 15e3);
+    return Number.isSafeInteger(configured) && configured > 0
+      ? Math.min(
+          Math.max(configured, MIN_FAILED_TARGET_RECOVERY_PROBE_INTERVAL_MS),
+          MAX_UPGRADE_PROBE_INTERVAL_MS,
+        )
+      : 15e3;
+  }
   async function updateRedirectDiagnostics(lastError = null) {
     await enqueueDiagnosticsMutation((diagnostics) => {
       updateRuntimeRedirectDiagnostics(diagnostics, currentRedirectState(lastError));
@@ -1792,7 +1832,9 @@
     if (!state) return /* @__PURE__ */ new Set();
     const now = Date.now();
     for (const [quality, expiresAt] of state.targets) {
-      if (expiresAt <= now) state.targets.delete(quality);
+      if (expiresAt <= now) {
+        state.targets.delete(quality);
+      }
     }
     if (state.targets.size === 0) {
       failedTargetsBySession.delete(session.key);
@@ -1818,6 +1860,11 @@
     }
     return retryAt;
   }
+  function failedTargetRetryAt(session, targetQuality, now) {
+    const state = failedTargetsBySession.get(session.key);
+    const retryAt = state?.targets instanceof Map ? state.targets.get(targetQuality) : null;
+    return Number.isFinite(retryAt) && retryAt > now ? retryAt : null;
+  }
   function canReuseSessionTarget(previous, targetQuality, now) {
     return Boolean(
       previous?.resolved &&
@@ -1825,10 +1872,70 @@
       (previous.expiresAt == null || previous.expiresAt > now),
     );
   }
+  function masterLineageForSession(session) {
+    const state = masterLineageBySession.get(session.key);
+    return state ? touchSessionState(state) : null;
+  }
+  function setMasterLineage(session, advertisedTargetQuality, token, preservedResolution = null) {
+    const advertisedTargetNumber = qualityNumber(advertisedTargetQuality);
+    if (!advertisedTargetNumber || tabContextTokenByTab.get(session.tabId) !== token) return null;
+    if (!resolutionContextIsCurrent(session.tabId, session.contextKey)) return null;
+    const previous = masterLineageBySession.get(session.key);
+    const activeResolution = resolutionBySession.get(session.key);
+    if (activeResolution && activeResolution !== preservedResolution) {
+      activeResolution.controller.abort();
+      resolutionBySession.delete(session.key);
+    }
+    const now = Date.now();
+    const recoveryNotBefore = failedTargetRetryAt(session, advertisedTargetQuality, now);
+    const state = touchSessionState({
+      ...session,
+      advertisedTargetQuality,
+      epoch: {},
+      nextRecoveryProbeAt: recoveryNotBefore,
+      recoveryNotBefore,
+      recoveryTargetQuality: recoveryNotBefore ? advertisedTargetQuality : null,
+    });
+    masterLineageBySession.set(session.key, state);
+    const activeTarget = activeTargetsBySession.get(session.key);
+    if (activeTarget?.resolved && activeTarget.evidenceKind !== "master") {
+      activeTargetsBySession.delete(session.key);
+      forgetRedirectedRequestsForSession(session.key);
+      scheduleRedirectDiagnostics();
+    } else if (activeTarget && activeTarget.masterLineageEpoch === previous?.epoch) {
+      activeTarget.masterLineageEpoch =
+        (qualityNumber(activeTarget.targetQuality) ?? Number.POSITIVE_INFINITY) <= advertisedTargetNumber
+          ? state.epoch
+          : null;
+      touchSessionState(activeTarget);
+    }
+    enforceSessionStateLimits(session.key);
+    return state;
+  }
+  function clearMasterLineageRecovery(lineage) {
+    if (!lineage) return;
+    lineage.nextRecoveryProbeAt = null;
+    lineage.recoveryNotBefore = null;
+    lineage.recoveryTargetQuality = null;
+    touchSessionState(lineage);
+  }
   function setSessionTarget(session, resolution, token) {
     const targetQuality = resolution?.targetQuality;
     if (!targetQuality || tabContextTokenByTab.get(session.tabId) !== token) return false;
     if (!resolutionContextIsCurrent(session.tabId, session.contextKey)) return false;
+    const targetNumber = qualityNumber(targetQuality);
+    const masterLineage = masterLineageBySession.get(session.key);
+    const advertisedTargetNumber = qualityNumber(masterLineage?.advertisedTargetQuality);
+    if (
+      (masterLineage &&
+        (resolution.masterLineageEpoch !== masterLineage.epoch ||
+          !targetNumber ||
+          !advertisedTargetNumber ||
+          targetNumber > advertisedTargetNumber)) ||
+      (!masterLineage && resolution.masterLineageEpoch)
+    ) {
+      return false;
+    }
     if (failedTargetsForSession(session).has(targetQuality)) return false;
     const now = Date.now();
     let previous = activeTargetsBySession.get(session.key);
@@ -1838,13 +1945,20 @@
       previous = null;
     }
     const previousTargetNumber = qualityNumber(previous?.targetQuality);
-    const targetNumber = qualityNumber(targetQuality);
+    const incomingMaster = resolution.evidenceKind === "master";
+    const matchingLineageNumericPromotion = Boolean(
+      masterLineage &&
+      !incomingMaster &&
+      previous?.masterLineageEpoch === masterLineage.epoch &&
+      resolution.masterLineageEpoch === masterLineage.epoch,
+    );
     const incomingMasterReplacesNumeric =
-      previous?.resolved && resolution.evidenceKind === "master" && previous.evidenceKind !== "master";
+      previous?.resolved && incomingMaster && previous.evidenceKind !== "master";
     if (
       previous?.resolved &&
       previous.evidenceKind === "master" &&
-      resolution.evidenceKind !== "master" &&
+      !incomingMaster &&
+      !matchingLineageNumericPromotion &&
       previousTargetNumber &&
       targetNumber &&
       targetNumber > previousTargetNumber
@@ -1890,7 +2004,9 @@
       reusePrevious && (previous.evidenceKind === "master" || resolution.evidenceKind === "master")
         ? "master"
         : resolution.evidenceKind;
+    const hasMasterLineage = Boolean(masterLineage && masterLineage.epoch === resolution.masterLineageEpoch);
     const canUpgrade =
+      !hasMasterLineage &&
       evidenceKind !== "master" &&
       targetNumber &&
       HIGHEST_CONFIGURED_TARGET_NUMBER &&
@@ -1898,12 +2014,19 @@
     const failedHigherRetryAt = canUpgrade
       ? earliestFailedHigherTargetRetryAt(session, targetQuality, now)
       : null;
+    const failedTargetRecoveryEligible =
+      canUpgrade &&
+      Boolean(
+        failedHigherRetryAt != null || (reusePrevious && previous.failedTargetRecoveryEligible === true),
+      );
     const state = touchSessionState({
       ...session,
       deferredRedirectFailure: reusePrevious ? (previous.deferredRedirectFailure ?? null) : null,
       evidenceKind,
       expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
       lastSuccessfulVerificationSequence: reusePrevious ? previous.lastSuccessfulVerificationSequence : 0,
+      failedTargetRecoveryEligible,
+      masterLineageEpoch: hasMasterLineage ? masterLineage.epoch : null,
       nextUpgradeProbeAt: canUpgrade
         ? reusePrevious && Number.isFinite(previous.nextUpgradeProbeAt)
           ? previous.nextUpgradeProbeAt
@@ -1915,6 +2038,9 @@
       validatedNetworkUrls,
     });
     activeTargetsBySession.set(session.key, state);
+    if (hasMasterLineage && incomingMaster && targetQuality === masterLineage.advertisedTargetQuality) {
+      clearMasterLineageRecovery(masterLineage);
+    }
     enforceSessionStateLimits(session.key);
     if (previous?.targetQuality !== targetQuality || !previous?.resolved) {
       scheduleRuntimeTransition({
@@ -1936,6 +2062,22 @@
     activeResolution?.controller.abort();
     resolutionBySession.delete(sessionKey);
   }
+  function invalidateMasterResolutionsForSourceFamilies(tabId, contextKey, sourceFamilyKeys) {
+    const families = new Set(sourceFamilyKeys);
+    if (families.size === 0) return;
+    for (const [sessionKey, pending] of resolutionBySession) {
+      if (pending.resolverKind !== "master" || pending.tabId !== tabId || pending.contextKey !== contextKey) {
+        continue;
+      }
+      const pendingFamilies =
+        pending.masterSourceFamilyKeys instanceof Set
+          ? pending.masterSourceFamilyKeys
+          : /* @__PURE__ */ new Set([pending.familyKey]);
+      if ([...families].some((familyKey) => pendingFamilies.has(familyKey))) {
+        invalidateSessionResolution(sessionKey);
+      }
+    }
+  }
   function sessionFromResolutionState(state) {
     return {
       contextKey: state.contextKey,
@@ -1945,15 +2087,89 @@
       tabId: state.tabId,
     };
   }
-  function startSessionResolution(details, resolver, resolverKind, { minimumTargetQuality = null } = {}) {
-    const session = playlistSession(details);
-    if (!session) return Promise.resolve(null);
+  function masterLineageResolutionIsCurrent(state, resolution) {
+    const guard = state.masterLineageGuard;
+    if (!guard) return true;
+    const lineage = masterLineageBySession.get(state.key);
+    if (
+      lineage?.epoch !== guard.epoch ||
+      lineage.advertisedTargetQuality !== guard.advertisedTargetQuality ||
+      resolution?.masterLineageEpoch !== guard.epoch
+    ) {
+      return false;
+    }
+    if (!guard.recoveryTargetQuality) return true;
+    const current = activeTargetsBySession.get(state.key);
+    const guardedContextIsCurrent = Boolean(
+      current?.resolved &&
+      current.targetEpoch === guard.targetEpoch &&
+      current.masterLineageEpoch === guard.epoch &&
+      current.targetQuality === guard.currentTargetQuality &&
+      lineage.recoveryTargetQuality === guard.recoveryTargetQuality &&
+      lineage.recoveryNotBefore === guard.recoveryNotBefore &&
+      Date.now() >= guard.recoveryNotBefore,
+    );
+    if (!guardedContextIsCurrent) return false;
+    if (resolution.evidenceKind === "master") {
+      return Boolean(
+        resolution.targetFamilyKey === state.familyKey &&
+        resolution.targetQuality === guard.recoveryTargetQuality,
+      );
+    }
+    const resolvedTargetNumber = qualityNumber(resolution.targetQuality);
+    const currentTargetNumber = qualityNumber(guard.currentTargetQuality);
+    const advertisedTargetNumber = qualityNumber(guard.advertisedTargetQuality);
+    return Boolean(
+      resolution.evidenceKind === "url-marker" &&
+      resolvedTargetNumber &&
+      currentTargetNumber &&
+      advertisedTargetNumber &&
+      resolvedTargetNumber > currentTargetNumber &&
+      resolvedTargetNumber <= advertisedTargetNumber &&
+      resolution.targetQuality !== guard.recoveryTargetQuality,
+    );
+  }
+  function startSessionResolution(
+    details,
+    resolver,
+    resolverKind,
+    {
+      masterLineageGuard = null,
+      masterSourceFamilyKeys = null,
+      minimumTargetQuality = null,
+      sessionOverride = null,
+    } = {},
+  ) {
+    const requestSession = playlistSession(details);
+    if (!requestSession) return Promise.resolve(null);
+    const session =
+      sessionOverride &&
+      sessionOverride.tabId === requestSession.tabId &&
+      sessionOverride.contextKey === requestSession.contextKey
+        ? sessionOverride
+        : requestSession;
     const token = currentTabContextToken(session.tabId);
     const existing = resolutionBySession.get(session.key);
     if (existing?.token === token) {
       touchSessionState(existing);
-      if (resolverKind !== "master" || existing.resolverKind === "master") return existing.promise;
-      invalidateSessionResolution(session.key);
+      if (resolverKind === "master" && existing.resolverKind === "master") {
+        const combinedSourceFamilyKeys = new Set(
+          existing.masterSourceFamilyKeys instanceof Set
+            ? existing.masterSourceFamilyKeys
+            : [existing.familyKey],
+        );
+        for (const familyKey of masterSourceFamilyKeys ?? []) {
+          combinedSourceFamilyKeys.add(familyKey);
+        }
+        if (combinedSourceFamilyKeys.size <= MAX_MASTER_OBSERVER_SOURCE_SESSIONS) {
+          existing.masterSourceFamilyKeys = combinedSourceFamilyKeys;
+          return existing.promise;
+        }
+        invalidateSessionResolution(session.key);
+      } else {
+        if (resolverKind !== "master") return existing.promise;
+        invalidateSessionResolution(session.key);
+      }
     } else {
       existing?.controller.abort();
     }
@@ -1962,6 +2178,8 @@
     const state = touchSessionState({
       ...session,
       controller,
+      masterLineageGuard,
+      masterSourceFamilyKeys: masterSourceFamilyKeys instanceof Set ? new Set(masterSourceFamilyKeys) : null,
       minimumTargetQuality,
       promise: null,
       resolverKind,
@@ -1975,14 +2193,25 @@
         }),
       )
       .then(async (resolution) => {
-        if (!resolution?.targetQuality || !resolutionIsCurrent(state)) return null;
+        if (!resolutionIsCurrent(state)) return null;
+        if (state.resolverKind === "master") {
+          return applyMasterResolution(
+            sessionFromResolutionState(state),
+            resolution,
+            state.token,
+            "master-probe",
+            state,
+          );
+        }
+        if (!resolution?.targetQuality) return null;
+        if (!masterLineageResolutionIsCurrent(state, resolution)) return null;
         const resolvedTargetNumber = qualityNumber(resolution.targetQuality);
         const minimumTargetNumber = qualityNumber(state.minimumTargetQuality);
         if (minimumTargetNumber && (!resolvedTargetNumber || resolvedTargetNumber <= minimumTargetNumber)) {
           return null;
         }
         const resolutionSession =
-          state.resolverKind === "master"
+          state.resolverKind === "master" || state.resolverKind === "master-recovery"
             ? sessionForMasterResolution(sessionFromResolutionState(state), resolution)
             : sessionFromResolutionState(state);
         const stored = await setSessionTarget(resolutionSession, resolution, state.token);
@@ -2004,28 +2233,156 @@
     return waitWithinBlockingRequestBudget(promise, budget);
   }
   function startHighestTargetResolution(details, decision, options = {}) {
+    const maximumTargetQuality = options.maximumTargetQuality ?? null;
+    const masterLineageEpoch = options.masterLineageGuard?.epoch ?? null;
     return startSessionResolution(
       details,
       ({ signal, skipTargetQualities }) =>
-        resolveHighestSupportedQuality(details, decision.quality, { signal, skipTargetQualities }),
+        resolveHighestSupportedQuality(details, decision.quality, {
+          maximumTargetQuality,
+          signal,
+          skipTargetQualities,
+        }).then((resolution) =>
+          resolution && masterLineageEpoch ? { ...resolution, masterLineageEpoch } : resolution,
+        ),
       "numeric",
       options,
     );
   }
-  function startMasterTargetResolution(details) {
+  function startLineageTargetResolution(details, decision, lineage) {
+    if (!lineage || masterLineageBySession.get(lineage.key)?.epoch !== lineage.epoch) {
+      return Promise.resolve(null);
+    }
+    const existing = resolutionBySession.get(lineage.key);
+    if (existing?.token === tabContextTokenByTab.get(lineage.tabId)) {
+      touchSessionState(existing);
+      return existing.promise;
+    }
+    const now = Date.now();
+    const recoveryDue = Boolean(
+      lineage.recoveryTargetQuality &&
+      Number.isFinite(lineage.recoveryNotBefore) &&
+      now >= lineage.recoveryNotBefore &&
+      (!Number.isFinite(lineage.nextRecoveryProbeAt) || now >= lineage.nextRecoveryProbeAt),
+    );
+    const recoveryUrl = recoveryDue ? masterRecoveryUrlForRequest(details, lineage) : null;
+    if (recoveryUrl) {
+      lineage.nextRecoveryProbeAt = now + failedTargetRecoveryProbeIntervalMs();
+      touchSessionState(lineage);
+    }
+    const masterLineageGuard = {
+      advertisedTargetQuality: lineage.advertisedTargetQuality,
+      epoch: lineage.epoch,
+    };
+    return startSessionResolution(
+      details,
+      async ({ signal, skipTargetQualities }) => {
+        if (
+          recoveryUrl &&
+          playlistFamilyKey(recoveryUrl) === lineage.familyKey &&
+          urlQualityMarkersMatch(recoveryUrl, lineage.recoveryTargetQuality)
+        ) {
+          const evidence = await fetchPlaylistEvidence(recoveryUrl, { signal });
+          if (
+            evidence &&
+            !signal.aborted &&
+            playlistEvidenceSupportsExpectedQuality(evidence, lineage.recoveryTargetQuality)
+          ) {
+            return {
+              evidenceKind: "master",
+              masterLineageEpoch: lineage.epoch,
+              targetDedicatedHls: isDedicatedChzzkHlsPlaylistUrl(recoveryUrl, quality_policy_default),
+              targetFamilyKey: lineage.familyKey,
+              targetQuality: lineage.recoveryTargetQuality,
+            };
+          }
+        }
+        const boundedSkips = new Set(skipTargetQualities);
+        if (lineage.recoveryTargetQuality) boundedSkips.add(lineage.recoveryTargetQuality);
+        const resolution = await resolveHighestSupportedQuality(details, decision.quality, {
+          maximumTargetQuality: lineage.advertisedTargetQuality,
+          signal,
+          skipTargetQualities: boundedSkips,
+        });
+        return resolution ? { ...resolution, masterLineageEpoch: lineage.epoch } : null;
+      },
+      "lineage",
+      { masterLineageGuard },
+    );
+  }
+  function resolveMasterTargetFromEvidence(session, evidence) {
+    const advertised = resolveBestVariantFromEvidence(evidence);
+    if (!advertised) return null;
+    const advertisedSession = sessionForMasterResolution(session, advertised);
+    const failedTargetQualities = failedTargetsForSession(advertisedSession);
+    const selected = resolveBestVariantFromEvidence(evidence, {
+      requiredFamilyKey: advertised.targetFamilyKey,
+      skipTargetQualities: failedTargetQualities,
+    });
+    return { advertised, selected };
+  }
+  function applyMasterResolution(
+    sourceSession,
+    masterResolution,
+    token,
+    source,
+    preservedResolution = null,
+    supersededMasterSourceFamilies = null,
+  ) {
+    const advertised = masterResolution?.advertised;
+    if (!advertised) return null;
+    const advertisedSession = sessionForMasterResolution(sourceSession, advertised);
+    const advertisedLineage = setMasterLineage(
+      advertisedSession,
+      advertised.targetQuality,
+      token,
+      preservedResolution?.key === advertisedSession.key ? preservedResolution : null,
+    );
+    if (!advertisedLineage) return null;
+    if (source === "master-response") {
+      invalidateMasterResolutionsForSourceFamilies(
+        sourceSession.tabId,
+        sourceSession.contextKey,
+        supersededMasterSourceFamilies ?? [sourceSession.familyKey],
+      );
+    }
+    const selected = masterResolution.selected;
+    if (!selected) return null;
+    const selectedSession = sessionForMasterResolution(sourceSession, selected);
+    if (selectedSession.key !== advertisedSession.key) return null;
+    const stored = setSessionTarget(
+      selectedSession,
+      {
+        ...selected,
+        masterLineageEpoch: advertisedLineage.epoch,
+        source,
+      },
+      token,
+    );
+    return stored ? selected.targetQuality : null;
+  }
+  function startMasterTargetResolution(details, { sourceSession = null, sourceSessions = null } = {}) {
+    const requestSession = playlistSession(details);
+    if (!requestSession) return Promise.resolve(null);
+    const effectiveSourceSession = sourceSession ?? requestSession;
+    const sourceFamilyKeys = new Set(
+      (sourceSessions ?? [effectiveSourceSession]).map((session) => session.familyKey),
+    );
+    if (sourceFamilyKeys.size === 0 || sourceFamilyKeys.size > MAX_MASTER_OBSERVER_SOURCE_SESSIONS) {
+      return Promise.resolve(null);
+    }
     return startSessionResolution(
       details,
       async ({ signal }) => {
         const evidence = await fetchPlaylistEvidence(details.url, { signal });
         if (!evidence || signal.aborted) return null;
-        const initialResolution = resolveBestVariantFromEvidence(evidence);
-        if (!initialResolution) return null;
-        const targetSession = sessionForMasterResolution(playlistSession(details), initialResolution);
-        return resolveBestVariantFromEvidence(evidence, {
-          skipTargetQualities: failedTargetsForSession(targetSession),
-        });
+        return resolveMasterTargetFromEvidence(playlistSession(details), evidence);
       },
       "master",
+      {
+        masterSourceFamilyKeys: sourceFamilyKeys,
+        sessionOverride: effectiveSourceSession,
+      },
     );
   }
   function forgetMasterResponseObserver(record) {
@@ -2063,6 +2420,18 @@
       if (contextMismatch || expectedRedirectMismatch) {
         settleMasterResponseObserver(existing);
       } else {
+        if (!existing.sourceSessionsByKey.has(session.key)) {
+          if (existing.sourceSessionsByKey.size >= MAX_MASTER_OBSERVER_SOURCE_SESSIONS) {
+            invalidateMasterResolutionsForSourceFamilies(
+              existing.session.tabId,
+              existing.session.contextKey,
+              [...existing.sourceSessionsByKey.values()].map((sourceSession) => sourceSession.familyKey),
+            );
+            settleMasterResponseObserver(existing);
+            return false;
+          }
+          existing.sourceSessionsByKey.set(session.key, session);
+        }
         existing.details = details;
         existing.expectedRedirectNetworkUrl = null;
         existing.finalNetworkUrl = finalNetworkUrl;
@@ -2079,6 +2448,7 @@
       requestId,
       session,
       settled: false,
+      sourceSessionsByKey: /* @__PURE__ */ new Map([[session.key, session]]),
       token: currentTabContextToken(session.tabId),
     });
     return true;
@@ -2128,26 +2498,19 @@
       try {
         if (!record.streamFailed && !record.oversized && record.totalBytes > 0) {
           textChunks.push(decoder.decode());
-          let resolution = resolveBestVariantFromEvidence({
+          const evidence = {
             finalUrl: record.finalNetworkUrl,
             text: textChunks.join(""),
-          });
-          if (resolution) {
-            let targetSession = sessionForMasterResolution(record.session, resolution);
-            resolution = resolveBestVariantFromEvidence(
-              {
-                finalUrl: record.finalNetworkUrl,
-                text: textChunks.join(""),
-              },
-              {
-                skipTargetQualities: failedTargetsForSession(targetSession),
-              },
-            );
-            if (resolution) {
-              targetSession = sessionForMasterResolution(record.session, resolution);
-              setSessionTarget(targetSession, { ...resolution, source: "master-response" }, record.token);
-            }
-          }
+          };
+          const resolution = resolveMasterTargetFromEvidence(record.session, evidence);
+          applyMasterResolution(
+            record.session,
+            resolution,
+            record.token,
+            "master-response",
+            null,
+            [...record.sourceSessionsByKey.values()].map((session) => session.familyKey),
+          );
         }
       } catch (error) {
         reportRedirectError(error).catch(() => {});
@@ -2181,8 +2544,10 @@
       statusCode !== 205;
     if (exactSuccessfulResponse) {
       if (!record.filterAttached && !attachMasterResponseFilter(record)) {
+        const sourceSessions = [...record.sourceSessionsByKey.values()];
+        const sourceSession = sourceSessions[0] ?? record.session;
         settleMasterResponseObserver(record);
-        startMasterTargetResolution(record.details).catch((error) => {
+        startMasterTargetResolution(record.details, { sourceSession, sourceSessions }).catch((error) => {
           reportRedirectError(error).catch(() => {});
           console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
         });
@@ -2220,8 +2585,108 @@
     }
     record.expectedRedirectNetworkUrl = redirectNetworkUrl;
   }
+  function masterRecoveryUrlForRequest(details, lineage) {
+    const recoveryUrl = networkRequestUrl(
+      buildHighestQualityRedirectUrl(details?.url, {
+        minRedirectQuality: quality_policy_default.minRedirectQuality,
+        targetQuality: lineage?.recoveryTargetQuality,
+      }),
+    );
+    return recoveryUrl &&
+      playlistFamilyKey(recoveryUrl) === lineage?.familyKey &&
+      urlQualityMarkersMatch(recoveryUrl, lineage?.recoveryTargetQuality)
+      ? recoveryUrl
+      : null;
+  }
+  function startMasterRecoveryTargetResolution(details, decision, targetState, lineage, recoveryUrl) {
+    const recoveryQuality = lineage?.recoveryTargetQuality;
+    const recoveryNotBefore = lineage?.recoveryNotBefore;
+    if (
+      !recoveryUrl ||
+      !recoveryQuality ||
+      !Number.isFinite(recoveryNotBefore) ||
+      Date.now() < recoveryNotBefore ||
+      targetState?.masterLineageEpoch !== lineage.epoch
+    ) {
+      return Promise.resolve(null);
+    }
+    const masterLineageGuard = {
+      advertisedTargetQuality: lineage.advertisedTargetQuality,
+      currentTargetQuality: targetState.targetQuality,
+      epoch: lineage.epoch,
+      recoveryNotBefore,
+      recoveryTargetQuality: recoveryQuality,
+      targetEpoch: targetState.targetEpoch,
+    };
+    return startSessionResolution(
+      details,
+      async ({ signal, skipTargetQualities }) => {
+        const evidence = await fetchPlaylistEvidence(recoveryUrl, { signal });
+        if (
+          evidence &&
+          !signal.aborted &&
+          playlistEvidenceSupportsExpectedQuality(evidence, recoveryQuality)
+        ) {
+          return {
+            evidenceKind: "master",
+            targetDedicatedHls: isDedicatedChzzkHlsPlaylistUrl(recoveryUrl, quality_policy_default),
+            targetFamilyKey: targetState.familyKey,
+            targetQuality: recoveryQuality,
+            masterLineageEpoch: lineage.epoch,
+          };
+        }
+        if (signal.aborted) return null;
+        const boundedSkips = new Set(skipTargetQualities);
+        boundedSkips.add(recoveryQuality);
+        boundedSkips.add(targetState.targetQuality);
+        const resolution = await resolveHighestSupportedQuality(details, decision.quality, {
+          maximumTargetQuality: lineage.advertisedTargetQuality,
+          signal,
+          skipTargetQualities: boundedSkips,
+        });
+        return resolution ? { ...resolution, masterLineageEpoch: lineage.epoch } : null;
+      },
+      "master-recovery",
+      { masterLineageGuard, minimumTargetQuality: targetState.targetQuality },
+    );
+  }
   function scheduleUpwardTargetResolution(details, decision, targetState) {
-    if (targetState?.evidenceKind === "master") {
+    const session = playlistSession(details);
+    const lineage = session ? masterLineageForSession(session) : null;
+    const recoveringKnownMasterFailure = Boolean(
+      lineage &&
+      targetState?.masterLineageEpoch === lineage.epoch &&
+      lineage.recoveryTargetQuality &&
+      Number.isFinite(lineage.recoveryNotBefore) &&
+      (qualityNumber(lineage.recoveryTargetQuality) ?? 0) >
+        (qualityNumber(targetState.targetQuality) ?? Number.POSITIVE_INFINITY),
+    );
+    if (recoveringKnownMasterFailure) {
+      const now2 = Date.now();
+      if (
+        now2 < lineage.recoveryNotBefore ||
+        (Number.isFinite(lineage.nextRecoveryProbeAt) && now2 < lineage.nextRecoveryProbeAt)
+      ) {
+        return;
+      }
+      const existing = resolutionBySession.get(lineage.key);
+      if (existing?.token === tabContextTokenByTab.get(lineage.tabId)) {
+        touchSessionState(existing);
+        return;
+      }
+      const recoveryUrl = masterRecoveryUrlForRequest(details, lineage);
+      if (!recoveryUrl) return;
+      lineage.nextRecoveryProbeAt = now2 + failedTargetRecoveryProbeIntervalMs();
+      touchSessionState(lineage);
+      startMasterRecoveryTargetResolution(details, decision, targetState, lineage, recoveryUrl).catch(
+        (error) => {
+          reportRedirectError(error).catch(() => {});
+          console.warn("[CHZZK] failed to recover master-advertised HLS playlist quality", error);
+        },
+      );
+      return;
+    }
+    if (lineage || targetState?.evidenceKind === "master") {
       targetState.nextUpgradeProbeAt = null;
       touchSessionState(targetState);
       return;
@@ -2242,11 +2707,16 @@
       return;
     }
     if (targetState.nextUpgradeProbeAt > now) return;
-    targetState.nextUpgradeProbeAt = now + upgradeProbeIntervalMs();
+    targetState.nextUpgradeProbeAt =
+      now +
+      (targetState.failedTargetRecoveryEligible === true
+        ? failedTargetRecoveryProbeIntervalMs()
+        : upgradeProbeIntervalMs());
     touchSessionState(targetState);
-    startHighestTargetResolution(details, decision, {
+    const resolution = startHighestTargetResolution(details, decision, {
       minimumTargetQuality: targetState.targetQuality,
-    }).catch((error) => {
+    });
+    resolution.catch((error) => {
       reportRedirectError(error).catch(() => {});
       console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality", error);
     });
@@ -2254,6 +2724,7 @@
   function tabHasQualityState(tabId) {
     return (
       [...activeTargetsBySession.values()].some((state) => state.tabId === tabId) ||
+      [...masterLineageBySession.values()].some((state) => state.tabId === tabId) ||
       [...resolutionBySession.values()].some((state) => state.tabId === tabId)
     );
   }
@@ -2289,6 +2760,9 @@
     }
     for (const [key, state] of failedTargetsBySession) {
       if (state.tabId === tabId) failedTargetsBySession.delete(key);
+    }
+    for (const [key, state] of masterLineageBySession) {
+      if (state.tabId === tabId) masterLineageBySession.delete(key);
     }
     for (const [requestId, state] of redirectedRequestsById) {
       if (state.tabId === tabId) {
@@ -2358,7 +2832,12 @@
       const group = failureGroups.get(key) ?? [];
       group.push({
         key,
-        state: { ...state, contextKey: destinationContextKey, key, targets },
+        state: {
+          ...state,
+          contextKey: destinationContextKey,
+          key,
+          targets,
+        },
       });
       failureGroups.set(key, group);
     }
@@ -2366,6 +2845,32 @@
       if (group.length !== 1) continue;
       const [{ key, state }] = group;
       failedTargetsBySession.set(key, touchSessionState(state));
+    }
+  }
+  function migrateMasterLineagesAcrossContext(tabId, destinationContextKey, sourceContextKey) {
+    const lineageGroups = /* @__PURE__ */ new Map();
+    for (const [oldKey, state] of masterLineageBySession) {
+      if (state.tabId !== tabId) continue;
+      masterLineageBySession.delete(oldKey);
+      if (!state.dedicatedHls || (sourceContextKey && state.contextKey !== sourceContextKey)) {
+        continue;
+      }
+      const key = JSON.stringify([tabId, destinationContextKey, state.familyKey]);
+      const group = lineageGroups.get(key) ?? [];
+      group.push({
+        key,
+        state: {
+          ...state,
+          contextKey: destinationContextKey,
+          key,
+        },
+      });
+      lineageGroups.set(key, group);
+    }
+    for (const group of lineageGroups.values()) {
+      if (group.length !== 1) continue;
+      const [{ key, state }] = group;
+      masterLineageBySession.set(key, touchSessionState(state));
     }
   }
   function migrateMasterResponseObserversAcrossContext(
@@ -2378,17 +2883,35 @@
       if (record.session.tabId !== tabId) continue;
       if (
         !masterResponseObserverCanMigrateAcrossContext(record) ||
-        (sourceContextKey && record.session.contextKey !== sourceContextKey)
+        (sourceContextKey && record.session.contextKey !== sourceContextKey) ||
+        !(record.sourceSessionsByKey instanceof Map)
       ) {
         settleMasterResponseObserver(record);
         continue;
       }
-      const key = JSON.stringify([tabId, destinationContextKey, record.session.familyKey]);
-      record.session = {
-        ...record.session,
-        contextKey: destinationContextKey,
-        key,
-      };
+      const migratedSourceSessions = /* @__PURE__ */ new Map();
+      for (const sourceSession of record.sourceSessionsByKey.values()) {
+        if (
+          sourceSession.tabId !== tabId ||
+          (sourceContextKey && sourceSession.contextKey !== sourceContextKey)
+        ) {
+          continue;
+        }
+        const key = JSON.stringify([tabId, destinationContextKey, sourceSession.familyKey]);
+        migratedSourceSessions.set(key, {
+          ...sourceSession,
+          contextKey: destinationContextKey,
+          key,
+        });
+      }
+      const currentKey = JSON.stringify([tabId, destinationContextKey, record.session.familyKey]);
+      const currentSession = migratedSourceSessions.get(currentKey);
+      if (!currentSession || migratedSourceSessions.size === 0) {
+        settleMasterResponseObserver(record);
+        continue;
+      }
+      record.session = currentSession;
+      record.sourceSessionsByKey = migratedSourceSessions;
       record.token = transitionToken;
     }
   }
@@ -2432,6 +2955,7 @@
       resolutionBySession.set(key, touchSessionState(state));
     }
     migrateFailedTargetsAcrossContext(tabId, destinationContextKey, sourceContextKey, now);
+    migrateMasterLineagesAcrossContext(tabId, destinationContextKey, sourceContextKey);
     for (const [oldKey, state] of tabTargets) {
       activeTargetsBySession.delete(oldKey);
       if (
@@ -2522,6 +3046,9 @@
         (state) => state.tabId === tabId && state.contextKey === "trusted-request",
       ) ||
         [...activeTargetsBySession.values()].some(
+          (state) => state.tabId === tabId && state.contextKey === "trusted-request",
+        ) ||
+        [...masterLineageBySession.values()].some(
           (state) => state.tabId === tabId && state.contextKey === "trusted-request",
         ) ||
         tabHasMigratableContextlessMasterObserver(tabId));
@@ -2859,7 +3386,18 @@
       tabId: record.tabId,
       targets: /* @__PURE__ */ new Map(),
     };
-    failures.targets.set(record.targetQuality, now + redirectFailureBackoffMs());
+    const recoveryNotBefore = now + redirectFailureBackoffMs();
+    failures.targets.set(record.targetQuality, recoveryNotBefore);
+    const lineage = masterLineageBySession.get(record.key);
+    if (
+      lineage?.epoch === current.masterLineageEpoch &&
+      lineage.advertisedTargetQuality === record.targetQuality
+    ) {
+      lineage.recoveryNotBefore = recoveryNotBefore;
+      lineage.recoveryTargetQuality = record.targetQuality;
+      lineage.nextRecoveryProbeAt = recoveryNotBefore;
+      touchSessionState(lineage);
+    }
     failedTargetsBySession.set(record.key, touchSessionState(failures));
     enforceSessionStateLimits(record.key);
     for (const [requestId, pending] of redirectedRequestsById) {
@@ -3002,7 +3540,10 @@
     const ownsBudget = inheritedBudget == null;
     let resolution;
     try {
-      resolution = startHighestTargetResolution(details, decision);
+      const lineage = session ? masterLineageForSession(session) : null;
+      resolution = lineage
+        ? startLineageTargetResolution(details, decision, lineage)
+        : startHighestTargetResolution(details, decision);
     } catch (error) {
       if (ownsBudget) blockingBudget.clear();
       scheduleRedirectDiagnostics(String(error?.message ?? error));
@@ -3050,7 +3591,8 @@
         }
         if (
           targetState.evidenceKind !== "master" &&
-          !resolvedTargetCoversObserved(targetState, decision.quality)
+          !resolvedTargetCoversObserved(targetState, decision.quality) &&
+          !masterLineageBySession.has(session.key)
         ) {
           startHighestTargetResolution(details, decision).catch((error) => {
             reportRedirectError(error).catch(() => {});

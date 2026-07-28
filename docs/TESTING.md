@@ -40,8 +40,8 @@ The test exercises real Firefox rather than a VM mock:
 
 1. Installs synthetic version `0.1.3` through geckodriver.
 2. Opens a CHZZK-shaped live fixture, streams only the first master-playlist body chunk, switches the tab to the same-site `/lives` mini-player route, and withholds the remaining master body until a test-only background listener acknowledges that Firefox delivered that exact route update. It then confirms the first numeric request goes directly from `480p` to the master-advertised `1080p` without `2160p`/`1440p` fallback probes. No elapsed-time delay stands in for observer migration.
-3. Cancels one redirected 1080p request through `AbortController`, exercises Firefox's client-abort path, and confirms subsequent playback remains at 1080p instead of entering failure backoff.
-4. Confirms the signed-style query remains byte-for-byte unchanged and a client-only fragment does not affect network-URL comparison.
+3. Confirms the signed-style query remains byte-for-byte unchanged and a client-only fragment does not affect network-URL comparison.
+4. Serves an unusable GAP-only `1080p` response, proves Firefox stays on usable `720p`, then makes the first exact `1080p` recovery fail near the 10-second boundary and the second verify successfully about 15 seconds later. Generous request-cadence upper bounds reject a slow recovery, the page must fetch usable `1080p` only after a distinct successful background verification, every recovery request must carry the current media query rather than the distinct master query, and no `1440p`/`2160p` generic probe may occur.
 5. Keeps Firefox's observed original-live `documentUrl` after the background-acknowledged in-flight-master `history.pushState`, changes mini-player routes repeatedly, and confirms the observed master still selects `1080p` without numeric fallback scans across playlist cycles.
 6. Revalidates the selected playlist with an empty HTTP 304 and confirms the cached target remains usable.
 7. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.

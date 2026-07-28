@@ -163,6 +163,66 @@ chunklist_2160p.m3u8?Policy=synthetic
     });
   });
 
+  it("caps numeric fallback to master-authorized quality and honors skipped observed targets", async () => {
+    const requested = [];
+    const probe = createPlaylistProbe({
+      fetchImpl: async (url) => {
+        requested.push(url);
+        return playlistResponse(networkRequestUrl(url), mediaPlaylist());
+      },
+      policy,
+    });
+    const details = {
+      url: "https://edge.pstatic.net/chzzk/channel/chunklist_480p.m3u8?Policy=synthetic",
+    };
+
+    assert.deepEqual(
+      await probe.resolveHighestSupportedQuality(details, "480p", {
+        maximumTargetQuality: "1080p",
+      }),
+      {
+        evidenceKind: "url-marker",
+        targetQuality: "1080p",
+        validatedNetworkUrl: "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8?Policy=synthetic",
+      },
+    );
+    assert.equal(
+      requested.some((url) => /1440p|2160p/.test(url)),
+      false,
+    );
+    assert.equal(
+      await probe.resolveHighestSupportedQuality({ url: details.url.replace("480p", "1080p") }, "1080p", {
+        maximumTargetQuality: "1080p",
+        skipTargetQualities: new Set(["1080p"]),
+      }),
+      null,
+    );
+  });
+
+  it("does not cross playlist families when selecting a suppressed-master fallback", () => {
+    const masterUrl = "https://edge.pstatic.net/chzzk/channel/master.m3u8?Policy=synthetic";
+    const familyAUrl =
+      "https://edge.pstatic.net/chzzk/channel/family-a/chunklist_1080p.m3u8?Policy=synthetic";
+    const master = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.0
+family-a/chunklist_1080p.m3u8?Policy=synthetic
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.0
+family-b/chunklist_720p.m3u8?Policy=synthetic
+`;
+    const probe = createPlaylistProbe({ policy });
+
+    assert.equal(
+      probe.resolveBestVariantFromEvidence(
+        { finalUrl: masterUrl, text: master },
+        {
+          requiredFamilyKey: playlistFamilyKey(familyAUrl),
+          skipTargetQualities: new Set(["1080p"]),
+        },
+      ),
+      null,
+    );
+  });
+
   it("rejects oversized streamed bodies and cancels the reader", async () => {
     let cancelled = false;
     const reader = {

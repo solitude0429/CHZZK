@@ -168,13 +168,14 @@ export function createPlaylistProbe({
   async function resolveHighestSupportedQuality(
     details,
     observedQuality,
-    { signal = null, skipTargetQualities = new Set() } = {},
+    { maximumTargetQuality = null, signal = null, skipTargetQualities = new Set() } = {},
   ) {
     const observedNumber = qualityNumber(observedQuality);
-    if (!observedNumber) return null;
+    const maximumTargetNumber = maximumTargetQuality == null ? null : qualityNumber(maximumTargetQuality);
+    if (!observedNumber || (maximumTargetQuality != null && !maximumTargetNumber)) return null;
 
     const candidates = normalizeQualityCandidates(policy.qualityCandidates, {
-      include: [observedQuality],
+      include: [observedQuality, maximumTargetQuality],
       minRedirectQuality: policy.minRedirectQuality,
     });
 
@@ -182,7 +183,13 @@ export function createPlaylistProbe({
       if (signal?.aborted) return null;
       if (skipTargetQualities.has(candidate)) continue;
       const candidateNumber = qualityNumber(candidate);
-      if (!candidateNumber || candidateNumber < observedNumber) continue;
+      if (
+        !candidateNumber ||
+        candidateNumber < observedNumber ||
+        (maximumTargetNumber && candidateNumber > maximumTargetNumber)
+      ) {
+        continue;
+      }
 
       const candidateUrl = replaceQualityInUrl(details.url, candidate);
       if (!candidateUrl) continue;
@@ -198,7 +205,11 @@ export function createPlaylistProbe({
       }
     }
 
-    return signal?.aborted ? null : { evidenceKind: "url-marker", targetQuality: observedQuality };
+    return signal?.aborted ||
+      skipTargetQualities.has(observedQuality) ||
+      (maximumTargetNumber && observedNumber > maximumTargetNumber)
+      ? null
+      : { evidenceKind: "url-marker", targetQuality: observedQuality };
   }
 
   async function resolveBestVariantFromMaster(
@@ -210,7 +221,10 @@ export function createPlaylistProbe({
     return resolveBestVariantFromEvidence(evidence, { skipTargetQualities });
   }
 
-  function resolveBestVariantFromEvidence(evidence, { skipTargetQualities = new Set() } = {}) {
+  function resolveBestVariantFromEvidence(
+    evidence,
+    { requiredFamilyKey = null, skipTargetQualities = new Set() } = {},
+  ) {
     if (
       !evidence ||
       !isUsableHlsPlaylist(evidence.text) ||
@@ -225,6 +239,7 @@ export function createPlaylistProbe({
           candidateQuality &&
           typeof candidate?.url === "string" &&
           isTrustedRequestDomain(candidate.url, policy) &&
+          (!requiredFamilyKey || playlistFamilyKey(candidate.url) === requiredFamilyKey) &&
           urlQualityMarkersMatch(candidate.url, candidateQuality),
         );
       },

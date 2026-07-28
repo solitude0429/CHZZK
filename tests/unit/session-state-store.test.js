@@ -75,10 +75,15 @@ describe("runtime session-state store", () => {
   it("aborts an in-flight resolution when removing a session", () => {
     const store = createSessionStateStore();
     const controller = new AbortController();
+    store.masterLineageBySession.set(
+      "pending",
+      state("pending", 1, { advertisedTargetQuality: "1080p", epoch: {} }),
+    );
     store.resolutionBySession.set("pending", state("pending", 1, { controller }));
 
     assert.equal(store.remove("pending"), false);
     assert.equal(controller.signal.aborted, true);
+    assert.equal(store.masterLineageBySession.has("pending"), false);
     assert.equal(store.resolutionBySession.has("pending"), false);
   });
 
