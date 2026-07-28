@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -56,6 +56,9 @@ const trustedExecutables = Object.freeze({
   git: firstAvailableExecutable(["/usr/bin/git", "/bin/git"], "git"),
   node: firstAvailableExecutable(["/usr/bin/node", "/usr/local/bin/node", "/bin/node"], "node"),
 });
+const cleanBootstrapFailurePattern = existsSync("/usr/bin/node")
+  ? /pinned CHZZK repository/i
+  : /\/usr\/bin\/node.*No such file or directory/i;
 
 function gitBlobSha(bytes) {
   const value = Buffer.from(bytes);
@@ -216,6 +219,38 @@ function commandHarness(sourceBytes, options = {}) {
 }
 
 describe("protected internal-update deployment bootstrap", { concurrency: false }, () => {
+  const originalGitHubActions = process.env.GITHUB_ACTIONS;
+
+  before(() => {
+    delete process.env.GITHUB_ACTIONS;
+  });
+
+  after(() => {
+    if (originalGitHubActions === undefined) delete process.env.GITHUB_ACTIONS;
+    else process.env.GITHUB_ACTIONS = originalGitHubActions;
+  });
+
+  it("refuses library execution in GitHub Actions before side effects", async () => {
+    let sideEffects = 0;
+    process.env.GITHUB_ACTIONS = "true";
+    try {
+      await assert.rejects(
+        runProtectedDeploymentEntrypoint({
+          executeEntrypoint: () => {
+            sideEffects += 1;
+          },
+          runCommand: () => {
+            sideEffects += 1;
+          },
+        }),
+        /must run out of band/i,
+      );
+      assert.equal(sideEffects, 0);
+    } finally {
+      delete process.env.GITHUB_ACTIONS;
+    }
+  });
+
   it("rejects a foreign repository before any API call or protected-source execution", async () => {
     let commandCalls = 0;
     let executionCalls = 0;
@@ -543,7 +578,7 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
         },
       );
       assert.notEqual(cleanBoundaryResult.status, 0);
-      assert.match(cleanBoundaryResult.stderr, /pinned CHZZK repository/i);
+      assert.match(cleanBoundaryResult.stderr, cleanBootstrapFailurePattern);
       assert.equal(existsSync(shimMarker), false, "caller PATH shim executed at the clean boundary");
 
       const pathInjectionResult = spawnSync(
@@ -629,7 +664,7 @@ exit "$chzzk_deploy_status"
         },
       );
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /pinned CHZZK repository/i);
+      assert.match(result.stderr, cleanBootstrapFailurePattern);
       assert.equal(result.stdout.includes(token), false);
       assert.equal(result.stderr.includes(token), false);
     } finally {

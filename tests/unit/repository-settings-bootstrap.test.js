@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -44,6 +44,9 @@ const trustedExecutables = Object.freeze({
   git: firstAvailableExecutable(["/usr/bin/git", "/bin/git"], "git"),
   node: firstAvailableExecutable(["/usr/bin/node", "/usr/local/bin/node", "/bin/node"], "node"),
 });
+const cleanBootstrapFailurePattern = existsSync("/usr/bin/node")
+  ? /owner\/repository form/i
+  : /\/usr\/bin\/node.*No such file or directory/i;
 
 function gitBlobSha(bytes) {
   const value = Buffer.from(bytes);
@@ -142,6 +145,38 @@ function commandHarness(source, options = {}) {
 }
 
 describe("protected repository settings bootstrap", { concurrency: false }, () => {
+  const originalGitHubActions = process.env.GITHUB_ACTIONS;
+
+  before(() => {
+    delete process.env.GITHUB_ACTIONS;
+  });
+
+  after(() => {
+    if (originalGitHubActions === undefined) delete process.env.GITHUB_ACTIONS;
+    else process.env.GITHUB_ACTIONS = originalGitHubActions;
+  });
+
+  it("refuses library execution in GitHub Actions before side effects", async () => {
+    let sideEffects = 0;
+    process.env.GITHUB_ACTIONS = "true";
+    try {
+      await assert.rejects(
+        runProtectedRepositorySettings({
+          executeConfigurator: () => {
+            sideEffects += 1;
+          },
+          runCommand: () => {
+            sideEffects += 1;
+          },
+        }),
+        /must run out of band/i,
+      );
+      assert.equal(sideEffects, 0);
+    } finally {
+      delete process.env.GITHUB_ACTIONS;
+    }
+  });
+
   it("rejects malformed and blob-mismatched protected configurator records", () => {
     const nonCanonical = protectedRecord("export const value = true;\n");
     nonCanonical.content = `${nonCanonical.content}\n!`;
@@ -345,7 +380,7 @@ writeFileSync(
         input: `${token}\n`,
       });
       assert.notEqual(clean.status, 0);
-      assert.match(clean.stderr, /owner\/repository form/i);
+      assert.match(clean.stderr, cleanBootstrapFailurePattern);
       assert.equal(clean.stderr.includes(token), false);
       assert.equal(existsSync(preloadMarker), false, "NODE_OPTIONS preload ran before sanitization");
       assert.equal(existsSync(shimMarker), false, "caller PATH shim ran before sanitization");
@@ -390,7 +425,7 @@ exit "$chzzk_settings_status"
         },
       );
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /owner\/repository form/i);
+      assert.match(result.stderr, cleanBootstrapFailurePattern);
       assert.equal(result.stdout.includes(token), false);
       assert.equal(result.stderr.includes(token), false);
     } finally {
