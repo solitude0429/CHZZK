@@ -4,7 +4,6 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - ".github/hardening-docs.patch.gz.b64"
       - ".github/workflows/apply-hardening-docs.yml"
 
 permissions:
@@ -31,11 +30,83 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Apply and verify the exact documentation patch
+      - name: Apply exact documentation replacements
         run: |
-          base64 -d .github/hardening-docs.patch.gz.b64 | gzip -d > /tmp/hardening-docs.patch
-          git apply --check /tmp/hardening-docs.patch
-          git apply /tmp/hardening-docs.patch
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_one(path, prefix, replacement):
+              lines = path.read_text(encoding="utf-8").splitlines()
+              indices = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+              if len(indices) != 1:
+                  raise SystemExit(
+                      f"{path}: expected one line starting with {prefix!r}, found {len(indices)}"
+                  )
+              index = indices[0]
+              lines[index : index + 1] = replacement
+              path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          replace_one(
+              Path("docs/HARDENING.md"),
+              "- Candidate probe redirects fail closed because Firefox does not expose redirect hops",
+              [
+                  "- Candidate probe redirects fail closed because Firefox does not expose redirect hops to manual Fetch handling. Requested and final URLs must match exactly at the network layer after removing only a client-side fragment, which Fetch neither transmits nor retains in `Response.url`; path and query changes remain rejected. A response must have an exact first meaningful `#EXTM3U` line plus a structurally usable master variant, media segment, or LL-HLS part reference; an `#EXT-X-PART` marked `GAP=YES` is explicitly unavailable and does not count as usable evidence. The response must not declare an obvious HTML/JSON content type and is capped in UTF-8 bytes. A returned master must contain a trusted variant whose metadata and URI both prove that candidate."
+              ],
+          )
+          replace_one(
+              Path("docs/HARDENING.md"),
+              "- One out-of-band `release` operation binds the configured operator",
+              [
+                  "- One out-of-band `release` operation binds the configured operator, protected clean exact head, canonical version, fresh 128-bit nonce, and enabled immutable-release setting; dispatches and boundedly waits for the exact actor/source/branch/workflow run; then repeats the head/checkout checks before loading the protected finalizer. Before AMO, compatible partial drafts are recognized only after exact commit/tag/name/byte verification. After attested staging, the finalizer verifies three stable draft snapshots and all build attestations, checks the admin-only immutable setting immediately before patching only the exact release ID to `draft=false`, and requires the exact immutable post-state. Existing exact immutable state is a verified no-op; mismatch, timeout, failed/duplicate run, or orphan tag states fail closed."
+              ],
+          )
+          replace_one(
+              Path("docs/HARDENING.md"),
+              "- Repository protection keeps only source-bound",
+              [
+                  "- Repository protection requires the five GitHub-Actions-bound checks `analyze`, `dependency-review`, `exact-head-review`, `firefox-e2e`, and `verify`, administrator enforcement, strict up-to-date heads, and zero unresolved conversations. The qualitative check is bound to one unedited author request that names the exact current 40-character head and base SHAs; the request-time PR timeline must already show that head, no later head/base mutation may exist, and the Codex connector reaction must post after the request. Missing or paginated timeline/reactor evidence fails closed. The check can pass while the PR remains draft, while native conversation resolution independently blocks unresolved review threads. A duplicate bot-review status and impossible sole-owner self-approval are intentionally absent. Actions are limited to GitHub-owned actions, workflow tokens default to read-only, only squash merges are enabled, and merged branches are deleted automatically. Version-update bot PRs and Scorecard SARIF are omitted because they created recurring queue/alert noise; exact dependency pins, `npm audit`, dependency review, CodeQL, custom fuzzing, secret scanning, and immutable releases retain the actionable security coverage."
+              ],
+          )
+          replace_one(
+              Path("docs/OPERATIONS.md"),
+              "5. After the last source push, keep the PR draft",
+              [
+                  "5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note before requesting the final review. After the last source push, keep the PR draft and create one new, unedited PR comment in this exact form, using the current 40-character PR head and base SHAs:",
+                  "",
+                  "```text",
+                  "@codex review",
+                  "",
+                  "Exact head: `<40-character head SHA>`",
+                  "Exact base: `<40-character base SHA>`",
+                  "```",
+                  "",
+                  "Do not edit or delete that request. The source-bound `exact-head-review` check may succeed while the PR remains draft; mark the PR ready only after that check succeeds and every actionable conversation is resolved. A source push, base change, PR reopen, PR metadata edit, or request edit/deletion invalidates the evidence and requires a fresh immutable request. GitHub's required-conversation-resolution rule remains the independent unresolved-thread gate. A self-approval or approval-count gate is not required for this sole-owner repository.",
+              ],
+          )
+          replace_one(
+              Path("docs/OPERATIONS.md"),
+              "Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate.",
+              [
+                  "Repository protection is managed out of band so a pull-request workflow cannot weaken its own gate. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the five source-bound checks `analyze`, `dependency-review`, `exact-head-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The repository-owned `exact-head-review` context accepts only a Codex reaction on one unedited request from the PR author whose exact head and base SHAs match the current PR, whose head was already current when the request entered the PR timeline, and after which no head/base mutation occurred. Timeline and reactor pagination fail closed; the write-capable publisher executes no PR code and rechecks both current SHAs before posting the check. Conversation resolution remains a separate native branch-protection requirement. Do not replace either control with an unbound status context or an approval-count gate."
+              ],
+          )
+          replace_one(
+              Path("docs/SECURITY.md"),
+              "- Probe bodies require `#EXTM3U` as the exact first meaningful line",
+              [
+                  "- Probe bodies require `#EXTM3U` as the exact first meaningful line plus a usable master variant, media segment, or LL-HLS part reference; an `#EXT-X-PART` with `GAP=YES` is unavailable and cannot establish or renew quality evidence. Probe bodies reject obvious HTML/JSON MIME types and are capped in UTF-8 bytes. HLS attributes reject duplicate keys and accept only bounded positive decimal bandwidth/frame-rate syntax."
+              ],
+          )
+          replace_one(
+              Path("docs/SECURITY.md"),
+              "- The final exact-head diff is reviewed directly by the operating Codex task.",
+              [
+                  "- The final exact-diff review is represented by a source-bound `exact-head-review` check. It accepts only a Codex reaction created after one unedited request comment from the PR author; that request must name the exact current 40-character head and base SHAs, the PR timeline must already contain the requested head before the comment, and no later head/base mutation may exist. Missing or paginated timeline/reactor evidence fails closed, while the write-capable publisher executes no PR code and rechecks both SHAs. The check may pass while the PR remains draft. Native required-conversation resolution independently rejects unresolved review threads. High-risk release, permission, deployment, and security-policy impact is finalized in the PR body before the request. The sole-owner branch does not require an impossible self-approval or a duplicate bot-review check; it does require GitHub-Actions-bound CI, Firefox E2E, dependency review, CodeQL, administrator enforcement, and zero unresolved conversations."
+              ],
+          )
+          PY
+      - name: Verify exact documentation bytes and formatting
+        run: |
           printf '%s  %s\n' \
             '4eaa0a8f3e365a8af938294e7ad3ffffef1a5aecd19d9f25bee088ec0ee297c3' 'docs/HARDENING.md' \
             '179ffa1c14cb59389587e73255e0343d9c8d1f6748c887dff6eabe849c73bed8' 'docs/OPERATIONS.md' \
