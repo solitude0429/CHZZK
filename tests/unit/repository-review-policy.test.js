@@ -116,7 +116,7 @@ describe("repository review policy", () => {
     assert.match(operations, /mark the PR ready for review and request the final direct Codex review/);
     assert.match(operations, /new final direct Codex review on the Ready PR/);
     const orderedMarkers = [
-      "5. Finalize the PR body",
+      "5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note after the last source push",
       "mark the PR ready for review",
       "@codex review",
       "Immediately before the authorized squash merge",
