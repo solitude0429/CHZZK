@@ -22,6 +22,14 @@ const HIGH_RISK_WRITE_PERMISSIONS = new Set([
   "repository-projects",
   "statuses",
 ]);
+const PROJECT_WORKFLOW_EVENTS = new Set([
+  "issue_comment",
+  "pull_request",
+  "pull_request_target",
+  "push",
+  "repository_dispatch",
+  "schedule",
+]);
 const PROJECT_EXECUTION_RE =
   /(?:^|[;&|\n]\s*)(?:npm\s+(?:ci|install|run)|npx\b|pnpm\b|yarn\b|node\s+scripts\/)/i;
 const SECRET_EXPRESSION_RE = /\$\{\{\s*secrets\./i;
@@ -32,6 +40,13 @@ function isObject(value) {
 
 function permissionWrites(permissions, name) {
   return permissions?.[name] === "write";
+}
+
+function workflowEventNames(events) {
+  if (typeof events === "string") return [events];
+  if (Array.isArray(events)) return events;
+  if (isObject(events)) return Object.keys(events);
+  return [];
 }
 
 function highRiskWritePermissions(permissions) {
@@ -65,6 +80,15 @@ function validateAction(step, location, errors) {
 export function validateWorkflowDocument(workflow, source = "workflow") {
   const errors = [];
   if (!isObject(workflow)) throw new Error(`${source}: workflow root must be an object`);
+  const eventNames = workflowEventNames(workflow.on);
+  if (eventNames.length === 0) {
+    errors.push("workflow must declare at least one approved event");
+  }
+  for (const eventName of eventNames) {
+    if (typeof eventName !== "string" || !PROJECT_WORKFLOW_EVENTS.has(eventName)) {
+      errors.push(`workflow event ${String(eventName)} is not approved or supported`);
+    }
+  }
   if (!workflow.concurrency || !workflow.concurrency.group) {
     errors.push("workflow must declare concurrency with a stable group");
   }
