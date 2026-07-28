@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,21 +29,43 @@ const configuratorSourcePath = join(repoRoot, "scripts/configure-repository.js")
 const repository = "solitude0429/CHZZK";
 const sourceSha = "a".repeat(40);
 
-function firstAvailableExecutable(candidates, name) {
+function firstProtectedExecutable(candidates) {
   for (const candidate of candidates) {
     try {
-      return realpathSync(candidate);
+      const path = realpathSync(candidate);
+      const metadata = statSync(path);
+      if (
+        metadata.isFile() &&
+        metadata.uid === 0 &&
+        (metadata.mode & 0o022) === 0 &&
+        (metadata.mode & 0o111) !== 0
+      ) {
+        return path;
+      }
     } catch {
       // Match the production bootstrap's fixed system-path fallback.
     }
   }
+  return undefined;
+}
+
+function requiredProtectedExecutable(candidates, name) {
+  const path = firstProtectedExecutable(candidates);
+  if (path !== undefined) return path;
   throw new Error(`No fixed system ${name} executable is available for bootstrap tests`);
 }
 
+const trustedGit = requiredProtectedExecutable(["/usr/bin/git", "/bin/git"], "git");
+const protectedNodeExecutable = firstProtectedExecutable([
+  "/usr/bin/node",
+  "/usr/local/bin/node",
+  "/bin/node",
+]);
 const trustedExecutables = Object.freeze({
-  gh: firstAvailableExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"], "gh"),
-  git: firstAvailableExecutable(["/usr/bin/git", "/bin/git"], "git"),
-  node: firstAvailableExecutable(["/usr/bin/node", "/usr/local/bin/node", "/bin/node"], "node"),
+  gh: requiredProtectedExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"], "gh"),
+  git: trustedGit,
+  // Injected tests need a protected placeholder when setup-node has no protected system Node.
+  node: protectedNodeExecutable ?? trustedGit,
 });
 const cleanBootstrapFailurePattern = existsSync("/usr/bin/node")
   ? /owner\/repository form/i
@@ -88,6 +111,40 @@ function makeInstalledBootstrap() {
   writeFileSync(path, readFileSync(bootstrapSourcePath), { mode: 0o500 });
   chmodSync(path, 0o500);
   return { directory, path };
+}
+
+function executeConfiguratorWithCurrentTestRuntime({
+  apply,
+  checkoutRoot,
+  configuratorBytes,
+  context,
+  nodeEnvironment,
+  trustedExecutables: executables,
+}) {
+  const moduleUrl = `data:text/javascript;base64,${configuratorBytes.toString("base64")}`;
+  const loader = `await import(${JSON.stringify(moduleUrl)});\n`;
+  const result = spawnSync(process.execPath, ["--input-type=module"], {
+    cwd: checkoutRoot,
+    env: {
+      ...nodeEnvironment,
+      CHZZK_GITHUB_REPOSITORY: context.repository,
+      CHZZK_REPOSITORY_SETTINGS_BOOTSTRAP_SHA: context.sourceSha,
+      CHZZK_REPOSITORY_SETTINGS_CHECKOUT: checkoutRoot,
+      CHZZK_REPOSITORY_SETTINGS_DEFAULT_BRANCH: context.defaultBranch,
+      CHZZK_REPOSITORY_SETTINGS_MODE: apply ? "apply" : "dry-run",
+      CHZZK_REPOSITORY_SETTINGS_OPERATOR_LOGIN: context.operatorLogin,
+      CHZZK_REPOSITORY_SETTINGS_TRUSTED_GH: executables.gh,
+      CHZZK_REPOSITORY_SETTINGS_TRUSTED_GH_HOME: context.trustedGhHome,
+      CHZZK_REPOSITORY_SETTINGS_TRUSTED_GIT: executables.git,
+      CHZZK_REPOSITORY_SETTINGS_TRUSTED_NODE: executables.node,
+    },
+    input: loader,
+    stdio: ["pipe", "inherit", "inherit"],
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`Test configurator exited with status ${result.status ?? "unknown"}`);
+  }
 }
 
 function commandHarness(source, options = {}) {
@@ -236,6 +293,8 @@ writeFileSync(
         apply: true,
         bootstrapFile: installed.path,
         checkout,
+        executeConfigurator:
+          protectedNodeExecutable === undefined ? executeConfiguratorWithCurrentTestRuntime : undefined,
         nodeEnvironment: environments.gh,
         repository,
         runCommand: harness.run,
