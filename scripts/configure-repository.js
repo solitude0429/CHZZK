@@ -332,6 +332,10 @@ export function inspectSigningSecretScope(state) {
   const repositoryScopedSecretNames = REQUIRED_SIGNING_SECRET_NAMES.filter((name) =>
     repositorySecretNames.has(name),
   );
+  const completeEnvironmentPair = missingEnvironmentSecretNames.length === 0;
+  const completeRepositoryPair = repositoryScopedSecretNames.length === REQUIRED_SIGNING_SECRET_NAMES.length;
+  const partialEnvironmentOverride = environmentScopedSecretNames.length > 0 && !completeEnvironmentPair;
+  const partialRepositoryPair = repositoryScopedSecretNames.length > 0 && !completeRepositoryPair;
   return {
     environment: FIREFOX_SIGNING_ENVIRONMENT,
     environmentProtected,
@@ -340,8 +344,9 @@ export function inspectSigningSecretScope(state) {
     repositoryScopedSecretNames,
     safe:
       environmentProtected &&
-      missingEnvironmentSecretNames.length === 0 &&
-      repositoryScopedSecretNames.length === 0,
+      !partialEnvironmentOverride &&
+      !partialRepositoryPair &&
+      (completeEnvironmentPair || completeRepositoryPair),
   };
 }
 
@@ -354,9 +359,9 @@ function signingSecretScopeChange(state) {
     kind: "signing-secret-scope",
     migrationPlan: [
       `Restrict the ${FIREFOX_SIGNING_ENVIRONMENT} environment to protected branches.`,
-      "Populate each missing environment secret from a separately held trusted credential source; GitHub does not expose existing secret values.",
-      "Verify the signing job from protected main uses the environment-scoped credentials.",
-      "Delete the same-named repository secrets only after the protected-environment signing check succeeds.",
+      "Keep both AMO secrets together as one complete repository-scoped or environment-scoped pair.",
+      "Remove or complete any partial scoped pair; environment secrets take precedence by name.",
+      "Verify the protected-main signing job uses one complete credential pair.",
     ],
     requiredSecretNames: REQUIRED_SIGNING_SECRET_NAMES,
   };
