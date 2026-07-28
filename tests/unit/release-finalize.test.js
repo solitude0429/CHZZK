@@ -23,6 +23,7 @@ import {
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 const repository = "solitude0429/CHZZK";
+const repositoryId = 1_275_903_171;
 const sourceSha = "a".repeat(40);
 const stagingWorkflowId = 304465962;
 const version = RELEASE_VERSION;
@@ -37,6 +38,7 @@ function makeSourceTree() {
 function commandHarness({
   immutableEnabled,
   publishError = null,
+  remoteHeads = [sourceSha],
   workflowRunPages = null,
   workflowRuns = [
     {
@@ -50,6 +52,7 @@ function commandHarness({
   ],
 }) {
   const calls = [];
+  let branchLookups = 0;
   const run = (command, args) => {
     calls.push({ args: [...args], command });
     if (command === "git" && args.join(" ") === "rev-parse HEAD") return `${sourceSha}\n`;
@@ -62,8 +65,10 @@ function commandHarness({
     if (args[0] === "api" && endpoint === `repos/${repository}`) {
       return `${JSON.stringify({ default_branch: "main" })}\n`;
     }
-    if (args[0] === "api" && endpoint === `repos/${repository}/git/ref/heads/main`) {
-      return `${JSON.stringify({ object: { sha: sourceSha, type: "commit" } })}\n`;
+    if (args[0] === "api" && endpoint === `repos/${repository}/branches/main`) {
+      const sha = remoteHeads[Math.min(branchLookups, remoteHeads.length - 1)];
+      branchLookups += 1;
+      return `${JSON.stringify({ commit: { sha }, name: "main", protected: true })}\n`;
     }
     if (args[0] === "api" && endpoint === "user") {
       return `${JSON.stringify({ login: "release-admin" })}\n`;
@@ -565,7 +570,12 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         (argument) => argument === "user" || argument.startsWith(`repos/${repository}`),
       );
       if (endpoint === `repos/${repository}`) {
-        return `${JSON.stringify({ archived: false, default_branch: "main", full_name: repository })}\n`;
+        return `${JSON.stringify({
+          archived: false,
+          default_branch: "main",
+          full_name: repository,
+          id: repositoryId,
+        })}\n`;
       }
       if (endpoint === `repos/${repository}/branches/main`) {
         return `${JSON.stringify({ commit: { sha: sourceSha }, name: "main", protected: true })}\n`;
@@ -615,6 +625,26 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
       else process.env.REMOTE_MARKER = originalRemoteMarker;
       rmSync(checkout, { force: true, recursive: true });
     }
+  });
+
+  it("rejects a foreign release repository before any API call or protected-source import", async () => {
+    let commandCalls = 0;
+    const { runProtectedReleaseEntrypoint } = await import(
+      new URL("../../scripts/admin-release-bootstrap.js", import.meta.url)
+    );
+    await assert.rejects(
+      outsideGitHubActions(() =>
+        runProtectedReleaseEntrypoint({
+          checkout: "/unreachable-before-repository-check",
+          repository: "attacker/example",
+          runCommand: () => {
+            commandCalls += 1;
+          },
+        }),
+      ),
+      /pinned CHZZK repository/i,
+    );
+    assert.equal(commandCalls, 0);
   });
 
   it("uses a private readable Git home when the caller home is inaccessible", () => {
@@ -682,7 +712,12 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         (argument) => argument === "user" || argument.startsWith(`repos/${repository}`),
       );
       if (endpoint === `repos/${repository}`) {
-        return `${JSON.stringify({ archived: false, default_branch: "main", full_name: repository })}\n`;
+        return `${JSON.stringify({
+          archived: false,
+          default_branch: "main",
+          full_name: repository,
+          id: repositoryId,
+        })}\n`;
       }
       if (endpoint === `repos/${repository}/branches/main`) {
         return `${JSON.stringify({ commit: { sha: sourceSha }, name: "main", protected: true })}\n`;
@@ -773,7 +808,12 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         (argument) => argument === "user" || argument.startsWith(`repos/${repository}`),
       );
       if (endpoint === `repos/${repository}`) {
-        return `${JSON.stringify({ archived: false, default_branch: "main", full_name: repository })}\n`;
+        return `${JSON.stringify({
+          archived: false,
+          default_branch: "main",
+          full_name: repository,
+          id: repositoryId,
+        })}\n`;
       }
       if (endpoint === `repos/${repository}/branches/main`) {
         return `${JSON.stringify({ commit: { sha: sourceSha }, name: "main", protected: true })}\n`;
@@ -1700,6 +1740,39 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
     }
   });
 
+  it("refuses to publish when protected main advances before the immutable publication boundary", async () => {
+    const cwd = makeSourceTree();
+    const advancedSha = "c".repeat(40);
+    const harness = commandHarness({
+      immutableEnabled: true,
+      remoteHeads: [sourceSha, sourceSha, advancedSha],
+    });
+    try {
+      await assert.rejects(
+        finalizeStagedReleaseFromAdminPreflight({
+          cwd,
+          inspectReleaseState: stagedInspection,
+          prepareArtifacts,
+          repository,
+          runCommand: harness.run,
+        }),
+        /protected default-branch head changed/i,
+      );
+      assert.equal(harness.calls.some(isReleasePublicationCall), false);
+      assert.equal(
+        harness.calls.some(({ args }) => args.includes(`repos/${repository}/immutable-releases`)),
+        true,
+        "the final protected-head read must follow the immutable-setting preflight",
+      );
+      assert.equal(
+        harness.calls.filter(({ args }) => args.includes(`repos/${repository}/branches/main`)).length,
+        3,
+      );
+    } finally {
+      rmSync(cwd, { force: true, recursive: true });
+    }
+  });
+
   it("refuses publication when the release ID changes during the immediate pre-publication inspection", async () => {
     const cwd = makeSourceTree();
     const harness = commandHarness({ immutableEnabled: true });
@@ -1823,8 +1896,33 @@ describe("out-of-band immutable release finalizer", { concurrency: false }, () =
         args.includes(`repos/${repository}/releases/6001`),
       );
       const attestationIndex = harness.calls.findLastIndex(({ args }) => args[0] === "attestation");
+      const protectedHeadIndices = harness.calls
+        .map(({ args }, index) => (args.includes(`repos/${repository}/branches/main`) ? index : -1))
+        .filter((index) => index >= 0);
+      const finalOperatorIndex = harness.calls.findLastIndex(({ args }) => args.includes("user"));
+      const finalOperatorVariableIndex = harness.calls.findLastIndex(({ args }) =>
+        args.includes(`repos/${repository}/actions/variables/RELEASE_OPERATOR_LOGIN`),
+      );
+      const finalLocalStatusIndex = harness.calls.findLastIndex(
+        ({ command, args }) => command === "git" && args.join(" ") === "status --porcelain",
+      );
       assert.equal(attestationIndex < immutableIndex, true);
-      assert.equal(immutableIndex < publishIndex, true);
+      assert.equal(attestationIndex < protectedHeadIndices[1], true);
+      assert.equal(protectedHeadIndices[1] < finalOperatorIndex, true);
+      assert.equal(finalOperatorIndex < finalOperatorVariableIndex, true);
+      assert.equal(finalOperatorVariableIndex < finalLocalStatusIndex, true);
+      assert.equal(finalLocalStatusIndex < immutableIndex, true);
+      assert.equal(immutableIndex < protectedHeadIndices[2], true);
+      assert.equal(protectedHeadIndices[2] < publishIndex, true);
+      assert.equal(publishIndex, protectedHeadIndices[2] + 1);
+      assert.equal(protectedHeadIndices.length, 3);
+      assert.equal(harness.calls.filter(({ args }) => args.includes("user")).length, 2);
+      assert.equal(
+        harness.calls.filter(
+          ({ command, args }) => command === "git" && args.join(" ") === "status --porcelain",
+        ).length,
+        2,
+      );
     } finally {
       rmSync(cwd, { force: true, recursive: true });
     }

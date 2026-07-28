@@ -1051,21 +1051,37 @@
   }
   function nextMediaSegmentUri(lines, startIndex) {
     let sawByteRange = false;
+    let sawGap = false;
     for (let index = startIndex; index < lines.length; index += 1) {
       const line = lines[index];
       if (line === "" || (line.startsWith("#") && !line.toUpperCase().startsWith("#EXT"))) continue;
+      if (line.toUpperCase() === "#EXT-X-GAP") {
+        sawGap = true;
+        continue;
+      }
       if (!sawByteRange && isValidByteRangeTag(line)) {
         sawByteRange = true;
         continue;
       }
-      return isPlausiblePlaylistUri(line) ? line : null;
+      return isPlausiblePlaylistUri(line) ? { sawGap, uri: line } : null;
     }
     return null;
   }
   function hasUsableMediaSegment(lines) {
+    let nextSegmentIsGap = false;
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
+      if (line.toUpperCase() === "#EXT-X-GAP") {
+        nextSegmentIsGap = true;
+        continue;
+      }
+      if (line !== "" && !line.startsWith("#")) {
+        nextSegmentIsGap = false;
+        continue;
+      }
       if (!line.toUpperCase().startsWith("#EXTINF:")) continue;
+      const segmentIsGap = nextSegmentIsGap;
+      nextSegmentIsGap = false;
       const durationText = line
         .slice(line.indexOf(":") + 1)
         .split(",", 1)[0]
@@ -1074,7 +1090,8 @@
       if (!/^\d+(?:\.\d+)?$/.test(durationText) || !Number.isFinite(duration) || duration <= 0) {
         continue;
       }
-      if (nextMediaSegmentUri(lines, index + 1)) return true;
+      const segment = nextMediaSegmentUri(lines, index + 1);
+      if (segment && !segmentIsGap && !segment.sawGap) return true;
     }
     return false;
   }
@@ -1883,6 +1900,7 @@
       : null;
     const state = touchSessionState({
       ...session,
+      deferredRedirectFailure: reusePrevious ? (previous.deferredRedirectFailure ?? null) : null,
       evidenceKind,
       expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
       lastSuccessfulVerificationSequence: reusePrevious ? previous.lastSuccessfulVerificationSequence : 0,
@@ -2761,6 +2779,7 @@
       const oldestRecord = redirectedRequestsById.get(oldestRequestId);
       if (oldestRecord) oldestRecord.settled = true;
       redirectedRequestsById.delete(oldestRequestId);
+      if (oldestRecord) applyDeferredRedirectedTargetFailure(oldestRecord);
     }
     return record;
   }
@@ -2790,10 +2809,43 @@
     }
     return false;
   }
+  function deferRedirectedTargetFailure(current, record, reason) {
+    if (
+      Number.isSafeInteger(current.deferredRedirectFailure?.sequence) &&
+      current.deferredRedirectFailure.sequence >= record.sequence
+    ) {
+      return;
+    }
+    current.deferredRedirectFailure = {
+      reason,
+      sequence: record.sequence,
+    };
+    touchSessionState(current);
+  }
+  function applyDeferredRedirectedTargetFailure(record) {
+    const current = currentTargetMatchesRecord(record);
+    const deferred = current?.deferredRedirectFailure;
+    if (!Number.isSafeInteger(deferred?.sequence)) return;
+    if (current.lastSuccessfulVerificationSequence > deferred.sequence) {
+      current.deferredRedirectFailure = null;
+      return;
+    }
+    const deferredRecord = {
+      ...current,
+      sequence: deferred.sequence,
+    };
+    if (hasNewerPendingVerification(deferredRecord)) return;
+    current.deferredRedirectFailure = null;
+    invalidateRedirectedTarget(deferredRecord, deferred.reason);
+  }
   function invalidateRedirectedTarget(record, reason = "response-body") {
     const current = currentTargetMatchesRecord(record);
     if (!current) return;
-    if (current.lastSuccessfulVerificationSequence > record.sequence || hasNewerPendingVerification(record)) {
+    if (current.lastSuccessfulVerificationSequence > record.sequence) {
+      return;
+    }
+    if (hasNewerPendingVerification(record)) {
+      deferRedirectedTargetFailure(current, record, reason);
       return;
     }
     activeTargetsBySession.delete(record.key);
@@ -2839,6 +2891,12 @@
       current.lastSuccessfulVerificationSequence,
       record.sequence,
     );
+    if (
+      Number.isSafeInteger(current.deferredRedirectFailure?.sequence) &&
+      current.deferredRedirectFailure.sequence < record.sequence
+    ) {
+      current.deferredRedirectFailure = null;
+    }
     current.validatedNetworkUrls.delete(record.redirectNetworkUrl);
     current.validatedNetworkUrls.set(record.redirectNetworkUrl, record.sequence);
     while (current.validatedNetworkUrls.size > MAX_VALIDATED_TARGET_URLS) {
@@ -2884,6 +2942,7 @@
         source: "redirect-response",
         toQuality: record.targetQuality,
       });
+      applyDeferredRedirectedTargetFailure(record);
       return;
     }
     record.networkFailed = true;

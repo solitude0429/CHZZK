@@ -70,6 +70,21 @@ describe("bounded HLS response evidence", () => {
     );
   });
 
+  it("does not treat full-segment gaps as media evidence but accepts a later usable segment", () => {
+    for (const gapSegment of [
+      "#EXT-X-GAP\n#EXTINF:4.0,\nmissing-before.ts\n",
+      "#EXTINF:4.0,\n#EXT-X-GAP\nmissing-after.ts\n",
+    ]) {
+      assert.equal(isUsableHlsPlaylist(`#EXTM3U\n#EXT-X-TARGETDURATION:4\n${gapSegment}`), false);
+    }
+    assert.equal(
+      isUsableHlsPlaylist(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-GAP\n#EXTINF:4.0,\nmissing.ts\n#EXTINF:4.0,\navailable.ts\n",
+      ),
+      true,
+    );
+  });
+
   it("accepts a master playlist only when a variant URI follows its tag", () => {
     assert.equal(
       isUsableHlsPlaylist(

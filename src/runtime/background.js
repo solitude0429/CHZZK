@@ -436,6 +436,7 @@ function setSessionTarget(session, resolution, token) {
     : null;
   const state = touchSessionState({
     ...session,
+    deferredRedirectFailure: reusePrevious ? previous.deferredRedirectFailure ?? null : null,
     evidenceKind,
     expiresAt: evidenceKind === "url-marker" ? now + markerEvidenceTtlMs() : null,
     lastSuccessfulVerificationSequence: reusePrevious
@@ -1429,6 +1430,7 @@ function rememberRedirectedRequest(details, session, targetState, responseUrl) {
     const oldestRecord = redirectedRequestsById.get(oldestRequestId);
     if (oldestRecord) oldestRecord.settled = true;
     redirectedRequestsById.delete(oldestRequestId);
+    if (oldestRecord) applyDeferredRedirectedTargetFailure(oldestRecord);
   }
   return record;
 }
@@ -1462,13 +1464,45 @@ function hasNewerPendingVerification(record) {
   return false;
 }
 
+function deferRedirectedTargetFailure(current, record, reason) {
+  if (
+    Number.isSafeInteger(current.deferredRedirectFailure?.sequence) &&
+    current.deferredRedirectFailure.sequence >= record.sequence
+  ) {
+    return;
+  }
+  current.deferredRedirectFailure = {
+    reason,
+    sequence: record.sequence,
+  };
+  touchSessionState(current);
+}
+
+function applyDeferredRedirectedTargetFailure(record) {
+  const current = currentTargetMatchesRecord(record);
+  const deferred = current?.deferredRedirectFailure;
+  if (!Number.isSafeInteger(deferred?.sequence)) return;
+  if (current.lastSuccessfulVerificationSequence > deferred.sequence) {
+    current.deferredRedirectFailure = null;
+    return;
+  }
+  const deferredRecord = {
+    ...current,
+    sequence: deferred.sequence,
+  };
+  if (hasNewerPendingVerification(deferredRecord)) return;
+  current.deferredRedirectFailure = null;
+  invalidateRedirectedTarget(deferredRecord, deferred.reason);
+}
+
 function invalidateRedirectedTarget(record, reason = "response-body") {
   const current = currentTargetMatchesRecord(record);
   if (!current) return;
-  if (
-    current.lastSuccessfulVerificationSequence > record.sequence ||
-    hasNewerPendingVerification(record)
-  ) {
+  if (current.lastSuccessfulVerificationSequence > record.sequence) {
+    return;
+  }
+  if (hasNewerPendingVerification(record)) {
+    deferRedirectedTargetFailure(current, record, reason);
     return;
   }
   activeTargetsBySession.delete(record.key);
@@ -1518,6 +1552,12 @@ function renewSuccessfulRedirectTarget(record) {
     current.lastSuccessfulVerificationSequence,
     record.sequence,
   );
+  if (
+    Number.isSafeInteger(current.deferredRedirectFailure?.sequence) &&
+    current.deferredRedirectFailure.sequence < record.sequence
+  ) {
+    current.deferredRedirectFailure = null;
+  }
   current.validatedNetworkUrls.delete(record.redirectNetworkUrl);
   current.validatedNetworkUrls.set(record.redirectNetworkUrl, record.sequence);
   while (current.validatedNetworkUrls.size > MAX_VALIDATED_TARGET_URLS) {
@@ -1563,6 +1603,7 @@ function handleRedirectError(details) {
       source: "redirect-response",
       toQuality: record.targetQuality,
     });
+    applyDeferredRedirectedTargetFailure(record);
     return;
   }
   record.networkFailed = true;

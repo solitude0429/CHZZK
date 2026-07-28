@@ -68,14 +68,7 @@ async function makeExtensionXpi({
   const manifest = {
     ...productionManifest,
     version,
-    permissions: [
-      "storage",
-      "tabs",
-      "webRequest",
-      "webRequestBlocking",
-      chzzkPermission,
-      "https://*.pstatic.net/*",
-    ],
+    permissions: ["storage", "webRequest", "webRequestBlocking", chzzkPermission, "https://*.pstatic.net/*"],
     content_scripts: [
       {
         js: ["site-observer.js"],
@@ -262,7 +255,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 
       if (
         host === "www.chzzk.naver.com" &&
-        (requestUrl.pathname === "/live/test" || requestUrl.pathname === "/lives")
+        (requestUrl.pathname === "/live/test" ||
+          requestUrl.pathname === "/live/gap-test" ||
+          requestUrl.pathname === "/lives")
       ) {
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK E2E</title>
@@ -271,8 +266,12 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 (async () => {
   try {
     const liveToMiniTransition = location.pathname === "/live/test";
+    const gapScenario = location.pathname === "/live/gap-test";
+    const fixtureName = gapScenario ? "gap-fixture" : "fixture";
     const masterUrl =
-      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/hls_playlist.m3u8?Policy=synthetic-master" +
+      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/" +
+      fixtureName +
+      "/hls_playlist.m3u8?Policy=synthetic-master" +
       (liveToMiniTransition ? "&transition=live-to-mini" : "");
     const masterResponse = await fetch(masterUrl);
     if (liveToMiniTransition) {
@@ -283,17 +282,21 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       throw new Error("master fixture failed");
     }
     const mediaUrl =
-      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/fixture/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F#client-only-fragment";
+      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/" +
+      fixtureName +
+      "/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F#client-only-fragment";
     const cancelledUrl = mediaUrl.replace(
       "#client-only-fragment",
       "&cancel=1#client-only-fragment",
     );
-    const controller = new AbortController();
-    const cancelledRequest = fetch(cancelledUrl, { signal: controller.signal })
-      .then(() => "unexpected-success", (error) => error.name);
-    setTimeout(() => controller.abort(), 300);
-    if (await cancelledRequest !== "AbortError") {
-      throw new Error("cancel fixture failed");
+    if (!gapScenario) {
+      const controller = new AbortController();
+      const cancelledRequest = fetch(cancelledUrl, { signal: controller.signal })
+        .then(() => "unexpected-success", (error) => error.name);
+      setTimeout(() => controller.abort(), 300);
+      if (await cancelledRequest !== "AbortError") {
+        throw new Error("cancel fixture failed");
+      }
     }
     let finalBody = "";
     let finalStatus = 0;
@@ -355,8 +358,11 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             }
             response.statusCode = 200;
             response.setHeader("content-type", "application/vnd.apple.mpegurl");
+            const gapOnly = requestUrl.pathname.includes("/gap-fixture/") && quality === "1080p";
             response.end(
-              `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
+              gapOnly
+                ? `#EXTM3U\n# fixture-quality=${quality}-gap\n#EXT-X-TARGETDURATION:6\n#EXT-X-GAP\n#EXTINF:6.0,\nmissing-${quality}.ts\n`
+                : `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
             );
           };
           if (requestUrl.searchParams.get("cancel") === "1") {
@@ -766,6 +772,62 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       "the master body was not gated on a background-observed live-to-mini transition",
     );
 
+    const requestCountBeforeGapScenario = requests.length;
+    await driver.setContext("content");
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/live/gap-test`,
+    });
+    const gapPlaybackResult = await poll(
+      async () => {
+        const text = await driver.execute(
+          "return document.getElementById('result') && document.getElementById('result').textContent;",
+        );
+        return text && text !== "pending" ? text : null;
+      },
+      { intervalMs: 100, timeoutMs: 15000 },
+    );
+    assert.match(
+      gapPlaybackResult,
+      /^200:#EXTM3U\n# fixture-quality=720p/m,
+      "Firefox accepted a full-segment GAP-only 1080p response instead of falling back",
+    );
+    const gapScenarioRequests = requests.slice(requestCountBeforeGapScenario);
+    const gapOnlyResponseIndex = gapScenarioRequests.findIndex(
+      (request) =>
+        request.host === "nvelop-livecloud.pstatic.net" && request.path.includes("/gap-fixture/1080p/"),
+    );
+    const usableFallbackIndex = gapScenarioRequests.findIndex(
+      (request) =>
+        request.host === "nvelop-livecloud.pstatic.net" && request.path.includes("/gap-fixture/720p/"),
+    );
+    assert.equal(gapOnlyResponseIndex >= 0, true, "Firefox did not exercise the 1080p GAP response");
+    assert.equal(
+      usableFallbackIndex > gapOnlyResponseIndex,
+      true,
+      "Firefox did not request usable 720p media after the 1080p GAP response",
+    );
+    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+    const gapDiagnostics = JSON.parse(
+      await poll(
+        async () => {
+          const value = await driver.execute("return document.getElementById('payload')?.value || null;");
+          return value ? value : null;
+        },
+        { timeoutMs: 5000 },
+      ),
+    );
+    assert.equal(
+      gapDiagnostics.runtimeTransitions.some(
+        (transition) =>
+          transition.action === "invalidated" &&
+          transition.fromQuality === "1080p" &&
+          transition.reason === "response-body" &&
+          transition.source === "redirect-response",
+      ),
+      true,
+      "the GAP-only response did not invalidate the selected 1080p target",
+    );
+
     await driver.setContext("content");
     await driver.command("POST", "/url", { url: "about:blank" });
     const updateResult = await triggerAddonUpdate(driver);
@@ -855,6 +917,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
         clientFragmentNormalized: true,
         firefox: basename(firefoxBinary),
         functionalOnly: true,
+        gapSegmentFallback: "1080p-gap-to-720p",
         hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,

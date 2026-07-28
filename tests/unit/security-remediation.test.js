@@ -154,9 +154,15 @@ describe("release and repository security guardrails", () => {
     assert.match(ignore, /^web-ext-artifacts\/$/m);
   });
 
-  it("deploys only an attested exact release through the transactional library", () => {
+  it("deploys only an attested exact release through the protected transactional boundary", () => {
+    const bootstrap = read("scripts/internal-update-deploy-bootstrap.js");
     const cli = read("scripts/deploy-internal-updates.js");
+    const packageJson = JSON.parse(read("package.json"));
     const transaction = read("scripts/lib/update-deployment.js");
+    assert.equal(Object.hasOwn(packageJson.scripts, "deploy:updates:internal"), false);
+    assert.match(bootstrap, /\/usr\/bin\/env -i/);
+    assert.match(bootstrap, /decodeProtectedDeploymentSource/);
+    assert.match(cli, /not memory-sealed by the bootstrap/);
     assert.match(cli, /"attestation",\s*"verify"/);
     assert.match(cli, /--source-digest/);
     assert.match(cli, /isImmutable/);

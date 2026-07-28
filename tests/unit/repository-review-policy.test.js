@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   REQUIRED_GITHUB_ACTIONS_CHECKS,
+  REQUIRED_SIGNING_SECRET_NAMES,
   planRepositorySettings,
 } from "../../scripts/configure-repository.js";
 
@@ -18,7 +19,12 @@ function repositoryState(checks) {
     branchProtection: {
       enforce_admins: { enabled: true },
       required_conversation_resolution: { enabled: true },
-      required_pull_request_reviews: null,
+      required_pull_request_reviews: {
+        dismiss_stale_reviews: false,
+        require_code_owner_reviews: false,
+        required_approving_review_count: 0,
+        require_last_push_approval: false,
+      },
     },
     immutableReleases: { enabled: true },
     labels: [],
@@ -28,11 +34,20 @@ function repositoryState(checks) {
       allow_squash_merge: true,
       delete_branch_on_merge: true,
     },
+    repositorySecrets: [],
     selectedActions: {
       github_owned_allowed: true,
       patterns_allowed: [],
       verified_allowed: false,
     },
+    signingEnvironment: {
+      deployment_branch_policy: {
+        custom_branch_policies: false,
+        protected_branches: true,
+      },
+      name: "firefox-signing",
+    },
+    signingEnvironmentSecrets: REQUIRED_SIGNING_SECRET_NAMES.map((name) => ({ name })),
     statusProtection: { checks, strict: true },
     variables: [{ name: "RELEASE_OPERATOR_LOGIN", value: "release-operator" }],
     workflowPermissions: {
@@ -84,8 +99,9 @@ describe("repository review policy", () => {
     );
   });
 
-  it("routes the public configure command directly through the atomic configurator", () => {
+  it("exposes repository configuration only through the external protected bootstrap", () => {
     const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
-    assert.equal(packageJson.scripts["configure:repository"], "node scripts/configure-repository.js");
+    assert.equal(Object.hasOwn(packageJson.scripts, "configure:repository"), false);
+    assert.equal(existsSync(join(rootDir, "scripts/repository-settings-bootstrap.js")), true);
   });
 });
