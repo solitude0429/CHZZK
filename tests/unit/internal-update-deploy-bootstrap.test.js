@@ -39,10 +39,22 @@ const sourcePaths = [
   "scripts/lib/update-deployment.js",
   "scripts/lib/update-manifest.js",
 ];
+
+function firstAvailableExecutable(candidates, name) {
+  for (const candidate of candidates) {
+    try {
+      return realpathSync(candidate);
+    } catch {
+      // Match the production bootstrap's fixed system-path fallback.
+    }
+  }
+  throw new Error(`No fixed system ${name} executable is available for bootstrap tests`);
+}
+
 const trustedExecutables = Object.freeze({
-  gh: realpathSync("/usr/local/bin/gh"),
-  git: realpathSync("/usr/bin/git"),
-  node: realpathSync("/usr/bin/node"),
+  gh: firstAvailableExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"], "gh"),
+  git: firstAvailableExecutable(["/usr/bin/git", "/bin/git"], "git"),
+  node: firstAvailableExecutable(["/usr/bin/node", "/usr/local/bin/node", "/bin/node"], "node"),
 });
 
 function gitBlobSha(bytes) {
