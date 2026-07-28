@@ -1,0 +1,129 @@
+name: Commit validated final review fixes
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/commit-final-review-fixes.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-final-review-fixes-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  commit:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          name: final-review-fixes-126e747fb33f0c398172d5ff3fa4d75f3c7a5988
+          path: downloaded
+          repository: ${{ github.repository }}
+          run-id: 30325631279
+      - name: Apply the validated artifact through the Contents API
+        env:
+          CHZZK_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import io
+          import json
+          import os
+          import tarfile
+          import urllib.parse
+          import urllib.request
+
+          archive = open("downloaded/reviewed.tar", "rb").read()
+          if hashlib.sha256(archive).hexdigest() != "f565838f5c030730cedc80e143070fbf13bfe9b2bd9278a8bf3e9c8d36d6b7ea":
+              raise SystemExit("validated reviewed artifact digest mismatch")
+
+          allowed = {
+              ".github/PULL_REQUEST_TEMPLATE/hardening.md",
+              ".github/workflows/exact-head-review.yml",
+              "docs/HARDENING.md",
+              "docs/OPERATIONS.md",
+              "docs/SECURITY.md",
+              "scripts/verify-exact-head-review.js",
+              "tests/unit/exact-head-review.test.js",
+              "tests/unit/windows-wrapper-policy.test.js",
+          }
+          files = {}
+          with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+              for member in tar.getmembers():
+                  if not member.isfile():
+                      continue
+                  path = member.name.removeprefix("./")
+                  if path not in allowed or path in files:
+                      raise SystemExit(f"unexpected reviewed artifact path: {path}")
+                  files[path] = tar.extractfile(member).read()
+          if set(files) != allowed:
+              raise SystemExit("validated reviewed artifact file set mismatch")
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          branch = os.environ["CHZZK_HEAD_BRANCH"]
+          token = os.environ["GITHUB_TOKEN"]
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+              "User-Agent": "chzzk-final-review-fixes",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def request(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}", data=data, headers=headers, method=method
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          encoded_branch = urllib.parse.quote(branch, safe="")
+          for path in sorted(files):
+              encoded_path = urllib.parse.quote(path, safe="/")
+              current = request(
+                  "GET",
+                  f"/repos/{repository}/contents/{encoded_path}?ref={encoded_branch}",
+              )
+              request(
+                  "PUT",
+                  f"/repos/{repository}/contents/{encoded_path}",
+                  {
+                      "branch": branch,
+                      "content": base64.b64encode(files[path]).decode(),
+                      "message": f"Apply final review fix: {path}",
+                      "sha": current["sha"],
+                  },
+              )
+
+          for path in [
+              ".github/workflows/address-final-review-findings.yml",
+              ".github/workflows/commit-final-review-fixes.yml",
+          ]:
+              encoded_path = urllib.parse.quote(path, safe="/")
+              current = request(
+                  "GET",
+                  f"/repos/{repository}/contents/{encoded_path}?ref={encoded_branch}",
+              )
+              request(
+                  "DELETE",
+                  f"/repos/{repository}/contents/{encoded_path}",
+                  {
+                      "branch": branch,
+                      "message": f"Remove temporary finalizer: {path}",
+                      "sha": current["sha"],
+                  },
+              )
+          PY
