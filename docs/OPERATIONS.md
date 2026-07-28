@@ -3,7 +3,7 @@
 ## Release checklist
 
 1. Start from a clean branch based on the exact remote `main`.
-2. Choose one canonical SemVer change and update `package.json`, `package-lock.json`, and `manifest.json` together.
+2. Choose one canonical SemVer change and update `package.json`, `package-lock.json`, `manifest.json`, and the `RELEASE_VERSION` constant in `scripts/lib/release-finalize-state.js` together.
 3. Run the complete local gate:
 
 ```bash

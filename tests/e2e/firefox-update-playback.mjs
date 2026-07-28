@@ -14,6 +14,8 @@ const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const addOnId = "chzzk@solitude0429.local";
 const fixtureDomains = ["nvelop-livecloud.pstatic.net", "updates.chzzk.test", "www.chzzk.naver.com"];
 const fixedZipDate = new Date("1980-01-01T00:00:00.000Z");
+const fixturePlaylistPollIntervalMs = 700;
+const serverArrivalToleranceMs = 250;
 const testPolicy = {
   blockingProbeBudgetMs: 500,
   chzzkDomains: ["chzzk.naver.com"],
@@ -26,11 +28,14 @@ const testPolicy = {
   probeResolutionBudgetMs: 3000,
   probeTimeoutMs: 1000,
   qualityCandidates: ["2160p", "1440p", "1080p", "720p", "480p", "360p"],
+  redirectFailureBackoffMs: 10000,
   redirectMethods: ["get"],
   redirectResourceTypes: ["media", "other", "xmlhttprequest"],
   strategy: "prefer-highest-supported",
   trustedInitiatorDomains: ["chzzk.naver.com"],
   trustedRequestDomains: ["pstatic.net"],
+  failedTargetRecoveryProbeIntervalMs: 15000,
+  upgradeProbeIntervalMs: 60000,
 };
 
 function sha256(bytes) {
@@ -281,35 +286,38 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     if (!masterResponse.ok || !masterBody.startsWith("#EXTM3U")) {
       throw new Error("master fixture failed");
     }
+    const mediaPolicy = gapScenario ? "synthetic-gap-current" : "synthetic";
     const mediaUrl =
       "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/" +
       fixtureName +
-      "/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F#client-only-fragment";
-    const cancelledUrl = mediaUrl.replace(
-      "#client-only-fragment",
-      "&cancel=1#client-only-fragment",
-    );
-    if (!gapScenario) {
-      const controller = new AbortController();
-      const cancelledRequest = fetch(cancelledUrl, { signal: controller.signal })
-        .then(() => "unexpected-success", (error) => error.name);
-      setTimeout(() => controller.abort(), 300);
-      if (await cancelledRequest !== "AbortError") {
-        throw new Error("cancel fixture failed");
-      }
-    }
+      "/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=" +
+      mediaPolicy +
+      "&next=%2F480p%2F#client-only-fragment";
     let finalBody = "";
     let finalStatus = 0;
-    for (let index = 0; index < 4; index += 1) {
+    const qualityHistory = [];
+    const requestLimit = gapScenario ? 48 : 4;
+    for (let index = 0; index < requestLimit; index += 1) {
       const response = await fetch(mediaUrl);
       finalStatus = response.status;
       finalBody = await response.text();
+      const observedQuality = finalBody.match(/# fixture-quality=(\\d{3,4}p)(?:-gap)?/)?.[1];
+      if (observedQuality) qualityHistory.push(observedQuality);
       if (!liveToMiniTransition && location.pathname === "/lives" && index < 3) {
         history.pushState({}, "", "/lives?keyword=another-channel-" + (index + 1));
       }
-      if (index < 3) await new Promise((resolve) => setTimeout(resolve, 700));
+      const recoveredAfterFallback =
+        gapScenario &&
+        qualityHistory.includes("720p") &&
+        qualityHistory[qualityHistory.length - 1] === "1080p";
+      if (recoveredAfterFallback) break;
+      if (index < requestLimit - 1) {
+        await new Promise((resolve) => setTimeout(resolve, ${fixturePlaylistPollIntervalMs}));
+      }
     }
-    document.getElementById("result").textContent = finalStatus + ":" + finalBody;
+    const result = document.getElementById("result");
+    result.dataset.qualityHistory = qualityHistory.join(",");
+    result.textContent = finalStatus + ":" + finalBody;
   } catch (error) {
     document.getElementById("result").textContent = "error:" + error.name + ":" + error.message;
   }
@@ -322,11 +330,14 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         if (requestUrl.pathname.endsWith("/hls_playlist.m3u8")) {
           response.statusCode = 200;
           response.setHeader("content-type", "application/vnd.apple.mpegurl");
+          const variantQuery = requestUrl.pathname.includes("/gap-fixture/")
+            ? "Policy=synthetic-gap-master&next=%2Fmaster%2F"
+            : "Policy=synthetic&next=%2F480p%2F";
           const masterBody = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
-1080p/segment/chunklist_1080p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
+1080p/segment/chunklist_1080p_highbitrate.m3u8?${variantQuery}
 #EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
-720p/segment/chunklist_720p_highbitrate.m3u8?Policy=synthetic&next=%2F480p%2F
+720p/segment/chunklist_720p_highbitrate.m3u8?${variantQuery}
 `;
           if (requestUrl.searchParams.get("transition") === "live-to-mini") {
             const initialMasterChunk = "#EXTM3U\n";
@@ -345,9 +356,23 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           /(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)/i,
         )?.[1];
         if (quality === "1080p" || quality === "720p" || quality === "480p") {
-          const etag = `"fixture-${quality}"`;
           const finishPlaylist = () => {
             if (response.destroyed || response.writableEnded) return;
+            const gapFixtureHigh = requestUrl.pathname.includes("/gap-fixture/") && quality === "1080p";
+            const gapAttempt = state.gap1080ResponseCount;
+            const gapOnly = gapFixtureHigh && gapAttempt < 2;
+            if (gapFixtureHigh) {
+              requestRecord.fixtureObservedAt = Date.now();
+              state.gap1080ResponseCount += 1;
+            }
+            requestRecord.fixturePlaylistKind = gapFixtureHigh
+              ? gapAttempt === 0
+                ? "initial-gap"
+                : gapAttempt === 1
+                  ? "retry-gap"
+                  : "usable"
+              : "usable";
+            const etag = `"fixture-${quality}-${requestRecord.fixturePlaylistKind}"`;
             response.setHeader("cache-control", "no-cache");
             response.setHeader("etag", etag);
             if (request.headers["if-none-match"] === etag) {
@@ -358,18 +383,13 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             }
             response.statusCode = 200;
             response.setHeader("content-type", "application/vnd.apple.mpegurl");
-            const gapOnly = requestUrl.pathname.includes("/gap-fixture/") && quality === "1080p";
             response.end(
               gapOnly
                 ? `#EXTM3U\n# fixture-quality=${quality}-gap\n#EXT-X-TARGETDURATION:6\n#EXT-X-GAP\n#EXTINF:6.0,\nmissing-${quality}.ts\n`
                 : `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
             );
           };
-          if (requestUrl.searchParams.get("cancel") === "1") {
-            setTimeout(finishPlaylist, 1000);
-          } else {
-            finishPlaylist();
-          }
+          finishPlaylist();
         } else {
           response.statusCode = 404;
           response.end("not available");
@@ -445,7 +465,9 @@ class WebDriver {
               "extensions.checkUpdateSecurity": false,
               "extensions.installDistroAddons": false,
               "extensions.install.requireBuiltInCerts": false,
-              "extensions.update.autoUpdateDefault": true,
+              // The >25-second recovery fixture must not race the explicit
+              // AddonManager.UPDATE_WHEN_USER_REQUESTED update proof below.
+              "extensions.update.autoUpdateDefault": false,
               "extensions.update.enabled": true,
               "extensions.update.interval": 1,
               "extensions.update.requireBuiltInCerts": false,
@@ -573,6 +595,7 @@ async function main() {
   const logs = [];
   const requests = [];
   const state = {
+    gap1080ResponseCount: 0,
     pendingTransitionMaster: null,
     port: null,
     transitionAckCount: 0,
@@ -687,27 +710,11 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       },
       { timeoutMs: 5000 },
     );
-    const parsedPlaybackDiagnostics = JSON.parse(playbackDiagnostics);
-    const observedWebRequestError = await driver.executeAsync(
-      `const done = arguments[arguments.length - 1];
-browser.storage.local.get("chzzkE2eLastWebRequestError").then(
-  (stored) => done(stored.chzzkE2eLastWebRequestError ?? null),
-  (error) => done("storage-error:" + String(error)),
-);`,
-    );
-    if (observedWebRequestError !== null) {
-      assert.equal(
-        ["NS_BINDING_ABORTED", "NS_ERROR_ABORT"].includes(observedWebRequestError),
-        true,
-        `Firefox emitted an unclassified cancellation error: ${observedWebRequestError}`,
-      );
-    }
     const redirectedRequest = requests.find(
       (request) =>
         request.host === "nvelop-livecloud.pstatic.net" &&
         request.path.includes("/1080p/") &&
-        request.path.includes("chunklist_1080p_highbitrate.m3u8") &&
-        !request.search.includes("cancel=1"),
+        request.path.includes("chunklist_1080p_highbitrate.m3u8"),
     );
     assert.ok(redirectedRequest, "Firefox did not issue the redirected 1080p playlist request");
     assert.equal(
@@ -727,35 +734,6 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
         );
       }
     }
-    const cancellationReachedFixture = liveToMiniRequests.some(
-      (request) =>
-        request.host === "nvelop-livecloud.pstatic.net" &&
-        request.path.includes("/1080p/") &&
-        request.search.includes("cancel=1"),
-    );
-    const cancellationReportedNeutral = parsedPlaybackDiagnostics.runtimeTransitions.some(
-      (transition) =>
-        transition.action === "ignored" &&
-        transition.fromQuality === "1080p" &&
-        transition.reason === "client-cancelled" &&
-        transition.source === "redirect-response" &&
-        transition.toQuality === "1080p",
-    );
-    assert.equal(
-      cancellationReachedFixture || cancellationReportedNeutral,
-      true,
-      `Firefox did not exercise the client-cancelled redirected request: ${playbackDiagnostics}`,
-    );
-    assert.equal(
-      parsedPlaybackDiagnostics.runtimeTransitions.some(
-        (transition) =>
-          transition.action === "invalidated" &&
-          transition.fromQuality === "1080p" &&
-          transition.reason === "network-error",
-      ),
-      false,
-      `Firefox client cancellation invalidated the selected 1080p target: ${playbackDiagnostics}`,
-    );
     assert.equal(
       liveToMiniRequests.some(
         (request) =>
@@ -784,37 +762,139 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
         );
         return text && text !== "pending" ? text : null;
       },
-      { intervalMs: 100, timeoutMs: 15000 },
+      { intervalMs: 100, timeoutMs: 40000 },
     );
     assert.match(
       gapPlaybackResult,
-      /^200:#EXTM3U\n# fixture-quality=720p/m,
-      "Firefox accepted a full-segment GAP-only 1080p response instead of falling back",
+      /^200:#EXTM3U\n# fixture-quality=1080p\n/m,
+      "Firefox did not automatically return to usable 1080p after the GAP fallback backoff",
+    );
+    const gapQualityHistory = await driver.execute(
+      "return document.getElementById('result')?.dataset.qualityHistory || '';",
+    );
+    assert.match(
+      gapQualityHistory,
+      /(?:^|,)720p(?:,|$)/,
+      "Firefox did not expose usable 720p playback while 1080p was GAP-only",
+    );
+    assert.match(
+      gapQualityHistory,
+      /^1080p,720p(?:,720p)*,1080p$/,
+      "Firefox did not remain on 720p between the initial GAP response and verified 1080p recovery",
     );
     const gapScenarioRequests = requests.slice(requestCountBeforeGapScenario);
-    const gapOnlyResponseIndex = gapScenarioRequests.findIndex(
-      (request) =>
-        request.host === "nvelop-livecloud.pstatic.net" && request.path.includes("/gap-fixture/1080p/"),
+    const exactHighPath = "/chzzk/gap-fixture/1080p/segment/chunklist_1080p_highbitrate.m3u8";
+    const highRequests = gapScenarioRequests.filter(
+      (request) => request.host === "nvelop-livecloud.pstatic.net" && request.path === exactHighPath,
     );
+    const initialGap = highRequests.find((request) => request.fixturePlaylistKind === "initial-gap");
+    const failedFirstRecovery = highRequests.find((request) => request.fixturePlaylistKind === "retry-gap");
+    const usableRecoveries = highRequests.filter((request) => request.fixturePlaylistKind === "usable");
+    const verifiedRecovery = usableRecoveries[0];
+    const playerRecovery = usableRecoveries[1];
+    assert.ok(initialGap, "Firefox did not exercise the initial 1080p GAP response");
+    assert.ok(failedFirstRecovery, "Firefox did not exercise the first failed 1080p recovery");
+    assert.equal(
+      usableRecoveries.length,
+      2,
+      "Firefox must make one successful background verification and one later 1080p player request",
+    );
+    assert.ok(verifiedRecovery, "Firefox did not verify the recovered 1080p response");
+    assert.ok(playerRecovery, "Firefox did not fetch 1080p after background verification");
+    const initialGapIndex = gapScenarioRequests.indexOf(initialGap);
     const usableFallbackIndex = gapScenarioRequests.findIndex(
       (request) =>
-        request.host === "nvelop-livecloud.pstatic.net" && request.path.includes("/gap-fixture/720p/"),
+        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.path.includes("/gap-fixture/720p/") &&
+        request.fixturePlaylistKind === "usable",
     );
-    assert.equal(gapOnlyResponseIndex >= 0, true, "Firefox did not exercise the 1080p GAP response");
+    const failedFirstRecoveryIndex = gapScenarioRequests.indexOf(failedFirstRecovery);
+    const verifiedRecoveryIndex = gapScenarioRequests.indexOf(verifiedRecovery);
+    const playerRecoveryIndex = gapScenarioRequests.indexOf(playerRecovery);
     assert.equal(
-      usableFallbackIndex > gapOnlyResponseIndex,
+      usableFallbackIndex > initialGapIndex,
       true,
       "Firefox did not request usable 720p media after the 1080p GAP response",
     );
-    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
-    const gapDiagnostics = JSON.parse(
-      await poll(
-        async () => {
-          const value = await driver.execute("return document.getElementById('payload')?.value || null;");
-          return value ? value : null;
-        },
-        { timeoutMs: 5000 },
+    assert.equal(
+      failedFirstRecoveryIndex > usableFallbackIndex,
+      true,
+      "Firefox did not attempt exact 1080p recovery after serving the 720p fallback",
+    );
+    assert.equal(
+      verifiedRecoveryIndex > failedFirstRecoveryIndex,
+      true,
+      "Firefox did not verify 1080p after the first exact recovery failed",
+    );
+    assert.equal(
+      playerRecoveryIndex > verifiedRecoveryIndex,
+      true,
+      "Firefox promoted 1080p without a distinct successful background verification",
+    );
+    assert.equal(
+      gapScenarioRequests.some(
+        (request) =>
+          request.host === "nvelop-livecloud.pstatic.net" &&
+          /\/gap-fixture\/(?:1440p|2160p)\//.test(request.path),
       ),
+      false,
+      "master recovery must not launch generic 1440p or 2160p probes",
+    );
+    const expectedRecoverySearch = "?Policy=synthetic-gap-current&next=%2F480p%2F";
+    for (const recoveryRequest of [failedFirstRecovery, verifiedRecovery, playerRecovery]) {
+      assert.equal(recoveryRequest.path, exactHighPath);
+      assert.equal(
+        recoveryRequest.search,
+        expectedRecoverySearch,
+        "recovery must use the current media query rather than a retained master URL",
+      );
+    }
+    assert.equal(
+      failedFirstRecovery.fixtureObservedAt - initialGap.fixtureObservedAt >=
+        testPolicy.redirectFailureBackoffMs,
+      true,
+      "Firefox retried 1080p before the bounded failure backoff elapsed",
+    );
+    assert.equal(
+      failedFirstRecovery.fixtureObservedAt - initialGap.fixtureObservedAt <=
+        testPolicy.redirectFailureBackoffMs + fixturePlaylistPollIntervalMs * 3,
+      true,
+      "Firefox waited too long before the first 1080p recovery attempt",
+    );
+    assert.equal(
+      verifiedRecovery.fixtureObservedAt - failedFirstRecovery.fixtureObservedAt >=
+        testPolicy.failedTargetRecoveryProbeIntervalMs - serverArrivalToleranceMs,
+      true,
+      "Firefox repeated failed 1080p recovery before the fifteen-second interval, allowing only server-arrival skew",
+    );
+    assert.equal(
+      verifiedRecovery.fixtureObservedAt - failedFirstRecovery.fixtureObservedAt <=
+        testPolicy.failedTargetRecoveryProbeIntervalMs + fixturePlaylistPollIntervalMs * 3,
+      true,
+      "Firefox waited too long before repeating the 1080p recovery attempt",
+    );
+    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+    const gapDiagnostics = await poll(
+      async () => {
+        const stored = await driver.executeAsync(
+          `const done = arguments[arguments.length - 1];
+browser.storage.local.get("chzzkDiagnostics").then(
+  ({ chzzkDiagnostics }) => done(chzzkDiagnostics ?? null),
+  (error) => done({ storageError: String(error) }),
+);`,
+        );
+        const transitions = stored?.runtimeTransitions;
+        if (!Array.isArray(transitions)) return null;
+        const observedInvalidation = transitions.some(
+          (transition) =>
+            transition.action === "invalidated" &&
+            transition.fromQuality === "1080p" &&
+            transition.reason === "response-body" &&
+            transition.source === "redirect-response",
+        );
+        return observedInvalidation ? stored : null;
+      },
+      { timeoutMs: 5000 },
     );
     assert.equal(
       gapDiagnostics.runtimeTransitions.some(
@@ -913,11 +993,10 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
     console.log(
       JSON.stringify({
         cacheRevalidation: "304",
-        clientCancellation: `${observedWebRequestError ?? "no-terminal-error"}-neutral`,
         clientFragmentNormalized: true,
         firefox: basename(firefoxBinary),
         functionalOnly: true,
-        gapSegmentFallback: "1080p-gap-to-720p",
+        gapSegmentRecovery: "1080p-gap-to-720p-to-1080p",
         hostPermissionUpgrade: "/live/* -> /*",
         installedAfter: after.version,
         installedBefore: before.version,

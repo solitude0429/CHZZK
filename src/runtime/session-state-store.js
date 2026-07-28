@@ -50,12 +50,18 @@ export function createSessionStateStore({
 
   const activeTargetsBySession = new Map();
   const failedTargetsBySession = new Map();
+  const masterLineageBySession = new Map();
   const resolutionBySession = new Map();
   let sessionAccessSequence = 0;
 
   function sessionStateEntries() {
     const byKey = new Map();
-    for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
+    for (const map of [
+      activeTargetsBySession,
+      failedTargetsBySession,
+      masterLineageBySession,
+      resolutionBySession,
+    ]) {
       for (const [key, state] of map) {
         const entry = byKey.get(key) ?? {
           key,
@@ -74,7 +80,12 @@ export function createSessionStateStore({
 
   function normalizeAccessOrder() {
     const groupsByKey = new Map();
-    for (const map of [activeTargetsBySession, failedTargetsBySession, resolutionBySession]) {
+    for (const map of [
+      activeTargetsBySession,
+      failedTargetsBySession,
+      masterLineageBySession,
+      resolutionBySession,
+    ]) {
       for (const [key, state] of map) {
         const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
         group.lastTouchedOrder = Math.max(
@@ -117,6 +128,7 @@ export function createSessionStateStore({
   function remove(sessionKey) {
     const removedActiveTarget = activeTargetsBySession.delete(sessionKey);
     failedTargetsBySession.delete(sessionKey);
+    masterLineageBySession.delete(sessionKey);
     const resolution = resolutionBySession.get(sessionKey);
     resolution?.controller.abort();
     resolutionBySession.delete(sessionKey);
@@ -138,7 +150,9 @@ export function createSessionStateStore({
         continue;
       }
       for (const [quality, expiresAt] of state.targets) {
-        if (!Number.isFinite(expiresAt) || expiresAt <= now) state.targets.delete(quality);
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+          state.targets.delete(quality);
+        }
       }
       if (state.targets.size === 0) failedTargetsBySession.delete(key);
     }
@@ -184,6 +198,7 @@ export function createSessionStateStore({
     enforceLimits,
     failedTargetsBySession,
     forgetRedirectedRequests,
+    masterLineageBySession,
     remove,
     resolutionBySession,
     sweepExpired,
