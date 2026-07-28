@@ -113,9 +113,16 @@ describe("release and repository security guardrails", () => {
   });
 
   it("removes retired, duplicate, and signal-poor automation", () => {
+    assert.deepEqual(
+      readdirSync(join(rootDir, ".github/workflows"))
+        .filter((entry) => /\.ya?ml$/.test(entry))
+        .sort(),
+      ["ci.yml", "codeql.yml", "dependency-review.yml", "sign-unlisted.yml"],
+    );
     for (const path of [
       ".github/dependabot.yml",
       ".github/workflows/generate-package-lock.yml",
+      ".github/workflows/exact-head-review.yml",
       ".github/workflows/review-gate.yml",
       ".github/workflows/scorecard.yml",
       ".github/workflows/sync-generated-release-files.yml",
@@ -126,6 +133,7 @@ describe("release and repository security guardrails", () => {
       "scripts/check-review-gate.js",
       "scripts/configure-review-gate.js",
       "scripts/lib/review-gate.js",
+      "scripts/verify-exact-head-review.js",
     ]) {
       assert.equal(existsSync(join(rootDir, path)), false, path);
     }

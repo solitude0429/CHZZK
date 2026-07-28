@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   REQUIRED_GITHUB_ACTIONS_CHECKS,
@@ -8,6 +10,7 @@ import {
 } from "../../scripts/configure-repository.js";
 
 const githubActionsAppId = 15368;
+const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function repositoryState(checks) {
   return {
@@ -46,20 +49,19 @@ function desiredChecks() {
   }));
 }
 
-describe("exact-head review branch protection", () => {
-  it("includes exact-head-review in the single atomic required-check plan", () => {
+describe("repository review policy", () => {
+  it("keeps only deterministic GitHub Actions checks in branch protection", () => {
     assert.deepEqual(REQUIRED_GITHUB_ACTIONS_CHECKS, [
       "analyze",
       "dependency-review",
-      "exact-head-review",
       "firefox-e2e",
       "verify",
     ]);
-    const changes = planRepositorySettings(
-      repositoryState(desiredChecks().filter((check) => check.context !== "exact-head-review")),
-      githubActionsAppId,
-      "release-operator",
-    );
+    const state = repositoryState([
+      ...desiredChecks(),
+      { app_id: githubActionsAppId, context: "exact-head-review" },
+    ]);
+    const changes = planRepositorySettings(state, githubActionsAppId, "release-operator");
     assert.deepEqual(changes, [
       {
         checks: desiredChecks(),
@@ -69,7 +71,13 @@ describe("exact-head review branch protection", () => {
     ]);
   });
 
-  it("is idempotent when the full source-bound check set is installed", () => {
+  it("retires the asynchronous commit-scoped review gate", () => {
+    for (const path of [".github/workflows/exact-head-review.yml", "scripts/verify-exact-head-review.js"]) {
+      assert.equal(existsSync(join(rootDir, path)), false, path);
+    }
+  });
+
+  it("is idempotent when the deterministic check set is installed", () => {
     assert.deepEqual(
       planRepositorySettings(repositoryState(desiredChecks()), githubActionsAppId, "release-operator"),
       [],

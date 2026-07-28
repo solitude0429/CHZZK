@@ -27,6 +27,15 @@ describe("semantic workflow policy", () => {
     assert.doesNotThrow(() => validateWorkflowDocument(validReadOnlyWorkflow(), "fixture.yml"));
   });
 
+  it("rejects unsupported webhook events before GitHub records a zero-job failure", () => {
+    const workflow = validReadOnlyWorkflow();
+    workflow.on = { pull_request_review_thread: { types: ["resolved"] } };
+    assert.throws(
+      () => validateWorkflowDocument(workflow, "fixture.yml"),
+      /event pull_request_review_thread.*not approved or supported/i,
+    );
+  });
+
   it("rejects package installation or project builds in a write-capable job", () => {
     const workflow = validReadOnlyWorkflow();
     workflow.jobs.verify.permissions = { contents: "write" };
