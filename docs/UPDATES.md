@@ -28,9 +28,11 @@ GitHub administrator token은 Actions에 전달하지 않습니다. AMO secret j
       chzzk-<version>.zip
       updates.json
       index.html
+      provenance.json
   current -> releases/<version>
   updates.json -> current/updates.json
   index.html -> current/index.html
+  provenance.json -> current/provenance.json
 ```
 
 `updates.json`과 landing-page 링크는 root-absolute immutable version path를 사용합니다. `current` symlink를 한 번만 원자적으로 전환하므로 stable manifest와 versioned XPI가 섞이지 않습니다.

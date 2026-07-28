@@ -29,6 +29,7 @@ function repositoryState(checks) {
     immutableReleases: { enabled: true },
     labels: [],
     repository: {
+      allow_auto_merge: false,
       allow_merge_commit: false,
       allow_rebase_merge: false,
       allow_squash_merge: true,
@@ -103,5 +104,74 @@ describe("repository review policy", () => {
     const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
     assert.equal(Object.hasOwn(packageJson.scripts, "configure:repository"), false);
     assert.equal(existsSync(join(rootDir, "scripts/repository-settings-bootstrap.js")), true);
+  });
+
+  it("permits only an explicitly authorized operating agent to execute the post-gate merge", () => {
+    const operations = readFileSync(join(rootDir, "docs/OPERATIONS.md"), "utf8");
+    const hardening = readFileSync(join(rootDir, "docs/HARDENING.md"), "utf8");
+    const security = readFileSync(join(rootDir, "docs/SECURITY.md"), "utf8");
+    const template = readFileSync(join(rootDir, ".github/PULL_REQUEST_TEMPLATE/hardening.md"), "utf8");
+    assert.match(
+      operations,
+      /owner or an operating agent explicitly authorized by the owner squash-merges through protected `main` only after step 5 is complete/,
+    );
+    assert.match(operations, /does not request a second merge confirmation after the gates pass/);
+    assert.match(operations, /mark the PR ready for review and request the final direct Codex review/);
+    assert.match(operations, /new final direct Codex review on the Ready PR/);
+    const orderedMarkers = [
+      "5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note after the last source push",
+      "mark the PR ready for review",
+      "@codex review",
+      "Immediately before the authorized squash merge",
+      "6. The owner or an operating agent explicitly authorized by the owner squash-merges",
+    ];
+    const markerPositions = orderedMarkers.map((marker) => operations.indexOf(marker));
+    assert.equal(
+      markerPositions.every((position) => position >= 0),
+      true,
+      "every guarded merge marker must exist",
+    );
+    for (let index = 1; index < markerPositions.length; index += 1) {
+      assert.equal(
+        markerPositions[index - 1] < markerPositions[index],
+        true,
+        `${orderedMarkers[index - 1]} must precede ${orderedMarkers[index]}`,
+      );
+    }
+    const signing = readFileSync(join(rootDir, "docs/SIGNING.md"), "utf8");
+    const signingOrderedMarkers = [
+      "마지막 source push 뒤",
+      "PR body와 모든 고위험 메모를 확정",
+      "PR을 Ready로 전환",
+      "그 다음 active Codex task",
+      "GitHub review record가 그 head를 식별",
+      "모든 gate 통과 뒤",
+    ];
+    const signingMarkerPositions = signingOrderedMarkers.map((marker) => signing.indexOf(marker));
+    assert.equal(
+      signingMarkerPositions.every((position) => position >= 0),
+      true,
+      "every signing review-order marker must exist",
+    );
+    for (let index = 1; index < signingMarkerPositions.length; index += 1) {
+      assert.equal(
+        signingMarkerPositions[index - 1] < signingMarkerPositions[index],
+        true,
+        `${signingOrderedMarkers[index - 1]} must precede ${signingOrderedMarkers[index]}`,
+      );
+    }
+    assert.doesNotMatch(signing, /검토 결과를 PR body에 기록/);
+    assert.match(operations, /body and high-risk notes are final and the PR is Ready/);
+    assert.match(hardening, /body and high-risk notes are final and the PR is Ready/);
+    assert.match(security, /PR body and every high-risk impact note are finalized and the PR is Ready/);
+    assert.match(
+      template,
+      /final source push is complete, the PR body and every high-risk impact note are finalized, and the PR is marked Ready before the final direct Codex review/,
+    );
+    assert.match(
+      operations,
+      /GitHub auto-merge and unattended generic merge automation must not be enabled or used/,
+    );
+    assert.doesNotMatch(operations, /automation must not merge the PR/);
   });
 });

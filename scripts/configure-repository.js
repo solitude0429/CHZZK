@@ -469,6 +469,7 @@ function exactZeroApprovalPullRequestProtection(value) {
 export function planRepositorySettings(state, githubActionsAppId, releaseOperatorLogin) {
   const changes = [];
   const repositoryKeys = [
+    ["allow_auto_merge", false],
     ["allow_merge_commit", false],
     ["allow_rebase_merge", false],
     ["allow_squash_merge", true],

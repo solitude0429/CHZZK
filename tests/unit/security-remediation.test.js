@@ -116,6 +116,8 @@ describe("release and repository security guardrails", () => {
     assert.match(finalizer, /"draft=false"/);
     assert.doesNotMatch(finalizer, /GITHUB_TOKEN/);
     assert.match(updateRunbook, /CHZZK_OLD_SIGNED_XPI=/);
+    assert.match(updateRunbook, /^ {6}provenance\.json$/m);
+    assert.match(updateRunbook, /^ {2}provenance\.json -> current\/provenance\.json$/m);
     assert.doesNotMatch(updateRunbook, /CHZZK_PREVIOUS_SIGNED_XPI|CHZZK_UPDATE_BASE_URL/);
   });
 

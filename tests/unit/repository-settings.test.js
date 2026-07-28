@@ -35,6 +35,7 @@ function protectedState() {
     immutableReleases: { enabled: true },
     labels: [],
     repository: {
+      allow_auto_merge: false,
       allow_merge_commit: false,
       allow_rebase_merge: false,
       allow_squash_merge: true,
@@ -91,6 +92,7 @@ describe("repository settings source of truth", () => {
     state.branchProtection.required_conversation_resolution.enabled = false;
     state.branchProtection.required_pull_request_reviews = { required_approving_review_count: 1 };
     state.labels = [{ name: "release-review-required" }, { name: "security-review-required" }];
+    state.repository.allow_auto_merge = true;
     state.repository.allow_merge_commit = true;
     state.repository.allow_rebase_merge = true;
     state.repository.delete_branch_on_merge = false;
@@ -124,6 +126,13 @@ describe("repository settings source of truth", () => {
         context,
       })),
     );
+    assert.deepEqual(changes.find((change) => change.kind === "repository").settings, {
+      allow_auto_merge: false,
+      allow_merge_commit: false,
+      allow_rebase_merge: false,
+      allow_squash_merge: true,
+      delete_branch_on_merge: true,
+    });
   });
 
   it("preserves unrelated branch-protection fields while enabling zero-approval pull requests", () => {
