@@ -91,7 +91,7 @@ Release에는 정확히 다음 세 파일만 존재합니다.
 
 ## PR 검토
 
-Release/security 변경도 다른 변경과 같은 protected-branch 검증을 사용합니다. Native pull-request protection은 모든 `main` 변경에 PR을 요구하되 required approval count는 0으로 유지합니다. 마지막 push 뒤 active Codex task에서 final diff를 직접 검토하고, 고위험 영향과 검토 결과를 PR body에 기록합니다. Sole-owner가 자기 PR을 승인할 수 없으므로 approval count는 요구하지 않으며, 별도 GitHub bot review도 중복 실행하지 않습니다. 대신 `verify`, Firefox E2E, dependency review, CodeQL을 모두 exact head에서 통과시키고 unresolved conversation을 0개로 유지합니다.
+Release/security 변경도 다른 변경과 같은 protected-branch 검증을 사용합니다. Native pull-request protection은 모든 `main` 변경에 PR을 요구하되 required approval count는 0으로 유지합니다. 마지막 push 뒤 active Codex task에서 final diff를 직접 검토하고, 고위험 영향과 검토 결과를 PR body에 기록합니다. Sole-owner가 자기 PR을 승인할 수 없으므로 approval count는 요구하지 않으며, 별도 GitHub bot review도 중복 실행하지 않습니다. 대신 `verify`, Firefox E2E, dependency review, CodeQL을 모두 exact head에서 통과시키고 unresolved conversation을 0개로 유지합니다. 모든 gate 통과 뒤에는 owner 또는 owner가 명시적으로 권한을 준 operating agent가 exact head를 다시 확인하고 squash merge합니다. 범위가 정해진 작업을 끝내거나 병합하라는 owner 지시는 추가 확인 없이 충분한 권한이지만, GitHub auto-merge와 무인 generic merge automation은 계속 금지합니다.
 
 ## 배포 후
 

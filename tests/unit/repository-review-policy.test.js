@@ -29,6 +29,7 @@ function repositoryState(checks) {
     immutableReleases: { enabled: true },
     labels: [],
     repository: {
+      allow_auto_merge: false,
       allow_merge_commit: false,
       allow_rebase_merge: false,
       allow_squash_merge: true,
@@ -103,5 +104,20 @@ describe("repository review policy", () => {
     const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
     assert.equal(Object.hasOwn(packageJson.scripts, "configure:repository"), false);
     assert.equal(existsSync(join(rootDir, "scripts/repository-settings-bootstrap.js")), true);
+  });
+
+  it("permits only an explicitly authorized operating agent to execute the post-gate merge", () => {
+    const operations = readFileSync(join(rootDir, "docs/OPERATIONS.md"), "utf8");
+    assert.match(
+      operations,
+      /owner or an operating agent explicitly authorized by the owner squash-merges through protected `main` only after step 5 is complete/,
+    );
+    assert.match(operations, /does not request a second merge confirmation after the gates pass/);
+    assert.match(operations, /mark the PR ready for review/);
+    assert.match(
+      operations,
+      /GitHub auto-merge and unattended generic merge automation must not be enabled or used/,
+    );
+    assert.doesNotMatch(operations, /automation must not merge the PR/);
   });
 });
