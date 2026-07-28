@@ -35,8 +35,8 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(workflow, /CHZZK_BASE_SHA/);
     assert.match(workflow, /evaluated_base != current_base/);
     assert.match(workflow, /invalidate-base-advance:/);
-    assert.match(workflow, /\"state\": \"open\"/);
-    assert.match(workflow, /\"conclusion\": \"failure\"/);
+    assert.match(workflow, /"state": "open"/);
+    assert.match(workflow, /"conclusion": "failure"/);
     assert.match(workflow, /Base branch advanced/);
     assert.doesNotMatch(workflow, /pull_request_review_thread/);
     const publishJob = workflow.slice(workflow.indexOf("  publish-exact-head-review:"));
