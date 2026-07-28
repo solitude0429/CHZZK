@@ -1,0 +1,33 @@
+name: Export current hardening docs
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/export-current-docs.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-current-hardening-docs-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Archive exact current documents
+        run: tar -cf current-docs.tar docs/HARDENING.md docs/OPERATIONS.md docs/SECURITY.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          if-no-files-found: error
+          name: current-hardening-docs-${{ github.event.pull_request.head.sha }}
+          path: current-docs.tar
+          retention-days: 1
