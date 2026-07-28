@@ -69,6 +69,9 @@ function timelineHeadAfter(item) {
     return normalizeSha(item?.afterCommit?.oid);
   }
   if (item?.__typename === "HeadRefDeletedEvent") return null;
+  if (item?.__typename === "HeadRefRestoredEvent") {
+    return normalizeSha(item?.pullRequest?.headRefOid);
+  }
   return undefined;
 }
 
@@ -255,6 +258,7 @@ export async function loadPullRequestSnapshot({
             nodes {
               __typename
               ... on HeadRefForcePushedEvent { afterCommit { oid } }
+              ... on HeadRefRestoredEvent { pullRequest { headRefOid } }
               ... on IssueComment { id }
               ... on PullRequestCommit { commit { oid } }
             }
