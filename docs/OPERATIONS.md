@@ -16,13 +16,13 @@ npm run test:firefox-functional-e2e
 ```
 
 4. Open a draft PR. The protected branch requires the four GitHub-Actions-bound checks `verify`, `firefox-e2e`, `dependency-review`, and `analyze` (CodeQL), plus zero unresolved review threads.
-5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note before requesting the final direct Codex review. After the last source push, keep the PR draft and request review:
+5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note after the last source push. Then mark the PR ready for review and request the final direct Codex review:
 
 ```text
 @codex review
 ```
 
-Wait for the resulting review record and confirm that its reviewed commit is the current full PR head SHA. Resolve every actionable finding. Any source push after that review requires all four checks and a new final direct Codex review. After the final review and without another source push, mark the PR ready for review. Immediately before the authorized squash merge, the acting operator confirms that the reviewed commit still equals the PR head, the finalized high-risk notes remain unchanged, the base is current, all four protected checks pass, and GitHub reports zero unresolved conversations. A self-approval, approval-count gate, custom bot-review workflow, or commit-scoped review-completion status is not used for this sole-owner repository.
+Wait for the resulting review record and confirm that its reviewed commit is the current full PR head SHA. Resolve every actionable finding. Any source push after that review requires all four checks and a new final direct Codex review on the Ready PR. Immediately before the authorized squash merge, the acting operator confirms that the reviewed commit still equals the PR head, the finalized high-risk notes remain unchanged, the base is current, all four protected checks pass, and GitHub reports zero unresolved conversations. A self-approval, approval-count gate, custom bot-review workflow, or commit-scoped review-completion status is not used for this sole-owner repository.
 
 6. The owner or an operating agent explicitly authorized by the owner squash-merges through protected `main` only after step 5 is complete. An owner instruction to finish or merge the scoped task is sufficient authorization, so the agent does not request a second merge confirmation after the gates pass. GitHub auto-merge and unattended generic merge automation must not be enabled or used.
 

@@ -113,7 +113,28 @@ describe("repository review policy", () => {
       /owner or an operating agent explicitly authorized by the owner squash-merges through protected `main` only after step 5 is complete/,
     );
     assert.match(operations, /does not request a second merge confirmation after the gates pass/);
-    assert.match(operations, /mark the PR ready for review/);
+    assert.match(operations, /mark the PR ready for review and request the final direct Codex review/);
+    assert.match(operations, /new final direct Codex review on the Ready PR/);
+    const orderedMarkers = [
+      "5. Finalize the PR body",
+      "mark the PR ready for review",
+      "@codex review",
+      "Immediately before the authorized squash merge",
+      "6. The owner or an operating agent explicitly authorized by the owner squash-merges",
+    ];
+    const markerPositions = orderedMarkers.map((marker) => operations.indexOf(marker));
+    assert.equal(
+      markerPositions.every((position) => position >= 0),
+      true,
+      "every guarded merge marker must exist",
+    );
+    for (let index = 1; index < markerPositions.length; index += 1) {
+      assert.equal(
+        markerPositions[index - 1] < markerPositions[index],
+        true,
+        `${orderedMarkers[index - 1]} must precede ${orderedMarkers[index]}`,
+      );
+    }
     assert.match(
       operations,
       /GitHub auto-merge and unattended generic merge automation must not be enabled or used/,
