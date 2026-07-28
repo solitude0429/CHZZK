@@ -47,6 +47,24 @@ function readBoundVersion(cwd) {
   return version;
 }
 
+function readProtectedDefaultHead({ cwd, defaultBranch, repository, runCommand }) {
+  const branchState = parseJson(
+    runCommand("gh", apiArgs("GET", `repos/${repository}/branches/${encodeURIComponent(defaultBranch)}`), {
+      cwd,
+    }),
+    "Protected default-branch lookup",
+  );
+  const sourceSha = String(branchState?.commit?.sha ?? "").toLowerCase();
+  if (
+    branchState?.name !== defaultBranch ||
+    branchState?.protected !== true ||
+    !FULL_GIT_SHA_RE.test(sourceSha)
+  ) {
+    throw new Error("Repository default branch is not protected or did not resolve to one full commit SHA");
+  }
+  return sourceSha;
+}
+
 function inspectAdministratorContext({ cwd, repository, runCommand }) {
   if (!REPOSITORY_RE.test(String(repository ?? ""))) {
     throw new Error("Release repository must use owner/repository form");
@@ -59,14 +77,7 @@ function inspectAdministratorContext({ cwd, repository, runCommand }) {
   if (typeof defaultBranch !== "string" || !/^[A-Za-z0-9._/-]+$/.test(defaultBranch)) {
     throw new Error("Repository default branch is missing or malformed");
   }
-  const remoteRef = parseJson(
-    runCommand("gh", apiArgs("GET", `repos/${repository}/git/ref/heads/${defaultBranch}`), { cwd }),
-    "Default-branch lookup",
-  );
-  const sourceSha = String(remoteRef?.object?.sha ?? "").toLowerCase();
-  if (remoteRef?.object?.type !== "commit" || !FULL_GIT_SHA_RE.test(sourceSha)) {
-    throw new Error("Repository default branch did not resolve to one full commit SHA");
-  }
+  const sourceSha = readProtectedDefaultHead({ cwd, defaultBranch, repository, runCommand });
   const operator = parseJson(runCommand("gh", apiArgs("GET", "user"), { cwd }), "Operator lookup");
   const operatorLogin = operator.login;
   if (typeof operatorLogin !== "string" || !GITHUB_LOGIN_RE.test(operatorLogin)) {
@@ -86,6 +97,19 @@ function inspectAdministratorContext({ cwd, repository, runCommand }) {
     throw new Error("Release finalization requires a clean checkout at the exact remote default-branch head");
   }
   return { defaultBranch, operatorLogin, sourceSha, version: readBoundVersion(cwd) };
+}
+
+function assertAdministratorContextUnchanged(initial, rechecked) {
+  if (
+    rechecked.defaultBranch !== initial.defaultBranch ||
+    rechecked.operatorLogin !== initial.operatorLogin ||
+    rechecked.sourceSha !== initial.sourceSha ||
+    rechecked.version !== initial.version
+  ) {
+    throw new Error(
+      "Release finalization administrator context changed before the immutable publication boundary",
+    );
+  }
 }
 
 function assertStagedState(state) {
@@ -270,6 +294,8 @@ export async function finalizeStagedReleaseFromAdminPreflight({
           `${repository}/.github/workflows/sign-unlisted.yml`,
         ]);
       }
+      const recheckedContext = inspectAdministratorContext({ cwd, repository, runCommand });
+      assertAdministratorContextUnchanged(context, recheckedContext);
       immutableReleasesEnabled({ cwd, repository, runCommand });
       return { ...context, alreadyPublished: true, tag };
     }
@@ -313,7 +339,18 @@ export async function finalizeStagedReleaseFromAdminPreflight({
       "Staged release identity or asset bytes changed immediately before publication",
     );
     const releaseId = verifiedReleaseId(publishReadyState, "Publish-ready");
+    const recheckedContext = inspectAdministratorContext({ cwd, repository, runCommand });
+    assertAdministratorContextUnchanged(context, recheckedContext);
     immutableReleasesEnabled({ cwd, repository, runCommand });
+    const finalSourceSha = readProtectedDefaultHead({
+      cwd,
+      defaultBranch: context.defaultBranch,
+      repository,
+      runCommand,
+    });
+    if (finalSourceSha !== context.sourceSha) {
+      throw new Error("Protected default-branch head changed at the immutable publication boundary");
+    }
     // GitHub does not support a conditional release PATCH. Targeting the exact inspected release ID
     // prevents tag substitution; the documented exclusive same-authority writer boundary still
     // covers mutation of that same draft between this last inspection and the PATCH.

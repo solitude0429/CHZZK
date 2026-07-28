@@ -5,8 +5,31 @@ import { readFile } from "node:fs/promises";
 import { assertCanonicalReleaseVersion } from "./lib/release-version.js";
 
 const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+const packageLock = JSON.parse(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const policy = JSON.parse(await readFile(new URL("../policy/quality-policy.json", import.meta.url), "utf8"));
+
+export function assertReleaseVersionParity({
+  manifest: candidateManifest,
+  packageJson: candidatePackageJson,
+  packageLock: candidatePackageLock,
+}) {
+  assert.equal(
+    candidateManifest.version,
+    candidatePackageJson.version,
+    "manifest version must match package.json",
+  );
+  assert.equal(
+    candidatePackageLock.version,
+    candidatePackageJson.version,
+    "package-lock top-level version must match package.json",
+  );
+  assert.equal(
+    candidatePackageLock.packages?.[""]?.version,
+    candidatePackageJson.version,
+    "package-lock root package version must match package.json",
+  );
+}
 
 assert.equal(
   manifest.manifest_version,
@@ -15,7 +38,7 @@ assert.equal(
 );
 assert.equal(manifest.name, "CHZZK", "extension name must be CHZZK");
 assert.equal(manifest.description, undefined, "manifest description should be omitted from about:addons");
-assert.equal(manifest.version, packageJson.version, "manifest version must match package.json");
+assertReleaseVersionParity({ manifest, packageJson, packageLock });
 assert.equal(
   assertCanonicalReleaseVersion(packageJson.version, "project version"),
   packageJson.version,

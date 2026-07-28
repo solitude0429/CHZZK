@@ -12,7 +12,8 @@ const STAGING_WORKFLOW_NAME = "Stage unlisted Firefox release";
 const STAGING_WORKFLOW_PATH = ".github/workflows/sign-unlisted.yml";
 const FULL_GIT_SHA_RE = /^[a-f0-9]{40}$/;
 const GITHUB_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/;
-const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const RELEASE_REPOSITORY = "solitude0429/CHZZK";
+const RELEASE_REPOSITORY_ID = 1_275_903_171;
 const GITHUB_API_HEADERS = Object.freeze([
   "-H",
   "Accept: application/vnd.github+json",
@@ -432,8 +433,8 @@ export async function runProtectedReleaseEntrypoint({
   if (process.env.GITHUB_ACTIONS) {
     throw new Error("The administrator release bootstrap must run out of band, never in GitHub Actions");
   }
-  if (!REPOSITORY_RE.test(String(repository ?? ""))) {
-    throw new Error("Release repository must use owner/repository form");
+  if (repository !== RELEASE_REPOSITORY) {
+    throw new Error("Release repository does not match the pinned CHZZK repository");
   }
   if (!RELEASE_OPERATIONS.has(operation)) {
     throw new Error("Release bootstrap operation must be dispatch, finalize, or release");
@@ -451,7 +452,8 @@ export async function runProtectedReleaseEntrypoint({
     "Repository lookup",
   );
   if (
-    repositoryState?.full_name?.toLowerCase() !== repository.toLowerCase() ||
+    repositoryState?.id !== RELEASE_REPOSITORY_ID ||
+    repositoryState?.full_name !== RELEASE_REPOSITORY ||
     repositoryState.archived !== false
   ) {
     throw new Error("Release repository identity is missing, archived, or mismatched");

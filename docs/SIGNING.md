@@ -5,17 +5,19 @@ Firefox Release/Beta에서 일반 확장처럼 설치하려면 Mozilla 서명이
 ## 신뢰 경계
 
 - Repository variable `RELEASE_OPERATOR_LOGIN`은 릴리스를 실행할 정확한 GitHub 로그인입니다.
-- `firefox-signing` environment는 protected `main`에서만 접근할 수 있습니다.
-- `AMO_JWT_ISSUER`와 `AMO_JWT_SECRET` repository secret은 checkout이나 npm이 없는 sign step에서만 참조합니다.
+- `firefox-signing` environment는 protected branch에서만 접근할 수 있고, 현재 release workflow의 별도 authorization은 exact protected default-branch head만 허용합니다.
+- `AMO_JWT_ISSUER`와 `AMO_JWT_SECRET`은 `firefox-signing` environment secret으로만 존재하며 checkout이나 npm이 없는 sign step에서만 참조합니다. 같은 이름의 repository secret은 두지 않습니다.
 - Repository immutable releases는 활성 상태여야 합니다.
 - GitHub 관리자 token은 Actions secret으로 저장하지 않습니다. Actions의 일반 `GITHUB_TOKEN`에는 immutable-release 설정을 읽는 `Administration: read` 권한이 없기 때문입니다.
 
-Mozilla Add-ons Developer Hub의 API key 화면에서 받은 값은 다음 repository secret에 값만 저장합니다.
+Mozilla Add-ons Developer Hub의 API key 화면에서 받은 값은 다음 `firefox-signing` environment secret에 값만 저장합니다.
 
 - `JWT issuer` → `AMO_JWT_ISSUER`
 - `JWT secret` → `AMO_JWT_SECRET`
 
 자격 증명을 argv, checkout, artifact, 로그에 기록하지 않습니다.
+
+기존 repository secret을 이전할 때는 GitHub가 저장된 secret 값을 다시 보여 주지 않으므로 Mozilla에서 보관한 원본 값을 두 environment secret에 먼저 입력합니다. Protected `main`의 signing job이 environment 값을 사용해 성공한 것을 확인한 뒤, 같은 이름의 repository secret 사본 두 개를 관리자가 정확히 삭제하고 `docs/OPERATIONS.md`의 외부 repository-settings bootstrap dry-run을 다시 실행합니다. Configurator는 secret 값이나 쓰기 API를 사용하지 않고 이름·scope·environment 정책만 읽습니다. Environment 값 하나라도 없거나 보호 정책이 다르거나 repository 사본이 남아 있으면 dry-run에 수동 migration을 표시하며, `--apply`는 다른 설정까지 포함한 전체 변경을 시작 전에 거부합니다.
 
 ## Operator bootstrap
 
@@ -35,15 +37,18 @@ Bootstrap은 실행할 때 caller의 GitHub CLI config, proxy/CA/Node injection 
 
 ```bash
 (
+  trap - DEBUG 2>/dev/null || true
+  set +x
+  set +v
   GH_TOKEN="$CHZZK_RELEASE_ADMIN_TOKEN"
   export GH_TOKEN PATH="/usr/local/bin:/usr/bin:/bin"
   unset ALL_PROXY BASH_ENV CHZZK_RELEASE_ADMIN_TOKEN CURL_CA_BUNDLE ENV \
-    GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN HTTPS_PROXY \
+    GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN HOME HTTPS_PROXY \
     HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD NODE_EXTRA_CA_CERTS \
     NODE_OPTIONS NODE_PATH NO_PROXY REQUESTS_CA_BUNDLE SSL_CERT_DIR \
     SSL_CERT_FILE XDG_CONFIG_HOME all_proxy http_proxy https_proxy no_proxy
   exec /absolute/path/to/trusted/node \
-    "$HOME/.local/libexec/chzzk-release-bootstrap.mjs" \
+    "/absolute/protected/chzzk-release-bootstrap.mjs" \
     release "solitude0429/CHZZK" "$PWD"
 )
 ```
@@ -56,7 +61,7 @@ Bootstrap은 실행할 때 caller의 GitHub CLI config, proxy/CA/Node injection 
 4. Active workflow metadata의 고정 ID/name/path를 먼저 결박한 뒤 exact actor, source SHA, branch, workflow ID/path, nonce-bound run title이 모두 일치하는 단 하나의 staging run을 bounded polling합니다. 개별 run의 `name`은 GitHub가 동적 `run-name`으로 반환할 수 있으므로 신뢰 경계에 사용하지 않습니다. 대기 예산은 순차 job timeout 100분과 queue/environment 여유 80분을 합친 180분이며, 실패, 중복, malformed state, timeout은 finalization 전에 중단합니다.
 5. 성공 뒤 remote head와 clean checkout을 처음부터 다시 확인하고, protected head에서 finalizer entrypoint를 API로 가져와 Git blob identity를 검증한 memory-only module로 실행합니다.
 6. Finalizer는 모든 exact-source staging run이 완료됐고 최신 attempt가 성공했는지, 세 draft snapshot과 asset bytes/uploader/content type, deterministic local artifacts, build attestations가 모두 일치하는지 확인합니다.
-7. 공개 직전에 admin-only API에서 immutable 설정을 다시 확인하고, 검증한 exact release ID만 `draft=false`로 전환한 뒤 exact immutable post-state를 요구합니다.
+7. 공개 직전에 protected default head, operator identity, clean local branch/head, canonical version을 처음부터 다시 결박하고 admin-only API에서 immutable 설정을 다시 확인합니다. 그 뒤 protected default head를 마지막 외부 read로 한 번 더 읽어 exact source SHA임을 확인하고, 모두 같을 때만 검증한 exact release ID를 `draft=false`로 전환한 뒤 exact immutable post-state를 요구합니다.
 
 `dispatch`와 `finalize` operation은 중단된 transaction의 명시적 복구용으로 남습니다. 일반 릴리스에는 `release`를 사용합니다. Default branch가 대기 중 전진하거나 checkout이 바뀌면 자동 finalization은 실패하며, 새 exact head에서 의도적으로 다시 시작해야 합니다.
 
@@ -86,7 +91,7 @@ Release에는 정확히 다음 세 파일만 존재합니다.
 
 ## PR 검토
 
-Release/security 변경도 다른 변경과 같은 protected-branch 검증을 사용합니다. 마지막 push 뒤 active Codex task에서 final diff를 직접 검토하고, 고위험 영향과 검토 결과를 PR body에 기록합니다. Sole-owner가 자기 PR을 승인할 수 없으므로 approval count는 요구하지 않으며, 별도 GitHub bot review도 중복 실행하지 않습니다. 대신 `verify`, Firefox E2E, dependency review, CodeQL을 모두 exact head에서 통과시키고 unresolved conversation을 0개로 유지합니다.
+Release/security 변경도 다른 변경과 같은 protected-branch 검증을 사용합니다. Native pull-request protection은 모든 `main` 변경에 PR을 요구하되 required approval count는 0으로 유지합니다. 마지막 push 뒤 active Codex task에서 final diff를 직접 검토하고, 고위험 영향과 검토 결과를 PR body에 기록합니다. Sole-owner가 자기 PR을 승인할 수 없으므로 approval count는 요구하지 않으며, 별도 GitHub bot review도 중복 실행하지 않습니다. 대신 `verify`, Firefox E2E, dependency review, CodeQL을 모두 exact head에서 통과시키고 unresolved conversation을 0개로 유지합니다.
 
 ## 배포 후
 

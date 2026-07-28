@@ -151,7 +151,7 @@ ${source.slice(closureEnd)}`;
   };
 }
 
-function request(requestId, policy) {
+function request(requestId, policy, family = "family") {
   return {
     documentUrl: "https://chzzk.naver.com/live/example-channel",
     initiator: "https://chzzk.naver.com",
@@ -160,7 +160,7 @@ function request(requestId, policy) {
     requestId,
     tabId: 1,
     type: "xmlhttprequest",
-    url: `https://edge.pstatic.net/chzzk/family/chunklist_480p.m3u8?Policy=${policy}`,
+    url: `https://edge.pstatic.net/chzzk/${family}/chunklist_480p.m3u8?Policy=${policy}`,
   };
 }
 
@@ -173,7 +173,7 @@ async function startOverlappingRedirects(runtime) {
   assert.match(newerRedirect.redirectUrl, /chunklist_2160p/);
   await runtime.listeners.onBeforeRequest({ ...older, url: olderRedirect.redirectUrl });
   await runtime.listeners.onBeforeRequest({ ...newer, url: newerRedirect.redirectUrl });
-  return { olderRedirect };
+  return { newerRedirect, olderRedirect };
 }
 
 function assertOnlyNewerPending(records) {
@@ -212,5 +212,65 @@ describe("redirect response-verification lifecycle", () => {
     });
 
     assertOnlyNewerPending(runtime.records());
+  });
+
+  it("applies a deferred older failure when the newer verification is client-cancelled", async () => {
+    const runtime = await loadBackground();
+    const { olderRedirect } = await startOverlappingRedirects(runtime);
+    runtime.listeners.onCompleted({
+      requestId: "older",
+      statusCode: 404,
+      url: olderRedirect.redirectUrl,
+    });
+    runtime.listeners.onErrorOccurred({
+      error: "NS_BINDING_ABORTED",
+      requestId: "newer",
+    });
+
+    const fallback = await runtime.listeners.onBeforeRequest(request("fallback", "three"));
+    assert.match(fallback.redirectUrl, /chunklist_1080p/);
+  });
+
+  it("applies a deferred older failure when its sole newer verifier is capacity-evicted", async () => {
+    const runtime = await loadBackground();
+    const { olderRedirect } = await startOverlappingRedirects(runtime);
+    runtime.listeners.onCompleted({
+      requestId: "older",
+      statusCode: 404,
+      url: olderRedirect.redirectUrl,
+    });
+
+    for (let index = 0; index < 500; index += 1) {
+      const pending = await runtime.listeners.onBeforeRequest(
+        request(`capacity-${index}`, `other-${index}`, "unrelated-family"),
+      );
+      assert.match(pending.redirectUrl, /chunklist_2160p/);
+    }
+
+    const fallback = await runtime.listeners.onBeforeRequest(request("fallback", "three"));
+    assert.match(fallback.redirectUrl, /chunklist_1080p/);
+  });
+
+  it("discards a deferred older failure after the newer verification succeeds", async () => {
+    const runtime = await loadBackground();
+    const { newerRedirect, olderRedirect } = await startOverlappingRedirects(runtime);
+    runtime.listeners.onCompleted({
+      requestId: "older",
+      statusCode: 404,
+      url: olderRedirect.redirectUrl,
+    });
+    const newerFilter = runtime.responseFilters.get("newer");
+    newerFilter.ondata({
+      data: new TextEncoder().encode("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-2.ts\n").buffer,
+    });
+    newerFilter.onstop();
+    runtime.listeners.onCompleted({
+      requestId: "newer",
+      statusCode: 200,
+      url: newerRedirect.redirectUrl,
+    });
+
+    const next = await runtime.listeners.onBeforeRequest(request("next", "three"));
+    assert.match(next.redirectUrl, /chunklist_2160p/);
   });
 });

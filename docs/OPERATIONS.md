@@ -37,14 +37,39 @@ Wait for the resulting review record and confirm that its reviewed commit is the
 gh release verify "v$VERSION" --repo solitude0429/CHZZK
 ```
 
-11. Deploy the immutable release to the internal update host from an exact clean `main` checkout:
+11. Refresh `scripts/internal-update-deploy-bootstrap.js` from the protected exact `main` blob using the same Git-blob verification procedure as the release bootstrap, and install it outside the checkout as an owner-only mode `0500` `.mjs` file. From an already-running trusted administrator shell and the exact clean `main` checkout, deploy the immutable release only through that external bootstrap:
 
 ```bash
-VERSION="$(node -p "require('./package.json').version")"
-CHZZK_VERSION="$VERSION" \
-CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
-npm run deploy:updates:internal
+(
+  if [ -n "${GITHUB_ACTIONS-}" ]; then exit 1; fi
+  trap - DEBUG 2>/dev/null || true
+  set +x
+  set +v
+  chzzk_deploy_token="$CHZZK_DEPLOY_READ_TOKEN"
+  unset ALL_PROXY BASH_ENV CDPATH CHZZK_DEPLOY_READ_TOKEN CURL_CA_BUNDLE ENV \
+    GH_ENTERPRISE_TOKEN GH_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN GLOBIGNORE HOME \
+    HTTPS_PROXY HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD \
+    NODE_EXTRA_CA_CERTS NODE_OPTIONS NODE_PATH NO_PROXY PS4 \
+    REQUESTS_CA_BUNDLE SSL_CERT_DIR SSL_CERT_FILE XDG_CONFIG_HOME \
+    all_proxy http_proxy https_proxy no_proxy
+  export -n BASHOPTS SHELLOPTS 2>/dev/null || true
+  printf '%s\n' "$chzzk_deploy_token" |
+    /usr/bin/env -i CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY=1 \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+      "/absolute/protected/chzzk-internal-update-deploy-bootstrap.mjs" \
+      "<canonical published version>" \
+      "solitude0429/CHZZK" \
+      "$PWD" \
+      "/var/www/chzzk-updates"
+  chzzk_deploy_status=$?
+  unset chzzk_deploy_token
+  exit "$chzzk_deploy_status"
+)
 ```
+
+The trusted parent shell disables command/input tracing before copying the token, then removes dynamic-loader, shell-startup, Node, proxy, and CA injection variables before starting even `/usr/bin/env`; do not replace that boundary with a one-line `GH_TOKEN=...` invocation. The bootstrap then requires the clean-parent marker and token on stdin, starts absolute system Node under a second empty environment, and requires the supplied checkout to equal trusted Git's canonical worktree root with the pinned repository origin. Only then does it verify that its own canonical `.mjs` path is outside that complete checkout, operator-owned with exact mode `0500`, and contained by a private operator-owned directory. It discovers only protected absolute system tools, creates a private GitHub CLI home, binds the canonical repository, clean checkout, and release to the protected remote head, Git-blob-verifies the deployment entrypoint and its complete local import graph, and executes those sealed bytes. It owns the artifact-download directory under its private execution tree so terminal child failure is cleaned by the parent. The checkout-local deployment entrypoint and an npm script are not public operational interfaces.
+
+Both the deployment and repository-settings polyglot bootstraps require protected root-owned `/usr/bin/node` as an explicit host prerequisite. Their shell launchers never search `PATH` or claim support for alternate Node locations.
 
 12. Verify live `updates.json` and XPI MIME type, SHA-256, version, add-on ID, minimum Firefox version, source commit, and stable symlink targets.
 13. Run the old-signed-to-new-signed stock-Firefox update smoke from `docs/TESTING.md`.
@@ -52,15 +77,39 @@ npm run deploy:updates:internal
 
 ## Repository settings
 
-Repository protection is managed out of band so a pull-request workflow cannot weaken its own controls. The source of truth keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound deterministic checks `analyze`, `dependency-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The final direct Codex review is the single qualitative layer: its review record must name the current PR head, any later source push requires a new review, and the owner verifies that identity immediately before the manual squash merge. No custom review-completion workflow or required status represents that procedural review because GitHub check runs are commit-scoped, can be reused by another PR with the same commit, and can only react asynchronously to PR or comment metadata changes. Native required-conversation resolution remains the independent thread gate. Do not replace these controls with an unbound status context, duplicate bot review, or approval-count gate.
+Repository protection is managed out of band so a pull-request workflow cannot weaken its own controls. The source of truth requires a native pull request for every `main` change with zero required approvals, keeps only squash merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound deterministic checks `analyze`, `dependency-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The final direct Codex review is the single qualitative layer: its review record must name the current PR head, any later source push requires a new review, and the owner verifies that identity immediately before the manual squash merge. No custom review-completion workflow or required status represents that procedural review because GitHub check runs are commit-scoped, can be reused by another PR with the same commit, and can only react asynchronously to PR or comment metadata changes. Native pull-request and required-conversation protection remain independent merge gates. Do not replace these controls with an unbound status context, duplicate bot review, or approval-count gate.
+
+Refresh `scripts/repository-settings-bootstrap.js` from the protected exact `main` blob, verify its Git-blob identity, and install it outside the checkout at one recorded canonical absolute `.mjs` path with an owner-only parent and mode `0500`. From an already-running trusted administrator shell, run the value-free dry-run through that exact external bootstrap:
 
 ```bash
-CHZZK_GITHUB_REPOSITORY="solitude0429/CHZZK" \
-CHZZK_RELEASE_OPERATOR_LOGIN="<exact owner login>" \
-npm run configure:repository
+(
+  if [ -n "${GITHUB_ACTIONS-}" ]; then exit 1; fi
+  trap - DEBUG 2>/dev/null || true
+  set +x
+  set +v
+  chzzk_settings_token="$CHZZK_REPOSITORY_ADMIN_TOKEN"
+  unset ALL_PROXY BASH_ENV CDPATH CHZZK_RELEASE_ADMIN_TOKEN \
+    CHZZK_REPOSITORY_ADMIN_TOKEN CURL_CA_BUNDLE ENV GH_ENTERPRISE_TOKEN \
+    GH_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN GLOBIGNORE HOME HTTPS_PROXY \
+    HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD NODE_EXTRA_CA_CERTS \
+    NODE_OPTIONS NODE_PATH NO_PROXY PS4 REQUESTS_CA_BUNDLE SSL_CERT_DIR \
+    SSL_CERT_FILE XDG_CONFIG_HOME all_proxy http_proxy https_proxy no_proxy
+  export -n BASHOPTS SHELLOPTS 2>/dev/null || true
+  printf '%s\n' "$chzzk_settings_token" |
+    /usr/bin/env -i CHZZK_REPOSITORY_SETTINGS_PARENT_BOUNDARY=1 \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+      "/absolute/protected/chzzk-repository-settings-bootstrap.mjs" \
+      "solitude0429/CHZZK" \
+      "$PWD"
+  chzzk_settings_status=$?
+  unset chzzk_settings_token
+  exit "$chzzk_settings_status"
+)
 ```
 
-Add `-- --apply` only from a trusted administrator session after reviewing the dry-run JSON. Version-only dependency bot PRs are disabled; the operating agent consolidates current tooling updates into one tested maintenance PR while `npm audit`, dependency review, CodeQL, and GitHub vulnerability alerts remain active.
+Append `--apply` only after reviewing the dry-run JSON. The same no-trace trusted-parent boundary applies to this token. The bootstrap pins the canonical repository name and numeric ID, verifies the clean exact protected-head checkout and protected source blob, and executes the sealed configurator with protected absolute tools and a private tool home. Apply is sequential and fail-closed, not atomic: a mid-apply API failure emits a bounded value-free recovery report, and a fresh dry-run is used to converge safely. Before every mutation, any payload-preparation read completes first and the protected-branch head GET is then repeated as the final external read. The checkout configurator and an npm script are not public operational interfaces. Version-only dependency bot PRs are disabled; the operating agent consolidates current tooling updates into one tested maintenance PR while `npm audit`, dependency review, CodeQL, and GitHub vulnerability alerts remain active.
+
+The configurator also inventories only the names and scopes of the two AMO signing secrets. It requires both secrets in the protected-branch-only `firefox-signing` environment and rejects `--apply` before any mutation while either value is missing or a same-name repository copy remains. It never reads, writes, migrates, or deletes secret values; the administrator verifies a protected-main signing run with the environment copies, deletes only the two repository copies manually, and reruns the dry-run before applying unrelated repository settings.
 
 When a workflow is retired, merge its file removal first, disable only that workflow's remaining server-side record where GitHub supports it, and verify the Actions API inventory contains exactly `ci.yml`, `codeql.yml`, `dependency-review.yml`, and `sign-unlisted.yml`. Preserve current release, verification, and provenance run evidence.
 

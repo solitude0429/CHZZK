@@ -109,22 +109,38 @@ function isValidByteRangeTag(line) {
 
 function nextMediaSegmentUri(lines, startIndex) {
   let sawByteRange = false;
+  let sawGap = false;
   for (let index = startIndex; index < lines.length; index += 1) {
     const line = lines[index];
     if (line === "" || (line.startsWith("#") && !line.toUpperCase().startsWith("#EXT"))) continue;
+    if (line.toUpperCase() === "#EXT-X-GAP") {
+      sawGap = true;
+      continue;
+    }
     if (!sawByteRange && isValidByteRangeTag(line)) {
       sawByteRange = true;
       continue;
     }
-    return isPlausiblePlaylistUri(line) ? line : null;
+    return isPlausiblePlaylistUri(line) ? { sawGap, uri: line } : null;
   }
   return null;
 }
 
 function hasUsableMediaSegment(lines) {
+  let nextSegmentIsGap = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
+    if (line.toUpperCase() === "#EXT-X-GAP") {
+      nextSegmentIsGap = true;
+      continue;
+    }
+    if (line !== "" && !line.startsWith("#")) {
+      nextSegmentIsGap = false;
+      continue;
+    }
     if (!line.toUpperCase().startsWith("#EXTINF:")) continue;
+    const segmentIsGap = nextSegmentIsGap;
+    nextSegmentIsGap = false;
     const durationText = line
       .slice(line.indexOf(":") + 1)
       .split(",", 1)[0]
@@ -133,7 +149,8 @@ function hasUsableMediaSegment(lines) {
     if (!/^\d+(?:\.\d+)?$/.test(durationText) || !Number.isFinite(duration) || duration <= 0) {
       continue;
     }
-    if (nextMediaSegmentUri(lines, index + 1)) return true;
+    const segment = nextMediaSegmentUri(lines, index + 1);
+    if (segment && !segmentIsGap && !segment.sawGap) return true;
   }
   return false;
 }
