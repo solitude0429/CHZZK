@@ -27,12 +27,17 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(workflow, /checks:\s*write/);
     assert.match(workflow, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
     assert.match(workflow, /types:\s*\[opened, reopened, synchronize, edited\]/);
+    assert.match(workflow, /push:\s*[\r\n]+\s*branches:\s*\[main\]/);
     assert.match(workflow, /cancel-in-progress:\s*true/);
     assert.match(workflow, /&& 'protected' \|\| github\.run_id/);
     assert.match(workflow, /github\.event\.comment\.user\.login == github\.event\.issue\.user\.login/);
     assert.match(workflow, /CHZZK_COMMENT_NODE_ID/);
     assert.match(workflow, /CHZZK_BASE_SHA/);
     assert.match(workflow, /evaluated_base != current_base/);
+    assert.match(workflow, /invalidate-base-advance:/);
+    assert.match(workflow, /\"state\": \"open\"/);
+    assert.match(workflow, /\"conclusion\": \"failure\"/);
+    assert.match(workflow, /Base branch advanced/);
     assert.doesNotMatch(workflow, /pull_request_review_thread/);
     const publishJob = workflow.slice(workflow.indexOf("  publish-exact-head-review:"));
     assert.doesNotMatch(publishJob, /actions\/checkout@/);
@@ -46,6 +51,8 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(verifier, /baseRefOid/);
     assert.match(verifier, /timelineItems/);
     assert.match(verifier, /PullRequestCommit/);
+    assert.match(verifier, /HeadRefRestoredEvent/);
+    assert.match(verifier, /pullRequest\?\.headRefOid/);
     assert.match(verifier, /lastEditedAt/);
     assert.match(verifier, /reactedAt/);
     assert.match(verifier, /requestComment/);
