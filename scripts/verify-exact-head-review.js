@@ -138,6 +138,20 @@ export function evaluateExactHeadReview(snapshot) {
   if (!headSha || !baseSha) {
     return resultFor(snapshot, "failure", "Pull request head or base SHA is invalid.");
   }
+  const eventBaseSha = normalizeSha(snapshot?.eventBaseSha);
+  if (
+    !eventBaseSha ||
+    typeof snapshot?.expectedBaseRef !== "string" ||
+    !snapshot.expectedBaseRef ||
+    snapshot?.baseRefName !== snapshot.expectedBaseRef ||
+    eventBaseSha !== baseSha
+  ) {
+    return resultFor(
+      snapshot,
+      "failure",
+      "The pull-request base does not match the default-branch tip captured when the review request was created.",
+    );
+  }
 
   const request = snapshot?.requestComment;
   if (!request?.id || request?.pullRequest?.number !== snapshot?.number) {
@@ -227,6 +241,8 @@ async function githubGraphql(token, query, variables) {
 
 export async function loadPullRequestSnapshot({
   commentNodeId,
+  eventBaseSha,
+  expectedBaseRef,
   owner,
   pullRequestNumber,
   repository,
@@ -237,6 +253,7 @@ export async function loadPullRequestSnapshot({
       repository(owner: $owner, name: $repository) {
         pullRequest(number: $number) {
           author { login }
+          baseRefName
           baseRefOid
           headRefOid
           number
@@ -298,7 +315,12 @@ export async function loadPullRequestSnapshot({
   });
   const pullRequest = data?.repository?.pullRequest;
   if (!pullRequest) throw new Error("Pull request was not found.");
-  return { ...pullRequest, requestComment: data?.requestComment ?? null };
+  return {
+    ...pullRequest,
+    eventBaseSha,
+    expectedBaseRef,
+    requestComment: data?.requestComment ?? null,
+  };
 }
 
 export async function loadPullRequestIdentity({ owner, pullRequestNumber, repository, token }) {
@@ -370,12 +392,16 @@ async function main() {
     );
   } else {
     const commentNodeId = requiredEnvironment("CHZZK_COMMENT_NODE_ID");
+    const eventBaseSha = requiredEnvironment("CHZZK_EVENT_BASE_SHA");
+    const expectedBaseRef = requiredEnvironment("CHZZK_EXPECTED_BASE_REF");
     const attempts = booleanEnvironment("CHZZK_WAIT_FOR_CODEX") ? 40 : 1;
     result = await waitForExactHeadReview({
       attempts,
       loadSnapshot: () =>
         loadPullRequestSnapshot({
           commentNodeId,
+          eventBaseSha,
+          expectedBaseRef,
           owner,
           pullRequestNumber,
           repository,

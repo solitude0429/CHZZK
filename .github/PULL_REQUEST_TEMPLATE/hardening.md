@@ -8,7 +8,7 @@
 - [ ] `npm run verify` passes.
 - [ ] Generated runtime files are refreshed before manual distribution.
 - [ ] The PR body and every high-risk impact note were finalized before the final review request.
-- [ ] One unedited author comment requests Codex review and names the exact current 40-character head and base SHAs.
+- [ ] One unedited author comment requests Codex review while naming the exact current 40-character head SHA and current default-branch tip as the base SHA.
 - [ ] No source push, base ref advance/change, PR reopen, PR metadata edit, or request edit/deletion occurred after that request.
 - [ ] The source-bound `exact-head-review` check succeeds for the current head/base pair.
 - [ ] Every actionable review thread is resolved, and checks were rerun after the last source push.

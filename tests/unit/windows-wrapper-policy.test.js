@@ -25,17 +25,35 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(workflow, /name:\s*Exact head review/);
     assert.match(workflow, /"name":\s*"exact-head-review"/);
     assert.match(workflow, /checks:\s*write/);
-    assert.match(workflow, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
+    assert.match(workflow, /ref:\s*\$\{\{ github\.sha \}\}/);
     assert.match(workflow, /types:\s*\[opened, reopened, synchronize, edited\]/);
     assert.match(workflow, /push:\s*[\r\n]+\s*branches:\s*\[main\]/);
     assert.match(workflow, /cancel-in-progress:\s*true/);
     assert.match(workflow, /&& 'protected' \|\| github\.run_id/);
     assert.match(workflow, /github\.event\.comment\.user\.login == github\.event\.issue\.user\.login/);
     assert.match(workflow, /CHZZK_COMMENT_NODE_ID/);
+    assert.match(workflow, /CHZZK_EVENT_BASE_SHA:\s*\$\{\{ github\.sha \}\}/);
+    assert.match(
+      workflow,
+      /CHZZK_EXPECTED_BASE_REF:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/,
+    );
     assert.match(workflow, /CHZZK_BASE_SHA/);
     assert.match(workflow, /evaluated_base != current_base/);
+    assert.match(workflow, /verified_base != current_base/);
+    assert.match(workflow, /check-runs\/\{check_run_id\}/);
+    assert.match(workflow, /"external_id": external_id/);
     assert.match(workflow, /invalidate-base-advance:/);
-    assert.match(workflow, /"state": "open"/);
+    assert.match(workflow, /pullRequests\(/);
+    assert.match(workflow, /after:\s*\$cursor/);
+    assert.match(workflow, /orderBy:\s*\{field:\s*CREATED_AT,\s*direction:\s*ASC\}/);
+    assert.equal(workflow.match(/group:\s*exact-head-review-writer-/g)?.length, 2);
+    assert.match(workflow, /matrix\.pull_request\.number/);
+    assert.match(workflow, /fromJSON\(needs\.enumerate-base-advance\.outputs\.matrix \|\| '\[\{"head_sha":/);
+    assert.match(workflow, /for _snapshot in range\(2\)/);
+    assert.match(workflow, /current_coordinates\(\)/);
+    assert.match(workflow, /has_current_success\(head_sha, base_sha\)/);
+    assert.match(workflow, /check_run\.get\("app", \{\}\)\.get\("slug"\) == "github-actions"/);
+    assert.doesNotMatch(workflow, /"page": page/);
     assert.match(workflow, /"conclusion": "failure"/);
     assert.match(workflow, /Base branch advanced/);
     assert.doesNotMatch(workflow, /pull_request_review_thread/);
@@ -49,6 +67,9 @@ describe("Windows signed-smoke and exact-head review policy", () => {
     assert.match(verifier, /hasPreviousPage/);
     assert.match(verifier, /hasNextPage/);
     assert.match(verifier, /baseRefOid/);
+    assert.match(verifier, /baseRefName/);
+    assert.match(verifier, /eventBaseSha/);
+    assert.match(verifier, /expectedBaseRef/);
     assert.match(verifier, /timelineItems/);
     assert.match(verifier, /PullRequestCommit/);
     assert.match(verifier, /HeadRefRestoredEvent/);

@@ -21,7 +21,10 @@ function reviewBody({ base = baseSha, head = headSha } = {}) {
 function passingSnapshot() {
   return {
     author: { login: "repository-owner" },
+    baseRefName: "main",
     baseRefOid: baseSha,
+    eventBaseSha: baseSha,
+    expectedBaseRef: "main",
     headRefOid: headSha,
     isDraft: true,
     number: 92,
@@ -128,6 +131,16 @@ describe("exact-head review verification", () => {
       { __typename: "PullRequestCommit", commit: { oid: headSha } },
     ];
     assertFailure(snapshot, /was not the pull-request head/i);
+  });
+
+  it("rejects a base that was not the default-branch tip when the request event was created", () => {
+    const futureBase = passingSnapshot();
+    futureBase.eventBaseSha = "4".repeat(40);
+    assertFailure(futureBase, /captured when the review request was created/i);
+
+    const otherBase = passingSnapshot();
+    otherBase.baseRefName = "release";
+    assertFailure(otherBase, /default-branch tip/i);
   });
 
   it("recovers the current head after a pre-request ref restore", () => {

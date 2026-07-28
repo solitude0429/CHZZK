@@ -73,7 +73,7 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -82,6 +82,8 @@ jobs:
         continue-on-error: true
         env:
           CHZZK_COMMENT_NODE_ID: ${{ github.event.comment.node_id }}
+          CHZZK_EVENT_BASE_SHA: ${{ github.sha }}
+          CHZZK_EXPECTED_BASE_REF: ${{ github.event.repository.default_branch }}
           CHZZK_INVALIDATE: ${{ github.event_name == 'pull_request_target' || github.event.action != 'created' }}
           CHZZK_INVALIDATE_REASON: ${{ github.event_name }}/${{ github.event.action }}
           CHZZK_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -92,6 +94,9 @@ jobs:
   publish-exact-head-review:
     if: always() && needs.evaluate-exact-head-review.result != 'skipped'
     needs: evaluate-exact-head-review
+    concurrency:
+      group: exact-head-review-writer-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -151,8 +156,9 @@ jobs:
           if evaluated_head != current_head or evaluated_base != current_base:
               conclusion = "failure"
               summary = "Review evaluation did not match the current pull-request head and base."
+          external_id = f"exact-head-review:v1:{current_base}:{current_head}"
 
-          request(
+          check_run = request(
               "POST",
               f"/repos/{repository}/check-runs",
               {
@@ -161,28 +167,221 @@ jobs:
                   "status": "completed",
                   "conclusion": conclusion,
                   "details_url": f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/{pr_number}",
+                  "external_id": external_id,
                   "output": {
                       "title": "Exact-diff review verification",
                       "summary": summary,
                   },
               },
           )
+          check_run_id = check_run.get("id")
+          if not isinstance(check_run_id, int) or check_run_id < 1:
+              raise SystemExit("created check run has an invalid ID")
+
+          if conclusion == "success":
+              verified_pull_request = request("GET", f"/repos/{repository}/pulls/{pr_number}")
+              verified_head = verified_pull_request["head"]["sha"]
+              verified_base = verified_pull_request["base"]["sha"]
+              if verified_head != current_head or verified_base != current_base:
+                  request(
+                      "PATCH",
+                      f"/repos/{repository}/check-runs/{check_run_id}",
+                      {
+                          "status": "completed",
+                          "conclusion": "failure",
+                          "output": {
+                              "title": "Pull-request identity changed during publication",
+                              "summary": (
+                                  "The pull-request head or base changed while the successful "
+                                  "check was being published. Create a new immutable review request."
+                              ),
+                          },
+                      },
+                  )
           PY
 
-  invalidate-base-advance:
+  enumerate-base-advance:
     if: github.event_name == 'push' && github.event.before != github.event.after
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      count: ${{ steps.enumerate.outputs.count }}
+      matrix: ${{ steps.enumerate.outputs.matrix }}
+    steps:
+      - id: enumerate
+        name: Snapshot open pull requests for the advanced base
+        env:
+          CHZZK_BASE_REF: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          repository_parts = repository.split("/", 1)
+          if len(repository_parts) != 2 or not all(repository_parts):
+              raise SystemExit("GITHUB_REPOSITORY must be owner/name")
+          owner, repository_name = repository_parts
+          token = os.environ["GITHUB_TOKEN"]
+          base_ref = os.environ["CHZZK_BASE_REF"]
+          if not base_ref or len(base_ref) > 255:
+              raise SystemExit("base ref is invalid")
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+              "User-Agent": "chzzk-exact-head-review",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def request(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  f"https://api.github.com{path}", data=data, headers=headers, method=method
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          def list_open_pull_requests():
+              query = """
+              query(
+                $owner: String!
+                $repository: String!
+                $baseRef: String!
+                $cursor: String
+              ) {
+                repository(owner: $owner, name: $repository) {
+                  pullRequests(
+                    first: 100
+                    after: $cursor
+                    states: OPEN
+                    baseRefName: $baseRef
+                    orderBy: {field: CREATED_AT, direction: ASC}
+                  ) {
+                    nodes {
+                      baseRefName
+                      headRefOid
+                      number
+                    }
+                    pageInfo {
+                      endCursor
+                      hasNextPage
+                    }
+                  }
+                }
+              }
+              """
+              cursor = None
+              observed_cursors = set()
+              observed_numbers = set()
+              pulls = []
+              for _page in range(100):
+                  response = request(
+                      "POST",
+                      "/graphql",
+                      {
+                          "query": query,
+                          "variables": {
+                              "baseRef": base_ref,
+                              "cursor": cursor,
+                              "owner": owner,
+                              "repository": repository_name,
+                          },
+                      },
+                  )
+                  if response.get("errors"):
+                      raise SystemExit("open pull-request GraphQL query returned errors")
+                  connection = (
+                      response.get("data", {})
+                      .get("repository", {})
+                      .get("pullRequests")
+                  )
+                  if not isinstance(connection, dict):
+                      raise SystemExit("open pull-request listing returned an invalid result")
+                  nodes = connection.get("nodes")
+                  page_info = connection.get("pageInfo")
+                  if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                      raise SystemExit("open pull-request connection is malformed")
+                  for pull_request in nodes:
+                      if not isinstance(pull_request, dict):
+                          raise SystemExit("open pull-request node is malformed")
+                      number = pull_request.get("number")
+                      head_sha = pull_request.get("headRefOid", "")
+                      if pull_request.get("baseRefName") != base_ref:
+                          raise SystemExit("open pull request has an unexpected base ref")
+                      if not isinstance(number, int) or number < 1:
+                          raise SystemExit("open pull request has an invalid number")
+                      if number in observed_numbers:
+                          raise SystemExit(f"pull request {number} appeared more than once")
+                      if not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+                          raise SystemExit(f"pull request {number} has an invalid head SHA")
+                      observed_numbers.add(number)
+                      pulls.append((number, head_sha))
+                  has_next_page = page_info.get("hasNextPage")
+                  end_cursor = page_info.get("endCursor")
+                  if not isinstance(has_next_page, bool):
+                      raise SystemExit("open pull-request pagination state is malformed")
+                  if not has_next_page:
+                      return pulls
+                  if not isinstance(end_cursor, str) or not end_cursor:
+                      raise SystemExit("open pull-request pagination omitted its next cursor")
+                  if end_cursor in observed_cursors:
+                      raise SystemExit("open pull-request pagination repeated a cursor")
+                  observed_cursors.add(end_cursor)
+                  cursor = end_cursor
+              raise SystemExit("open pull-request pagination exceeded 100 pages")
+
+          pull_requests = {}
+          for _snapshot in range(2):
+              for number, head_sha in list_open_pull_requests():
+                  pull_requests[number] = head_sha
+          matrix = [
+              {"head_sha": head_sha, "number": number}
+              for number, head_sha in sorted(pull_requests.items())
+          ]
+          if len(matrix) > 256:
+              raise SystemExit("open pull-request invalidation exceeds the matrix limit")
+          matrix_output = matrix or [{"head_sha": "0" * 40, "number": 0}]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"count={len(matrix)}\n")
+              output.write(f"matrix={json.dumps(matrix_output, separators=(',', ':'))}\n")
+          print(f"Snapshotted {len(matrix)} open pull request(s) targeting {base_ref}.")
+          PY
+
+  invalidate-base-advance:
+    if: needs.enumerate-base-advance.result == 'success' && needs.enumerate-base-advance.outputs.count != '0'
+    needs: enumerate-base-advance
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        pull_request: ${{ fromJSON(needs.enumerate-base-advance.outputs.matrix || '[{"head_sha":"0000000000000000000000000000000000000000","number":0}]') }}
+    concurrency:
+      group: exact-head-review-writer-${{ matrix.pull_request.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       checks: write
       contents: read
       pull-requests: read
     steps:
-      - name: Invalidate exact-diff reviews for the advanced base
+      - name: Invalidate exact-diff review for the current pull-request head
         env:
           CHZZK_BASE_AFTER: ${{ github.event.after }}
           CHZZK_BASE_BEFORE: ${{ github.event.before }}
           CHZZK_BASE_REF: ${{ github.ref_name }}
+          CHZZK_PR_NUMBER: ${{ matrix.pull_request.number }}
+          CHZZK_SNAPSHOT_HEAD: ${{ matrix.pull_request.head_sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -199,6 +398,12 @@ jobs:
           base_ref = os.environ["CHZZK_BASE_REF"]
           before = os.environ["CHZZK_BASE_BEFORE"]
           after = os.environ["CHZZK_BASE_AFTER"]
+          pull_request_number = int(os.environ["CHZZK_PR_NUMBER"])
+          snapshot_head = os.environ["CHZZK_SNAPSHOT_HEAD"]
+          if pull_request_number < 1:
+              raise SystemExit("pull-request number is invalid")
+          if not re.fullmatch(r"[a-f0-9]{40}", snapshot_head):
+              raise SystemExit("snapshot head SHA is invalid")
           if not re.fullmatch(r"[a-f0-9]{40}", before):
               raise SystemExit("base push before SHA is invalid")
           if not re.fullmatch(r"[a-f0-9]{40}", after) or after == "0" * 40:
@@ -222,54 +427,91 @@ jobs:
               with urllib.request.urlopen(req, timeout=30) as response:
                   return json.load(response)
 
-          page = 1
-          invalidated = 0
-          while page <= 100:
+          def current_coordinates():
+              pull_request = request(
+                  "GET", f"/repos/{repository}/pulls/{pull_request_number}"
+              )
+              if not isinstance(pull_request, dict):
+                  raise SystemExit("pull-request lookup returned an invalid result")
+              if pull_request.get("state") != "open":
+                  return None
+              if pull_request.get("base", {}).get("ref") != base_ref:
+                  return None
+              if pull_request.get("number") != pull_request_number:
+                  raise SystemExit("pull-request lookup returned the wrong number")
+              head_sha = pull_request.get("head", {}).get("sha", "")
+              base_sha = pull_request.get("base", {}).get("sha", "")
+              if not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+                  raise SystemExit("pull request has an invalid head SHA")
+              if not re.fullmatch(r"[a-f0-9]{40}", base_sha):
+                  raise SystemExit("pull request has an invalid base SHA")
+              return head_sha, base_sha
+
+          def has_current_success(head_sha, base_sha):
               query = urllib.parse.urlencode(
                   {
-                      "base": base_ref,
-                      "page": page,
+                      "check_name": "exact-head-review",
+                      "filter": "all",
                       "per_page": 100,
-                      "state": "open",
                   }
               )
-              pulls = request("GET", f"/repos/{repository}/pulls?{query}")
-              if not isinstance(pulls, list):
-                  raise SystemExit("open pull-request listing returned an invalid result")
-              for pull_request in pulls:
-                  number = pull_request.get("number")
-                  head_sha = pull_request.get("head", {}).get("sha", "")
-                  if not isinstance(number, int) or number < 1:
-                      raise SystemExit("open pull request has an invalid number")
-                  if not re.fullmatch(r"[a-f0-9]{40}", head_sha):
-                      raise SystemExit(f"pull request {number} has an invalid head SHA")
-                  request(
-                      "POST",
-                      f"/repos/{repository}/check-runs",
-                      {
-                          "name": "exact-head-review",
-                          "head_sha": head_sha,
-                          "status": "completed",
-                          "conclusion": "failure",
-                          "details_url": (
-                              f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/{number}"
-                          ),
-                          "output": {
-                              "title": "Base branch advanced",
-                              "summary": (
-                                  f"Base {base_ref} advanced from {before[:12]} to "
-                                  f"{after[:12]}. Create a new immutable review request "
-                                  "naming the current head and base SHAs."
-                              ),
-                          },
-                      },
-                  )
-                  invalidated += 1
-              if len(pulls) < 100:
-                  break
-              page += 1
-          else:
-              raise SystemExit("open pull-request pagination exceeded 100 pages")
+              result = request(
+                  "GET",
+                  f"/repos/{repository}/commits/{head_sha}/check-runs?{query}",
+              )
+              check_runs = result.get("check_runs")
+              if not isinstance(check_runs, list):
+                  raise SystemExit("check-run listing returned an invalid result")
+              expected_external_id = f"exact-head-review:v1:{base_sha}:{head_sha}"
+              return any(
+                  check_run.get("app", {}).get("slug") == "github-actions"
+                  and check_run.get("conclusion") == "success"
+                  and check_run.get("external_id") == expected_external_id
+                  for check_run in check_runs
+                  if isinstance(check_run, dict)
+              )
 
-          print(f"Invalidated {invalidated} open pull request(s) targeting {base_ref}.")
+          for _reconciliation in range(10):
+              coordinates = current_coordinates()
+              if coordinates is None:
+                  print("Pull request is no longer open against the advanced base.")
+                  break
+              head_sha, base_sha = coordinates
+              if has_current_success(head_sha, base_sha):
+                  print(
+                      "A trusted exact-head review already matches the current head and base."
+                  )
+                  break
+              check_run = request(
+                  "POST",
+                  f"/repos/{repository}/check-runs",
+                  {
+                      "name": "exact-head-review",
+                      "head_sha": head_sha,
+                      "status": "completed",
+                      "conclusion": "failure",
+                      "details_url": (
+                          f"{os.environ['GITHUB_SERVER_URL']}/{repository}/pull/"
+                          f"{pull_request_number}"
+                      ),
+                      "output": {
+                          "title": "Base branch advanced",
+                          "summary": (
+                              f"Base {base_ref} advanced from {before[:12]} to "
+                              f"{after[:12]}. Create a new immutable review request "
+                              "naming the current head and base SHAs."
+                          ),
+                      },
+                  },
+              )
+              if not isinstance(check_run.get("id"), int):
+                  raise SystemExit("created check run has an invalid ID")
+              if current_coordinates() == coordinates:
+                  print(
+                      f"Invalidated pull request {pull_request_number} at "
+                      f"{head_sha[:12]} (snapshot {snapshot_head[:12]})."
+                  )
+                  break
+          else:
+              raise SystemExit("pull-request invalidation did not converge")
           PY
