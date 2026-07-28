@@ -472,17 +472,14 @@ unset chzzk_settings_token
 exit "$chzzk_settings_status"
 `;
     try {
-      const result = spawnSync(
-        "/bin/bash",
-        ["--noprofile", "--norc", "-c", command, "chzzk-settings-xtrace-test", installed.path, checkout],
-        {
-          encoding: "utf8",
-          env: {
-            CHZZK_REPOSITORY_ADMIN_TOKEN: token,
-            PATH: "/usr/local/bin:/usr/bin:/bin",
-          },
+      const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-s", "--", installed.path, checkout], {
+        encoding: "utf8",
+        env: {
+          CHZZK_REPOSITORY_ADMIN_TOKEN: token,
+          PATH: "/usr/local/bin:/usr/bin:/bin",
         },
-      );
+        input: command,
+      });
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, cleanBootstrapFailurePattern);
       assert.equal(result.stdout.includes(token), false);

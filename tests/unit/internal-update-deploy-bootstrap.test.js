@@ -644,23 +644,14 @@ exit "$chzzk_deploy_status"
     try {
       const result = spawnSync(
         "/bin/bash",
-        [
-          "--noprofile",
-          "--norc",
-          "-c",
-          command,
-          "chzzk-deploy-xtrace-test",
-          installed.path,
-          version,
-          repoRoot,
-          join(sandbox, "target"),
-        ],
+        ["--noprofile", "--norc", "-s", "--", installed.path, version, repoRoot, join(sandbox, "target")],
         {
           encoding: "utf8",
           env: {
             CHZZK_DEPLOY_READ_TOKEN: token,
             PATH: "/usr/local/bin:/usr/bin:/bin",
           },
+          input: command,
         },
       );
       assert.notEqual(result.status, 0);
