@@ -4,8 +4,11 @@ export const QUALITY_PANE_SELECTOR =
 export const QUALITY_STORAGE_KEY = "live-player-video-track";
 
 const MAX_TRACKS = 64;
+const INITIAL_DISCOVERY_TARGET_RESOLUTION = 1080;
 const RETRY_DELAYS_MS = [0, 50, 250, 1000, 3000];
 const RESPONSIVE_SETTLE_DELAY_MS = 250;
+const RESPONSIVE_RECHECK_DELAYS_MS = [250, 1000, 3000];
+const RESPONSIVE_OVERRIDE_WINDOW_MS = 5000;
 const MEDIA_SETTLE_DELAY_MS = 250;
 const MEDIA_STALLED_RECHECK_DELAY_MS = 1000;
 const SELECTION_CONFIRM_DELAYS_MS = [50, 200, 750];
@@ -169,6 +172,8 @@ function resolveHighestAllowedPlayerTrack(documentRef) {
   const currentAllowed = candidates.find((candidate) => candidate.track === currentConcrete?.track);
   if (currentConcrete && !currentAllowed && compareTrackQuality(currentConcrete, highestAllowed) < 0) {
     return {
+      candidates,
+      concreteCandidates,
       filter,
       pane,
       player,
@@ -178,7 +183,7 @@ function resolveHighestAllowedPlayerTrack(documentRef) {
   }
   const candidate =
     currentAllowed && sameTrackQuality(currentAllowed, highestAllowed) ? currentAllowed : highestAllowed;
-  return { candidate, filter, pane, player, tracks };
+  return { candidate, candidates, concreteCandidates, filter, pane, player, tracks };
 }
 
 function selectedTrackOutcome(candidate, changed) {
@@ -208,6 +213,7 @@ function selectionContextMatches(left, right) {
 export function selectHighestAllowedPlayerTrack({
   allowSelectionWrite = true,
   documentRef = globalThis.document,
+  persistSelection = true,
   storage,
 } = {}) {
   const resolvedStorage = resolveStorage(storage);
@@ -242,7 +248,7 @@ export function selectHighestAllowedPlayerTrack({
   if (!isCurrentTrack(observedResolution.player, observedResolution.candidate)) {
     return { reason: "selection-not-applied", selected: false };
   }
-  persistSelectedTrack(resolvedStorage, observedResolution.candidate);
+  if (persistSelection) persistSelectedTrack(resolvedStorage, observedResolution.candidate);
   return selectedTrackOutcome(observedResolution.candidate, changed);
 }
 
@@ -279,8 +285,20 @@ function currentPlayerMediaEvent(event, documentRef) {
 }
 
 function mutationTouchesPlayer(records) {
-  return (Array.isArray(records) ? records : []).some((record) =>
-    [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
+  return (Array.isArray(records) ? records : []).some((record) => {
+    let targetTouchesQualityPane = false;
+    try {
+      const targetTagName = String(record?.target?.tagName ?? "").toUpperCase();
+      targetTouchesQualityPane = Boolean(
+        targetTagName === "PZP-PC-SETTING-QUALITY-PANE" ||
+        targetTagName === "PZP-SETTING-QUALITY" ||
+        record?.target?.closest?.(QUALITY_PANE_SELECTOR),
+      );
+    } catch {
+      targetTouchesQualityPane = false;
+    }
+    if (targetTouchesQualityPane) return true;
+    return [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
       try {
         const tagName = String(node?.tagName ?? "").toUpperCase();
         if (
@@ -299,8 +317,8 @@ function mutationTouchesPlayer(records) {
       } catch {
         return false;
       }
-    }),
-  );
+    });
+  });
 }
 
 function defaultMonotonicNow() {
@@ -328,6 +346,8 @@ export function createHighestQualityPlayerController({
   const resolvedStorage = resolveStorage(storage);
   let active = false;
   let boundTracks = null;
+  let confirmedSelection = null;
+  let discoveryContext = null;
   const eventRestorers = [];
   let globalAvailableWrites = MAX_GLOBAL_SELECTION_WRITES;
   let globalFreshMediaRecoveryAvailable = true;
@@ -341,6 +361,12 @@ export function createHighestQualityPlayerController({
   let mediaStalledTimer = null;
   let observer = null;
   let responsiveTimer = null;
+  let responsiveRecheckIndex = 0;
+  let responsiveRecheckLimit = 0;
+  let responsiveRecheckTimer = null;
+  let responsiveRecheckToken = 0;
+  let responsiveOverrideContext = null;
+  let responsiveOverrideTimer = null;
   let retryIndex = 0;
   let scheduledTimer = null;
   let selectionConfirmationTimer = null;
@@ -367,6 +393,68 @@ export function createHighestQualityPlayerController({
     if (responsiveTimer == null) return;
     clearTimeoutImpl(responsiveTimer);
     responsiveTimer = null;
+  }
+
+  function cancelResponsiveRecheck() {
+    if (responsiveRecheckTimer == null) return;
+    clearTimeoutImpl(responsiveRecheckTimer);
+    responsiveRecheckTimer = null;
+  }
+
+  function clearResponsiveOverrideContext() {
+    if (responsiveOverrideTimer != null) {
+      clearTimeoutImpl(responsiveOverrideTimer);
+      responsiveOverrideTimer = null;
+    }
+    responsiveOverrideContext = null;
+  }
+
+  function armResponsiveOverrideContext() {
+    clearResponsiveOverrideContext();
+    let player;
+    let tracks;
+    try {
+      player = documentRef?.querySelector?.(PLAYER_LAYOUT_SELECTOR) ?? null;
+      tracks = player?.videoTracks ?? null;
+    } catch {
+      return;
+    }
+    if (!player || !tracks) return;
+    const context = { player, tracks };
+    responsiveOverrideContext = context;
+    responsiveOverrideTimer = setTimeoutImpl(() => {
+      if (responsiveOverrideContext !== context) return;
+      responsiveOverrideTimer = null;
+      responsiveOverrideContext = null;
+    }, RESPONSIVE_OVERRIDE_WINDOW_MS);
+  }
+
+  function clearResponsiveRechecks() {
+    cancelResponsiveRecheck();
+    responsiveRecheckIndex = 0;
+    responsiveRecheckLimit = 0;
+    responsiveRecheckToken += 1;
+  }
+
+  function armResponsiveRechecks() {
+    clearResponsiveRechecks();
+    responsiveRecheckLimit = RESPONSIVE_RECHECK_DELAYS_MS.length;
+  }
+
+  function scheduleResponsiveRecheck() {
+    if (!active || responsiveRecheckTimer != null || responsiveRecheckIndex >= responsiveRecheckLimit) {
+      return;
+    }
+    const index = responsiveRecheckIndex;
+    const token = responsiveRecheckToken;
+    responsiveRecheckIndex += 1;
+    responsiveRecheckTimer = setTimeoutImpl(() => {
+      responsiveRecheckTimer = null;
+      if (!active || token !== responsiveRecheckToken || !isPlayerPageLocation(locationRef)) {
+        return;
+      }
+      scheduleScan({ restart: true });
+    }, RESPONSIVE_RECHECK_DELAYS_MS[index]);
   }
 
   function cancelMediaSettledScan() {
@@ -423,6 +511,8 @@ export function createHighestQualityPlayerController({
   function transactionMatches(transaction, resolution) {
     return Boolean(
       transaction &&
+      transaction.responsiveOverride === (resolution?.responsiveOverride === true) &&
+      transaction.responsiveFilterRejected === (resolution?.responsiveFilterRejected === true) &&
       selectionContextMatches(
         {
           candidate: { track: transaction.track },
@@ -436,16 +526,203 @@ export function createHighestQualityPlayerController({
     );
   }
 
+  function confirmedContextMatches(resolution) {
+    return Boolean(
+      confirmedSelection &&
+      resolution &&
+      !resolution.outcome &&
+      confirmedSelection.player === resolution.player &&
+      confirmedSelection.tracks === resolution.tracks,
+    );
+  }
+
+  function rememberConfirmedSelection(resolution, candidate = resolution?.candidate) {
+    if (!resolution || !candidate) return;
+    confirmedSelection = {
+      filter: resolution.filter,
+      pane: resolution.pane,
+      player: resolution.player,
+      track: candidate.track,
+      tracks: resolution.tracks,
+    };
+  }
+
+  function responsiveOverrideContextMatches(resolution) {
+    if (!responsiveOverrideContext) return false;
+    if (
+      responsiveOverrideContext.player === resolution?.player &&
+      responsiveOverrideContext.tracks === resolution?.tracks
+    ) {
+      return true;
+    }
+    clearResponsiveOverrideContext();
+    return false;
+  }
+
+  function isProvisionalFilteredDemotion(resolution) {
+    const currentCandidate = resolution?.preserved ?? resolution?.candidate;
+    if (
+      responsiveOverrideContext ||
+      !mediaHold ||
+      mediaHold.player !== resolution?.player ||
+      (mediaHold.tracks != null && mediaHold.tracks !== resolution?.tracks) ||
+      !confirmedContextMatches(resolution) ||
+      !currentCandidate ||
+      !isCurrentTrack(resolution.player, currentCandidate)
+    ) {
+      return false;
+    }
+    const remembered = resolution.concreteCandidates?.find(
+      (candidate) => candidate.track === confirmedSelection.track,
+    );
+    if (!remembered) return false;
+    const rememberedAllowed = resolution.candidates?.some(
+      (candidate) => candidate.track === remembered.track,
+    );
+    return (
+      !rememberedAllowed &&
+      remembered.track !== currentCandidate.track &&
+      compareTrackQuality(remembered, currentCandidate) < 0
+    );
+  }
+
+  function deferProvisionalFilteredDemotion(resolution) {
+    if (!isProvisionalFilteredDemotion(resolution)) return false;
+    const candidate = resolution.preserved ?? resolution.candidate;
+    clearSelectionTransaction();
+    continueResponsiveRechecks({
+      ...resolution,
+      candidate,
+      preserved: undefined,
+    });
+    return true;
+  }
+
+  function resolveControllerPlayerTrack() {
+    const resolution = resolveHighestAllowedPlayerTrack(documentRef);
+    if (resolution.outcome || !confirmedSelection) return resolution;
+    if (!confirmedContextMatches(resolution)) {
+      confirmedSelection = null;
+      return resolution;
+    }
+    const remembered = resolution.concreteCandidates?.find(
+      (candidate) => candidate.track === confirmedSelection.track,
+    );
+    if (!remembered) {
+      confirmedSelection = null;
+      return resolution;
+    }
+    const rememberedAllowed = resolution.candidates?.some(
+      (candidate) => candidate.track === confirmedSelection.track,
+    );
+    if (!responsiveOverrideContextMatches(resolution)) return resolution;
+
+    let candidate = resolution.candidate;
+    if (candidate && !rememberedAllowed && compareTrackQuality(remembered, candidate) < 0) {
+      candidate = remembered;
+    }
+    const restoringPreservedTransaction = Boolean(
+      resolution.preserved &&
+      selectionTransaction?.responsiveOverride === true &&
+      selectionTransaction.pane === resolution.pane &&
+      selectionTransaction.player === resolution.player &&
+      selectionTransaction.track === resolution.preserved.track &&
+      selectionTransaction.tracks === resolution.tracks,
+    );
+    if (resolution.preserved) {
+      if (compareTrackQuality(remembered, resolution.preserved) < 0) {
+        candidate = remembered;
+      } else if (restoringPreservedTransaction) {
+        candidate = resolution.preserved;
+      } else {
+        return resolution;
+      }
+    }
+    if (!candidate) return resolution;
+    if (candidate.track !== remembered.track) return resolution;
+
+    const restoringTransaction = Boolean(
+      selectionTransaction?.responsiveOverride === true &&
+      selectionTransaction.pane === resolution.pane &&
+      selectionTransaction.player === resolution.player &&
+      selectionTransaction.track === candidate.track &&
+      selectionTransaction.tracks === resolution.tracks,
+    );
+    if (isCurrentTrack(resolution.player, candidate) && !restoringTransaction) return resolution;
+
+    return {
+      ...resolution,
+      candidate,
+      preserved: undefined,
+      responsiveFilterRejected: !resolution.candidates?.some(
+        (allowedCandidate) => allowedCandidate.track === candidate.track,
+      ),
+      responsiveOverride: true,
+    };
+  }
+
+  function hasFilteredHigherCandidate(resolution) {
+    if (!resolution?.candidate || !Array.isArray(resolution.concreteCandidates)) return false;
+    const allowedTracks = new Set(
+      Array.isArray(resolution.candidates) ? resolution.candidates.map((candidate) => candidate.track) : [],
+    );
+    return resolution.concreteCandidates.some(
+      (candidate) =>
+        !allowedTracks.has(candidate.track) && compareTrackQuality(candidate, resolution.candidate) < 0,
+    );
+  }
+
+  function continueResponsiveRechecks(resolution) {
+    const newDiscoveryContext =
+      !discoveryContext ||
+      discoveryContext.pane !== resolution?.pane ||
+      discoveryContext.player !== resolution?.player ||
+      discoveryContext.tracks !== resolution?.tracks;
+    if (newDiscoveryContext) {
+      discoveryContext = {
+        pane: resolution.pane,
+        player: resolution.player,
+        tracks: resolution.tracks,
+      };
+      if (
+        resolution.candidate.resolution < INITIAL_DISCOVERY_TARGET_RESOLUTION ||
+        hasFilteredHigherCandidate(resolution)
+      ) {
+        armResponsiveRechecks();
+      }
+    } else if (responsiveRecheckLimit === 0 && hasFilteredHigherCandidate(resolution)) {
+      armResponsiveRechecks();
+    }
+    scheduleResponsiveRecheck();
+  }
+
+  function retainPreservedSelection(resolution) {
+    rememberConfirmedSelection(resolution, resolution.preserved);
+    clearSelectionTransaction();
+    continueResponsiveRechecks({
+      ...resolution,
+      candidate: resolution.preserved,
+      preserved: undefined,
+    });
+  }
+
   function beginSelectionTransaction(resolution) {
     clearSelectionTransaction();
+    const candidateWasConfirmed = Boolean(
+      confirmedContextMatches(resolution) && confirmedSelection.track === resolution.candidate.track,
+    );
     selectionTransaction = {
       availableWrites: MAX_SELECTION_WRITES_PER_CANDIDATE,
       confirmationIndex: 0,
+      everConfirmed: candidateWasConfirmed,
       filter: resolution.filter,
+      initialReadinessRecoveryAvailable: !candidateWasConfirmed,
       lastRefillAt: null,
       pane: resolution.pane,
       phase: "idle",
       player: resolution.player,
+      responsiveFilterRejected: resolution.responsiveFilterRejected === true,
+      responsiveOverride: resolution.responsiveOverride === true,
       stableSince: null,
       token: selectionToken,
       track: resolution.candidate.track,
@@ -456,10 +733,41 @@ export function createHighestQualityPlayerController({
 
   function mediaBlocksTransaction(transaction) {
     return Boolean(
+      transaction?.responsiveOverride !== true &&
       mediaHold &&
       mediaHold.player === transaction.player &&
       (mediaHold.tracks == null || mediaHold.tracks === transaction.tracks),
     );
+  }
+
+  function grantInitialReadinessRecovery(evidence) {
+    const transaction = selectionTransaction;
+    if (
+      !evidence ||
+      !transaction ||
+      transaction.everConfirmed ||
+      !transaction.initialReadinessRecoveryAvailable ||
+      transaction.phase !== "quiescent" ||
+      transaction.availableWrites > 0 ||
+      globalAvailableWrites <= 0 ||
+      evidence.player !== transaction.player ||
+      evidence.tracks !== transaction.tracks
+    ) {
+      return false;
+    }
+    const resolution = resolveControllerPlayerTrack();
+    if (
+      resolution.outcome ||
+      resolution.preserved ||
+      !transactionMatches(transaction, resolution) ||
+      isCurrentTrack(resolution.player, resolution.candidate)
+    ) {
+      return false;
+    }
+    transaction.availableWrites = 1;
+    transaction.initialReadinessRecoveryAvailable = false;
+    transaction.phase = "idle";
+    return true;
   }
 
   function unbindCurrentTracks() {
@@ -589,17 +897,26 @@ export function createHighestQualityPlayerController({
 
   function confirmSelection(resolution, transaction, changed) {
     cancelSelectionConfirmation();
-    const confirmation = selectHighestAllowedPlayerTrack({
-      allowSelectionWrite: false,
-      documentRef,
-      storage: resolvedStorage,
-    });
-    const observedResolution = resolveHighestAllowedPlayerTrack(documentRef);
+    const ordinaryConfirmation =
+      transaction.responsiveOverride === true
+        ? null
+        : selectHighestAllowedPlayerTrack({
+            allowSelectionWrite: false,
+            documentRef,
+            persistSelection: false,
+            storage: resolvedStorage,
+          });
+    const observedResolution = resolveControllerPlayerTrack();
+    if (deferProvisionalFilteredDemotion(observedResolution)) {
+      return { reason: "provisional-filtered-demotion", selected: false };
+    }
     if (
-      !confirmation.selected ||
-      confirmation.preserved ||
+      (ordinaryConfirmation && (!ordinaryConfirmation.selected || ordinaryConfirmation.preserved === true)) ||
+      observedResolution.outcome ||
+      observedResolution.preserved ||
       !selectionContextMatches(resolution, observedResolution) ||
-      !transactionMatches(transaction, observedResolution)
+      !transactionMatches(transaction, observedResolution) ||
+      !isCurrentTrack(observedResolution.player, observedResolution.candidate)
     ) {
       clearSelectionTransaction();
       scheduleResponsiveScan();
@@ -620,6 +937,11 @@ export function createHighestQualityPlayerController({
     }
     transaction.phase = "confirmed";
     transaction.confirmationIndex = 0;
+    transaction.everConfirmed = true;
+    transaction.initialReadinessRecoveryAvailable = false;
+    persistSelectedTrack(resolvedStorage, observedResolution.candidate);
+    rememberConfirmedSelection(observedResolution);
+    continueResponsiveRechecks(observedResolution);
     return selectedTrackOutcome(observedResolution.candidate, changed);
   }
 
@@ -639,9 +961,10 @@ export function createHighestQualityPlayerController({
       }
 
       bindCurrentTracks();
-      const resolution = resolveHighestAllowedPlayerTrack(documentRef);
+      const resolution = resolveControllerPlayerTrack();
+      if (deferProvisionalFilteredDemotion(resolution)) return;
       if (resolution.preserved) {
-        clearSelectionTransaction();
+        retainPreservedSelection(resolution);
         return;
       }
       if (resolution.outcome) {
@@ -693,9 +1016,10 @@ export function createHighestQualityPlayerController({
       }
 
       bindCurrentTracks();
-      const resolution = resolveHighestAllowedPlayerTrack(documentRef);
+      const resolution = resolveControllerPlayerTrack();
+      if (deferProvisionalFilteredDemotion(resolution)) return;
       if (resolution.preserved) {
-        clearSelectionTransaction();
+        retainPreservedSelection(resolution);
         return;
       }
       if (resolution.outcome) {
@@ -751,9 +1075,12 @@ export function createHighestQualityPlayerController({
     }
 
     bindCurrentTracks();
-    const observedResolution = resolveHighestAllowedPlayerTrack(documentRef);
+    const observedResolution = resolveControllerPlayerTrack();
+    if (deferProvisionalFilteredDemotion(observedResolution)) {
+      return { retry: false };
+    }
     if (observedResolution.preserved) {
-      clearSelectionTransaction();
+      retainPreservedSelection(observedResolution);
       return { retry: false };
     }
     if (observedResolution.outcome || !transactionMatches(transaction, observedResolution)) {
@@ -771,16 +1098,18 @@ export function createHighestQualityPlayerController({
 
   function reconcileSelection() {
     replenishGlobalSelectionBudget(now());
-    const resolution = resolveHighestAllowedPlayerTrack(documentRef);
+    const resolution = resolveControllerPlayerTrack();
     if (resolution.outcome) {
       clearSelectionTransaction();
       return { retry: true };
     }
-    if (resolution.preserved) {
-      clearSelectionTransaction();
+    if (deferProvisionalFilteredDemotion(resolution)) {
       return { retry: false };
     }
-
+    if (resolution.preserved) {
+      retainPreservedSelection(resolution);
+      return { retry: false };
+    }
     let transaction = selectionTransaction;
     if (!transactionMatches(transaction, resolution)) {
       transaction = beginSelectionTransaction(resolution);
@@ -825,8 +1154,12 @@ export function createHighestQualityPlayerController({
       if (!isPlayerPageLocation(locationRef)) {
         retryIndex = 0;
         globalLastRefillAt = null;
+        confirmedSelection = null;
+        discoveryContext = null;
         unbindCurrentTracks();
         clearMediaHold();
+        clearResponsiveRechecks();
+        clearResponsiveOverrideContext();
         clearSelectionTransaction();
         return;
       }
@@ -834,6 +1167,7 @@ export function createHighestQualityPlayerController({
       const result = reconcileSelection();
       if (!result.retry || retryIndex >= RETRY_DELAYS_MS.length - 1) {
         retryIndex = 0;
+        scheduleResponsiveRecheck();
         return;
       }
       retryIndex += 1;
@@ -841,8 +1175,9 @@ export function createHighestQualityPlayerController({
     }, delay);
   }
 
-  function scheduleResponsiveScan() {
+  function scheduleResponsiveScan({ armRechecks = false, delay = RESPONSIVE_SETTLE_DELAY_MS } = {}) {
     if (!active) return;
+    if (armRechecks) armResponsiveRechecks();
     cancelScheduledScan();
     cancelResponsiveScan();
     cancelSelectionConfirmation();
@@ -855,12 +1190,14 @@ export function createHighestQualityPlayerController({
       if (!active) return;
       retryIndex = 0;
       scheduleScan({ restart: true });
-    }, RESPONSIVE_SETTLE_DELAY_MS);
+    }, delay);
   }
 
   function scheduleFreshEvidenceScan() {
     if (responsiveTimer != null) {
-      scheduleResponsiveScan();
+      scheduleResponsiveScan({
+        delay: responsiveOverrideContext ? 0 : RESPONSIVE_SETTLE_DELAY_MS,
+      });
       return;
     }
     scheduleScan({ restart: true });
@@ -879,15 +1216,25 @@ export function createHighestQualityPlayerController({
   }
 
   function handleRouteChange() {
-    if (!isPlayerPageLocation(locationRef)) globalLastRefillAt = null;
+    if (!isPlayerPageLocation(locationRef)) {
+      globalLastRefillAt = null;
+      clearMediaHold();
+    }
+    clearResponsiveRechecks();
+    clearResponsiveOverrideContext();
+    clearSelectionTransaction();
+    confirmedSelection = null;
+    discoveryContext = null;
     scheduleResponsiveScan();
   }
 
   function handleResponsiveChange() {
-    scheduleResponsiveScan();
+    armResponsiveOverrideContext();
+    scheduleResponsiveScan({ armRechecks: true, delay: 0 });
   }
 
   function handleMediaUnsettled(event) {
+    if (!isPlayerPageLocation(locationRef)) return;
     const evidence = currentPlayerMediaEvent(event, documentRef);
     if (!evidence) return;
     cancelMediaSettledScan();
@@ -914,8 +1261,14 @@ export function createHighestQualityPlayerController({
   }
 
   function handleMediaSettled(event) {
+    if (!isPlayerPageLocation(locationRef)) return;
     const evidence = currentPlayerMediaEvent(event, documentRef);
-    if (!evidence || !mediaHold) return;
+    if (!evidence) return;
+    const recoveredInitialSelection = grantInitialReadinessRecovery(evidence);
+    if (!mediaHold) {
+      if (recoveredInitialSelection) scheduleFreshEvidenceScan();
+      return;
+    }
     if (evidence.media !== mediaHold.media || evidence.player !== mediaHold.player) {
       cancelMediaSettledScan();
       cancelMediaStalledScan();
@@ -1053,8 +1406,12 @@ export function createHighestQualityPlayerController({
     active = false;
     cancelScheduledScan();
     cancelResponsiveScan();
+    clearResponsiveRechecks();
+    clearResponsiveOverrideContext();
     clearMediaHold();
     clearSelectionTransaction();
+    confirmedSelection = null;
+    discoveryContext = null;
     unbindCurrentTracks();
     try {
       observer?.disconnect?.();
