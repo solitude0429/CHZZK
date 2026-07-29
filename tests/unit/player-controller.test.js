@@ -126,6 +126,9 @@ function playerFixture(trackValues, { filter = () => true, onSelectionWrite = nu
       if (String(selector).includes("video")) return mountedPrimaryMedia;
       return null;
     },
+    querySelectorAll() {
+      return [];
+    },
   };
   return {
     addTrack,
@@ -167,7 +170,116 @@ function playerFixture(trackValues, { filter = () => true, onSelectionWrite = nu
   };
 }
 
-function controllerHarness(fixture, { omitStorage = false, pathname = "/live/test" } = {}) {
+function reactFiberPlayerFixture(trackValues, options) {
+  const fixture = playerFixture(trackValues, options);
+  const baseDocumentRef = fixture.documentRef;
+  const video = fixture.primaryMedia;
+  const fiberProperty = "__reactFiber$chzzkTest";
+  let descendants = [video];
+  const layout = {
+    id: "live_player_layout",
+    parentElement: null,
+    querySelector(selector) {
+      return String(selector).includes("video") ? video : null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "*") return descendants;
+      return [];
+    },
+    tagName: "DIV",
+  };
+  video.parentElement = layout;
+
+  function installFiberPlayer(player) {
+    const wrapper = { _internalPlayer: player };
+    const effect = { deps: [wrapper] };
+    const ancestorFiber = {
+      memoizedState: {
+        memoizedState: effect,
+      },
+      updateQueue: {
+        lastEffect: effect,
+      },
+    };
+    const fiber = { return: ancestorFiber };
+    layout[fiberProperty] = fiber;
+    video.parentElement = layout;
+    descendants = [video];
+    return { ancestorFiber, effect, fiber, wrapper };
+  }
+
+  function installAncestorPlayer(player) {
+    delete layout[fiberProperty];
+    const ancestor = {
+      parentElement: layout,
+      querySelector(selector) {
+        return String(selector).includes("video") ? video : null;
+      },
+      tagName: "DIV",
+      videoTracks: player.videoTracks,
+    };
+    video.parentElement = ancestor;
+    descendants = [ancestor, video];
+    return ancestor;
+  }
+
+  function installAncestorFiberPlayer(player) {
+    delete layout[fiberProperty];
+    const ancestor = {
+      parentElement: layout,
+      querySelector(selector) {
+        return String(selector).includes("video") ? video : null;
+      },
+      tagName: "DIV",
+    };
+    const wrapper = { _internalPlayer: player };
+    const effect = { deps: [wrapper] };
+    effect.next = effect;
+    const ancestorFiber = {
+      return: null,
+      updateQueue: { lastEffect: effect },
+    };
+    const fiber = { return: ancestorFiber };
+    Object.defineProperty(ancestor, fiberProperty, {
+      configurable: true,
+      value: fiber,
+    });
+    video.parentElement = ancestor;
+    descendants = [ancestor, video];
+    return { ancestor, ancestorFiber, effect, fiber, wrapper };
+  }
+
+  const initialFiber = installFiberPlayer(fixture.player);
+  layout.contains = (node) =>
+    node === layout || node === video || descendants.includes(node) || node === fixture.player;
+  fixture.documentRef = {
+    querySelector(selector) {
+      if (selector === PLAYER_LAYOUT_SELECTOR) return null;
+      if (selector === QUALITY_PANE_SELECTOR) return baseDocumentRef.querySelector(selector);
+      if (selector === "#live_player_layout") return layout;
+      if (String(selector).includes("video")) return video;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "#live_player_layout video, video.webplayer-internal-video") return [video];
+      return [];
+    },
+  };
+  fixture.fiberProperty = fiberProperty;
+  fixture.initialFiber = initialFiber;
+  fixture.installAncestorFiberPlayer = installAncestorFiberPlayer;
+  fixture.installAncestorPlayer = installAncestorPlayer;
+  fixture.installFiberPlayer = installFiberPlayer;
+  fixture.layout = layout;
+  fixture.root = layout;
+  fixture.video = video;
+  return fixture;
+}
+
+function controllerHarness(
+  fixture,
+  { omitStorage = false, pathname = "/live/test", watchdogIntervalMs = 0 } = {},
+) {
   let currentTime = 0;
   const documentListeners = new Map();
   const locationRef = { pathname };
@@ -205,6 +317,9 @@ function controllerHarness(fixture, { omitStorage = false, pathname = "/live/tes
     },
     querySelector(selector) {
       return fixture.documentRef.querySelector(selector);
+    },
+    querySelectorAll(selector) {
+      return fixture.documentRef.querySelectorAll?.(selector) ?? [];
     },
     removeEventListener(type, listener) {
       removeListener(documentListeners, type, listener);
@@ -264,6 +379,7 @@ function controllerHarness(fixture, { omitStorage = false, pathname = "/live/tes
       return timerId;
     },
     visualViewportRef,
+    watchdogIntervalMs,
     windowRef,
   };
   if (!omitStorage) controllerOptions.storage = fixture.storage;
@@ -316,6 +432,9 @@ function controllerHarness(fixture, { omitStorage = false, pathname = "/live/tes
     locationRef,
     originalPushState,
     originalReplaceState,
+    now() {
+      return currentTime;
+    },
     pendingTimerCount() {
       return timers.size;
     },
@@ -332,11 +451,85 @@ function controllerHarness(fixture, { omitStorage = false, pathname = "/live/tes
 }
 
 describe("CHZZK player highest-quality controller", () => {
-  it("accepts only live and lives paths while allowing real query strings", () => {
+  it("keeps the player controller eligible on every CHZZK same-site path", () => {
     assert.equal(isPlayerPageLocation("https://chzzk.naver.com/live/channel?foo=bar"), true);
     assert.equal(isPlayerPageLocation("https://chzzk.naver.com/lives?keyword=channel"), true);
-    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/livestream"), false);
-    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/"), false);
+    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/"), true);
+    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/following"), true);
+    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/search?keyword=channel"), true);
+    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/category/GAME"), true);
+    assert.equal(isPlayerPageLocation("https://chzzk.naver.com/livestream"), true);
+    assert.equal(
+      isPlayerPageLocation({
+        get pathname() {
+          throw new Error("unreadable location");
+        },
+        toString() {
+          throw new Error("unreadable location");
+        },
+      }),
+      false,
+    );
+  });
+
+  it("protects a 1080p storage baseline immediately while preserving a higher stored intent", () => {
+    const cases = [
+      { initial: null, expectedHeight: 1080, name: "missing" },
+      {
+        initial: { height: 720, label: "720p", width: 1280 },
+        expectedHeight: 1080,
+        name: "720p",
+      },
+      {
+        initial: { height: 1440, label: "1440p", width: 2560 },
+        expectedHeight: 1440,
+        name: "1440p",
+      },
+    ];
+
+    for (const { expectedHeight, initial, name } of cases) {
+      const fixture = playerFixture([]);
+      if (initial) fixture.stored.set(QUALITY_STORAGE_KEY, JSON.stringify(initial));
+      const harness = controllerHarness(fixture);
+
+      harness.controller.start();
+      assert.equal(
+        JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height,
+        expectedHeight,
+        `${name} storage must be protected synchronously at controller start`,
+      );
+      harness.controller.stop();
+    }
+  });
+
+  it("restores the 1080p storage baseline within one watchdog tick when no player API exists", () => {
+    const fixture = playerFixture([]);
+    fixture.documentRef = {
+      querySelector() {
+        return null;
+      },
+      querySelectorAll() {
+        return [];
+      },
+    };
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
+
+    harness.controller.start();
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.now(), 300);
+
+    fixture.storage.setItem(QUALITY_STORAGE_KEY, JSON.stringify({ height: 720, label: "720p", width: 1280 }));
+    harness.advanceTime(699);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 720);
+    harness.advanceTime(1);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+
+    harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
   it("selects and persists the highest allowed concrete track instead of ABR", () => {
@@ -402,7 +595,7 @@ describe("CHZZK player highest-quality controller", () => {
     }
   });
 
-  it("honors the player quality filter and selects the highest permitted fallback", () => {
+  it("selects the highest concrete track on a cold compact load even when the pane filter vetoes it", () => {
     const fixture = playerFixture(
       [
         { height: 720, label: "720p", width: 1280 },
@@ -416,16 +609,16 @@ describe("CHZZK player highest-quality controller", () => {
       storage: fixture.storage,
     });
 
-    assert.equal(result.label, "720p");
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(result.label, "1080p");
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
     assert.deepEqual(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)), {
-      label: "720p",
-      width: 1280,
-      height: 720,
+      label: "1080p",
+      width: 1920,
+      height: 1080,
     });
   });
 
-  it("fails closed until the official player filter is available", () => {
+  it("selects the highest concrete track when the quality filter is missing", () => {
     const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
     fixture.pane.filter = undefined;
 
@@ -434,13 +627,86 @@ describe("CHZZK player highest-quality controller", () => {
         documentRef: fixture.documentRef,
         storage: fixture.storage,
       }),
-      { reason: "quality-filter-missing", selected: false },
+      {
+        changed: true,
+        height: 1080,
+        label: "1080p",
+        selected: true,
+        width: 1920,
+      },
     );
-    assert.equal(fixture.player.videoTracks.selectedIndex, -1);
-    assert.equal(fixture.stored.size, 0);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
   });
 
-  it("fails closed when the player filter or track selector rejects access", () => {
+  it("wraps compact quality filters, rewraps replacements, and restores the current filter on stop", () => {
+    let currentPane;
+    let fixture;
+    const originalFilter = (track) => track.height <= 720;
+    fixture = playerFixture(
+      [
+        { height: 720, label: "720p", selected: true, width: 1280 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ],
+      {
+        filter: originalFilter,
+        onSelectionWrite({ apply, track }) {
+          if (currentPane.filter(track)) apply();
+        },
+      },
+    );
+    currentPane = fixture.pane;
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    assert.equal(fixture.pane.filter, originalFilter);
+    assert.equal(harness.flushTimer(), true);
+    const firstWrapper = fixture.pane.filter;
+    assert.notEqual(firstWrapper, originalFilter);
+    assert.equal(firstWrapper[Symbol.for("chzzk.highest-quality-filter-wrapper")], true);
+    assert.equal(originalFilter(fixture.values[1]), false);
+    assert.equal(firstWrapper(fixture.values[1]), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+
+    const replacementFilter = (track) => track.height <= 480;
+    fixture.pane.filter = replacementFilter;
+    const replacementDescriptor = Object.getOwnPropertyDescriptor(fixture.pane, "filter");
+    fixture.selectTrack(0);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.equal(harness.flushTimer(), true);
+    const replacementWrapper = fixture.pane.filter;
+    assert.notEqual(replacementWrapper, replacementFilter);
+    assert.notEqual(replacementWrapper, firstWrapper);
+    assert.equal(replacementWrapper(fixture.values[1]), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+
+    harness.controller.stop();
+    assert.deepEqual(Object.getOwnPropertyDescriptor(fixture.pane, "filter"), replacementDescriptor);
+  });
+
+  it("removes an own filter wrapper on stop when the original filter was inherited", () => {
+    const inheritedFilter = (track) => track.height <= 720;
+    const panePrototype = { filter: inheritedFilter };
+    const pane = Object.create(panePrototype);
+    const fixture = playerFixture([
+      { height: 720, label: "720p", selected: true, width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    fixture.setPane(pane);
+    const harness = controllerHarness(fixture);
+
+    assert.equal(Object.hasOwn(pane, "filter"), false);
+    harness.controller.start();
+    harness.flushTimer();
+    assert.equal(Object.hasOwn(pane, "filter"), true);
+    assert.notEqual(pane.filter, inheritedFilter);
+
+    harness.controller.stop();
+    assert.equal(Object.hasOwn(pane, "filter"), false);
+    assert.equal(pane.filter, inheritedFilter);
+  });
+
+  it("ignores throwing filters but still fails safely when the track setter rejects access", () => {
     const throwingFilter = playerFixture([{ height: 1080, label: "1080p", width: 1920 }], {
       filter() {
         throw new Error("player filter unavailable");
@@ -451,8 +717,16 @@ describe("CHZZK player highest-quality controller", () => {
         documentRef: throwingFilter.documentRef,
         storage: throwingFilter.storage,
       }),
-      { reason: "allowed-track-missing", selected: false },
+      {
+        changed: true,
+        height: 1080,
+        label: "1080p",
+        selected: true,
+        width: 1920,
+      },
     );
+    assert.equal(throwingFilter.player.videoTracks.selectedIndex, 0);
+    assert.equal(JSON.parse(throwingFilter.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     const throwingSelector = playerFixture([
       { height: 720, label: "720p", width: 1280 },
@@ -573,7 +847,166 @@ describe("CHZZK player highest-quality controller", () => {
     assert.equal(listeners.size, 0);
   });
 
-  it("retries when the official quality pane mounts after the initial retry window", () => {
+  it("recovers the highest descriptor after a remount replaces every track object", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const replacement = playerFixture(
+      [
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 720, label: "720p", width: 1280 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ],
+      { filter: (track) => track.height <= 720 },
+    );
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    harness.flushTimer();
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    assert.notEqual(fixture.values[2], replacement.values[2]);
+
+    fixture.mountDocument(replacement);
+    harness.dispatchMutation([
+      {
+        addedNodes: [replacement.root],
+        removedNodes: [fixture.root],
+      },
+    ]);
+    assert.ok(harness.flushTimers(20) < 20);
+
+    assert.equal(replacement.player.videoTracks.selectedIndex, 2);
+    assert.equal(replacement.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    harness.controller.stop();
+  });
+
+  it("finds the internal player through the real layout React fiber and recovers a remounted fiber", () => {
+    const fixture = reactFiberPlayerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const replacement = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const harness = controllerHarness(fixture);
+
+    assert.equal(fixture.documentRef.querySelector(PLAYER_LAYOUT_SELECTOR), null);
+    assert.deepEqual(fixture.documentRef.querySelectorAll("pzp-pc-layout"), []);
+    assert.equal(fixture.layout.tagName, "DIV");
+    assert.equal(
+      fixture.layout[fixture.fiberProperty].return.updateQueue.lastEffect.deps[0]._internalPlayer,
+      fixture.player,
+    );
+
+    harness.controller.start();
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+
+    const oldFiber = fixture.layout[fixture.fiberProperty];
+    const remounted = fixture.installFiberPlayer(replacement.player);
+    assert.notEqual(remounted.fiber, oldFiber);
+    harness.dispatchMutation([
+      {
+        addedNodes: [fixture.layout],
+        removedNodes: [],
+      },
+    ]);
+    assert.ok(harness.flushTimers(20) < 20);
+    assert.equal(replacement.player.videoTracks.selectedIndex, 2);
+    assert.equal(replacement.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    harness.controller.stop();
+  });
+
+  it("prioritizes the live layout React player over an earlier global preview video", () => {
+    const fixture = reactFiberPlayerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const preview = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+    ]);
+    const previewVideo = {
+      parentElement: null,
+      tagName: "VIDEO",
+      videoTracks: preview.player.videoTracks,
+    };
+    const baseDocumentRef = fixture.documentRef;
+    fixture.documentRef = {
+      querySelector: (selector) => baseDocumentRef.querySelector(selector),
+      querySelectorAll(selector) {
+        if (selector === "#live_player_layout video") return [fixture.video];
+        if (selector === "video.webplayer-internal-video") return [previewVideo];
+        return baseDocumentRef.querySelectorAll(selector);
+      },
+    };
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    harness.flushTimer();
+
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(preview.player.videoTracks.selectedIndex, 0);
+    assert.deepEqual(preview.selectionTrueWrites, [0, 0]);
+    harness.controller.stop();
+  });
+
+  it("falls back to a video ancestor that directly exposes VideoTrackList", () => {
+    const fixture = reactFiberPlayerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const ancestor = fixture.installAncestorPlayer(fixture.player);
+    const harness = controllerHarness(fixture);
+
+    assert.equal(Object.hasOwn(fixture.layout, fixture.fiberProperty), false);
+    assert.equal(fixture.video.parentElement, ancestor);
+    assert.equal(ancestor.parentElement, fixture.layout);
+    assert.equal(fixture.documentRef.querySelector(PLAYER_LAYOUT_SELECTOR), null);
+
+    harness.controller.start();
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    harness.controller.stop();
+  });
+
+  it("finds a bounded React bridge owned only by an intermediate video ancestor", () => {
+    const fixture = reactFiberPlayerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const bridge = fixture.installAncestorFiberPlayer(fixture.player);
+    const harness = controllerHarness(fixture);
+
+    assert.equal(Object.hasOwn(fixture.layout, fixture.fiberProperty), false);
+    assert.equal(Object.hasOwn(bridge.ancestor, "videoTracks"), false);
+    assert.equal(bridge.wrapper._internalPlayer, fixture.player);
+    assert.equal(bridge.effect.next, bridge.effect);
+
+    harness.controller.start();
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    harness.controller.stop();
+  });
+
+  it("does not wait for the quality pane before selecting the highest concrete track", () => {
     const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
     let paneReady = false;
     let observerCallback = null;
@@ -612,9 +1045,9 @@ describe("CHZZK player highest-quality controller", () => {
 
     controller.start();
     flushTimer();
-    flushTimer();
-    flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, -1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(fixture.selectionTrueWrites[0], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     paneReady = true;
     observerCallback([
@@ -627,53 +1060,49 @@ describe("CHZZK player highest-quality controller", () => {
     flushTimer();
 
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(fixture.selectionTrueWrites[0], 1);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
     controller.stop();
   });
 
-  it("keeps a bounded slower retry when an existing pane initializes its filter late", () => {
+  it("does not wait for an existing pane to initialize its filter", () => {
     const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
     fixture.pane.filter = undefined;
     const harness = controllerHarness(fixture);
 
     harness.controller.start();
     harness.flushTimer();
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, -1);
-    assert.equal(harness.pendingTimerDelay(), 1000);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(fixture.selectionTrueWrites[0], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     fixture.pane.filter = () => true;
-    assert.equal(harness.flushTimer(), true, "a slower bounded retry must remain scheduled");
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    harness.flushTimer();
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(fixture.selectionTrueWrites[0], 1);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     harness.controller.stop();
   });
 
-  it("replaces a pending slow retry when fresh player evidence arrives", () => {
+  it("coalesces fresh player evidence while the pane filter remains unavailable", () => {
     const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
     fixture.pane.filter = undefined;
     const harness = controllerHarness(fixture);
 
     harness.controller.start();
-    for (const expectedNextDelay of [50, 250, 1000, 3000]) {
-      assert.equal(harness.flushTimer(), true);
-      assert.equal(harness.pendingTimerDelay(), expectedNextDelay);
-    }
-    assert.equal(fixture.player.videoTracks.selectedIndex, -1);
+    harness.flushTimer();
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(fixture.selectionTrueWrites[0], 1);
 
-    fixture.pane.filter = () => true;
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    assert.equal(harness.pendingTimerDelay(), 0);
-    assert.equal(harness.pendingTimerCount(), 1);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    assert.equal(harness.pendingTimerDelay(), 0);
-    assert.equal(harness.pendingTimerCount(), 1);
+    for (let index = 0; index < 20; index += 1) {
+      fixture.player.videoTracks.dispatchTrackEvent("change");
+    }
 
     assert.equal(harness.flushTimer(), true);
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(fixture.selectionTrueWrites[0], 1);
 
     harness.controller.stop();
     for (const eventType of ["addtrack", "removetrack", "change"]) {
@@ -681,7 +1110,7 @@ describe("CHZZK player highest-quality controller", () => {
     }
   });
 
-  it("stays active across SPA routes while selecting only on exact player paths", () => {
+  it("stays active and enforces highest quality across every same-site SPA route", () => {
     const fixture = playerFixture([
       { height: 1080, label: "ABR", selected: true, width: 1920 },
       { height: 1080, label: "1080p", width: 1920 },
@@ -690,24 +1119,37 @@ describe("CHZZK player highest-quality controller", () => {
 
     harness.controller.start();
     harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
 
+    fixture.selectTrack(0);
     harness.historyRef.pushState({}, "", "/live/channel?from=home");
     harness.flushTimer();
     harness.flushTimer();
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
 
-    fixture.values[0].selected = true;
-    harness.historyRef.pushState({}, "", "/livestream");
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(
-      fixture.player.videoTracks.selectedIndex,
-      0,
-      "a lookalike route must not trigger player selection after an SPA transition",
-    );
+    for (const path of [
+      "/following",
+      "/search?keyword=channel",
+      "/category/GAME",
+      "/livestream",
+      "/lives?keyword=channel",
+      "/",
+    ]) {
+      harness.advanceTime(5000);
+      fixture.selectTrack(0);
+      harness.historyRef.pushState({}, "", path);
+      harness.flushTimer();
+      harness.flushTimer();
+      assert.equal(
+        fixture.player.videoTracks.selectedIndex,
+        1,
+        `the player must remain highest quality on ${path}`,
+      );
+    }
 
-    harness.historyRef.replaceState({}, "", "/lives?keyword=channel");
+    harness.advanceTime(5000);
+    fixture.selectTrack(0);
+    harness.historyRef.replaceState({}, "", "/following?tab=live");
     harness.flushTimer();
     harness.flushTimer();
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
@@ -718,7 +1160,7 @@ describe("CHZZK player highest-quality controller", () => {
     assert.equal(harness.windowListeners.get("popstate")?.size ?? 0, 0);
   });
 
-  it("opens a fresh transaction when an eligible route reuses the same player generation", () => {
+  it("retries a newly ready setter after same-site navigation without changing player identity", () => {
     let setterReady = false;
     const fixture = playerFixture(
       [
@@ -748,55 +1190,61 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("keeps a waiting hold while an eligible route reuses the same player generation", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture, { pathname: "/live/channel-a" });
+  it("never lets initial waiting or stalled events block the first highest-track write", () => {
+    for (const eventType of ["waiting", "stalled"]) {
+      const fixture = playerFixture([
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ]);
+      const harness = controllerHarness(fixture);
 
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-
-    harness.historyRef.pushState({}, "", "/live/channel-b");
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(
-      fixture.selectionTrueWrites[1],
-      0,
-      "an eligible SPA route must not turn a held write into an immediate correction",
-    );
-
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
+      harness.controller.start();
+      harness.dispatchDocument(eventType, fixture.primaryMedia);
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(
+        fixture.player.videoTracks.selectedIndex,
+        1,
+        `${eventType} must not delay the initial highest-track write`,
+      );
+      assert.equal(fixture.selectionTrueWrites[1], 1);
+      assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+      harness.controller.stop();
+      assert.equal(harness.pendingTimerCount(), 0);
+    }
   });
 
-  it("ignores media holds captured before entering an eligible player route", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture, { pathname: "/" });
+  it("never lets waiting or stalled events block a remounted player's highest-track write", () => {
+    for (const eventType of ["waiting", "stalled"]) {
+      const fixture = playerFixture([
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ]);
+      const replacement = playerFixture([
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ]);
+      const harness = controllerHarness(fixture);
 
-    harness.controller.start();
-    harness.flushTimer();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.historyRef.pushState({}, "", "/live/channel");
-    assert.ok(harness.flushTimers(20) < 20);
-
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
+      harness.controller.start();
+      assert.equal(harness.flushTimer(), true);
+      fixture.mountDocument(replacement);
+      harness.dispatchDocument(eventType, replacement.primaryMedia);
+      harness.dispatchMutation([
+        {
+          addedNodes: [replacement.root],
+          removedNodes: [fixture.root],
+        },
+      ]);
+      assert.ok(harness.flushTimers(20) < 20);
+      assert.equal(
+        replacement.player.videoTracks.selectedIndex,
+        1,
+        `${eventType} must not delay the remounted highest-track write`,
+      );
+      assert.equal(replacement.selectionTrueWrites[1], 1);
+      harness.controller.stop();
+      assert.equal(harness.pendingTimerCount(), 0);
+    }
   });
 
   it("promotes a delayed higher track and unbinds every track-list listener on stop", () => {
@@ -862,7 +1310,7 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("recovers an initial filtered fallback after a silent same-pane expansion", () => {
+  it("ignores an initial compact filter contraction instead of selecting its fallback", () => {
     let allowHigh = false;
     const fixture = playerFixture(
       [
@@ -877,21 +1325,13 @@ describe("CHZZK player highest-quality controller", () => {
 
     harness.controller.start();
     harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerDelay(), 250);
-
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerDelay(), 1000);
-
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerDelay(), 3000);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.equal(fixture.selectionTrueWrites[1], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     allowHigh = true;
-    assert.ok(harness.flushTimers(20) < 20);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.ok(harness.flushTimers(10) < 10);
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
     assert.equal(fixture.selectionTrueWrites[1], 1);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
@@ -899,7 +1339,7 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("stops initial low-track discovery after three unchanged follow-ups", () => {
+  it("does not rewrite an unchanged sole concrete track when the watchdog is disabled", () => {
     const fixture = playerFixture([{ height: 720, label: "720p", selected: true, width: 1280 }]);
     const harness = controllerHarness(fixture);
 
@@ -908,12 +1348,10 @@ describe("CHZZK player highest-quality controller", () => {
     const baselineStorageWrites = fixture.storageSetCalls;
     const baselineSelectionWrites = fixture.selectionTrueWrites[0];
 
-    for (const delay of [250, 1000, 3000]) {
-      assert.equal(harness.pendingTimerDelay(), delay);
-      harness.flushTimer();
-      assert.equal(harness.pendingTimerDelay(), 0);
-      harness.flushTimer();
+    for (let index = 0; index < 20; index += 1) {
+      fixture.player.videoTracks.dispatchTrackEvent("change");
     }
+    assert.ok(harness.flushTimers(10) < 10);
 
     assert.equal(fixture.selectionTrueWrites[0], baselineSelectionWrites);
     assert.equal(fixture.storageSetCalls, baselineStorageWrites);
@@ -921,24 +1359,58 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("recovers an initial low track when 1080p appears silently", () => {
+  it("uses the watchdog to discover a silent 1080p track more than five seconds later", () => {
     const fixture = playerFixture([{ height: 720, label: "720p", selected: true, width: 1280 }]);
-    const harness = controllerHarness(fixture);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
 
     harness.controller.start();
     harness.flushTimer();
-    assert.equal(harness.pendingTimerDelay(), 250);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(harness.pendingTimerCount() >= 1, true);
+
+    harness.advanceTime(6000);
     fixture.addTrack({ height: 1080, label: "1080p", width: 1920 }, { emit: false });
 
-    assert.ok(harness.flushTimers(20) < 20);
+    for (let step = 0; step < 20 && fixture.player.videoTracks.selectedIndex !== 1; step += 1) {
+      assert.equal(harness.flushTimer(), true);
+    }
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
     assert.equal(fixture.selectionTrueWrites[1], 1);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(harness.pendingTimerCount() >= 1, true);
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
-  it("recovers a filter-rejected initial 720p track after a silent 1080p expansion", () => {
+  it("uses the watchdog to reverse a silent demotion more than five seconds later", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
+
+    harness.controller.start();
+    harness.flushTimer();
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+
+    harness.advanceTime(6000);
+    fixture.selectTrack(1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+
+    for (let step = 0; step < 20 && fixture.player.videoTracks.selectedIndex !== 2; step += 1) {
+      assert.equal(harness.flushTimer(), true);
+    }
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 2);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+
+    harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
+  });
+
+  it("selects 1080p immediately when a cold compact filter rejects every higher track", () => {
     let maximumHeight = 480;
     const fixture = playerFixture(
       [
@@ -954,12 +1426,13 @@ describe("CHZZK player highest-quality controller", () => {
 
     harness.controller.start();
     harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(fixture.storageSetCalls, 0);
-    assert.equal(harness.pendingTimerDelay(), 250);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     maximumHeight = 1080;
-    assert.ok(harness.flushTimers(20) < 20);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.ok(harness.flushTimers(10) < 10);
     assert.equal(fixture.player.videoTracks.selectedIndex, 2);
     assert.equal(fixture.selectionTrueWrites[2], 1);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
@@ -967,7 +1440,75 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("restores confirmed high quality immediately across a compact filter replacement", () => {
+  it("suppresses repeated lower-track setters without reassigning an already selected highest track", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    harness.flushTimer();
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.deepEqual(fixture.selectionTrueWrites, [0, 0, 1]);
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      fixture.values[1].selected = true;
+    }
+
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.deepEqual(fixture.selectionTrueWrites, [0, 0, 1]);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    harness.controller.stop();
+  });
+
+  it("rewraps a page-replaced selected descriptor and restores that exact replacement on stop", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    harness.flushTimer();
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+
+    let pageSetterCalls = 0;
+    const replacementDescriptor = {
+      configurable: true,
+      enumerable: false,
+      get() {
+        return fixture.player.videoTracks.selectedIndex === 1;
+      },
+      set(next) {
+        if (next !== true) return;
+        pageSetterCalls += 1;
+        fixture.selectTrack(1);
+      },
+    };
+    Object.defineProperty(fixture.values[1], "selected", replacementDescriptor);
+    harness.dispatchWindow("resize");
+    assert.ok(harness.flushTimers(10) < 10);
+
+    fixture.values[1].selected = true;
+    assert.equal(pageSetterCalls, 0);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+
+    harness.controller.stop();
+    const restoredDescriptor = Object.getOwnPropertyDescriptor(fixture.values[1], "selected");
+    assert.equal(restoredDescriptor.configurable, replacementDescriptor.configurable);
+    assert.equal(restoredDescriptor.enumerable, replacementDescriptor.enumerable);
+    assert.equal(restoredDescriptor.get, replacementDescriptor.get);
+    assert.equal(restoredDescriptor.set, replacementDescriptor.set);
+
+    fixture.values[1].selected = true;
+    assert.equal(pageSetterCalls, 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+  });
+
+  it("recovers every repeated compact demotion without ever persisting the lower track", () => {
     let maximumHeight = 1080;
     const fixture = playerFixture(
       [
@@ -979,7 +1520,7 @@ describe("CHZZK player highest-quality controller", () => {
         filter: (track) => track.label !== "ABR" && track.height <= maximumHeight,
       },
     );
-    const harness = controllerHarness(fixture);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
 
     harness.controller.start();
     harness.flushTimer();
@@ -989,56 +1530,37 @@ describe("CHZZK player highest-quality controller", () => {
 
     maximumHeight = 720;
     fixture.pane.filter = (track) => track.label !== "ABR" && track.height <= maximumHeight;
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    fixture.selectTrack(1);
     harness.dispatchWindow("resize");
-    assert.equal(harness.pendingTimerDelay(), 0);
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
-    assert.equal(
-      JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height,
-      1080,
-      "a page-owned compact demotion must not replace the remembered high-quality intent",
-    );
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), true);
+
+    for (let demotion = 0; demotion < 5; demotion += 1) {
+      fixture.selectTrack(1);
+      harness.dispatchDocument("waiting", fixture.primaryMedia);
+      fixture.player.videoTracks.dispatchTrackEvent("change");
+      let steps = 0;
+      while (steps < 30 && fixture.player.videoTracks.selectedIndex !== 2) {
+        assert.equal(harness.flushTimer(), true);
+        steps += 1;
+      }
+
+      assert.ok(steps < 30, `compact demotion ${demotion + 1} must recover within the retry budget`);
+      assert.equal(
+        fixture.player.videoTracks.selectedIndex,
+        2,
+        `compact demotion ${demotion + 1} must recover to the highest track`,
+      );
+      assert.equal(
+        JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height,
+        1080,
+        "a lower page-owned selection must never become persisted intent",
+      );
+    }
+
     assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(fixture.selectionTrueWrites[2], 2);
-
-    harness.advanceTime(75);
-    fixture.selectTrack(1);
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(
-      fixture.player.videoTracks.selectedIndex,
-      2,
-      "the physical resize context must survive the first success and correct a late page demotion",
-    );
-    assert.equal(fixture.selectionTrueWrites[2], 3);
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-
-    fixture.selectTrack(1);
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(
-      fixture.selectionTrueWrites[2],
-      3,
-      "a third compact demotion in the same physical window must remain fuse-bounded",
-    );
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-
-    maximumHeight = 1080;
-    harness.dispatchWindow("resize");
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
-    assert.equal(
-      fixture.selectionTrueWrites[2],
-      4,
-      "a physical wide transition must start the reallowed phase even while waiting remains held",
-    );
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(fixture.selectionTrueWrites[2] >= 6, true);
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
   it("keeps exact high intent when the quality pane is replaced after physical resize evidence", () => {
@@ -1100,7 +1622,7 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("does not bypass a waiting hold without physical responsive evidence", () => {
+  it("immediately restores a confirmed highest track despite waiting without resize evidence", () => {
     let maximumHeight = 1080;
     const fixture = playerFixture(
       [
@@ -1123,28 +1645,27 @@ describe("CHZZK player highest-quality controller", () => {
     fixture.player.videoTracks.dispatchTrackEvent("change");
     assert.ok(harness.flushTimers(10) < 10);
 
-    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
-    assert.equal(fixture.selectionTrueWrites[3], 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 3);
+    assert.equal(fixture.selectionTrueWrites[2], 0);
+    assert.equal(fixture.selectionTrueWrites[3], 2);
     assert.equal(
       JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height,
       1080,
-      "a buffering-only demotion must remain provisional instead of replacing high-quality intent",
+      "a buffering-only demotion must neither survive nor replace high-quality intent",
     );
 
     maximumHeight = 720;
     harness.dispatchDocument("playing", fixture.primaryMedia);
     harness.dispatchDocument("canplay", fixture.primaryMedia);
     assert.ok(harness.flushTimers(10) < 10);
-    assert.equal(
-      JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height,
-      720,
-      "after playback settles without physical evidence, the site's constrained track may be confirmed",
-    );
+    assert.equal(fixture.player.videoTracks.selectedIndex, 3);
+    assert.equal(fixture.selectionTrueWrites[3], 2);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
     assert.equal(harness.pendingTimerCount(), 0);
     harness.controller.stop();
   });
 
-  it("does not bypass a waiting hold after the physical responsive window expires", () => {
+  it("restores a confirmed highest track after the responsive evidence window expires", () => {
     let maximumHeight = 1080;
     const fixture = playerFixture(
       [
@@ -1169,40 +1690,31 @@ describe("CHZZK player highest-quality controller", () => {
     fixture.player.videoTracks.dispatchTrackEvent("change");
     assert.ok(harness.flushTimers(10) < 10);
 
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 2);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
     assert.equal(harness.pendingTimerCount(), 0);
     harness.controller.stop();
   });
 
-  it("holds a newly allowed 1440p track until waiting settles", () => {
-    let maximumHeight = 1080;
-    const fixture = playerFixture(
-      [
-        { height: 1080, label: "ABR", selected: true, width: 1920 },
-        { height: 1080, label: "1080p", width: 1920 },
-        { height: 1440, label: "1440p", width: 2560 },
-      ],
-      {
-        filter: (track) => track.label !== "ABR" && track.height <= maximumHeight,
-      },
-    );
+  it("promotes a newly discovered 1440p track even while media is waiting", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
     const harness = controllerHarness(fixture);
 
     harness.controller.start();
     harness.flushTimer();
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    maximumHeight = 1440;
-    fixture.pane.filter = (track) => track.label === "1440p";
     harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.dispatchWindow("resize");
+    fixture.addTrack({ height: 1440, label: "1440p", width: 2560 });
     assert.ok(harness.flushTimers(20) < 20);
 
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
     assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.selectionTrueWrites[2], 0);
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1440);
 
     harness.dispatchDocument("playing", fixture.primaryMedia);
     harness.dispatchDocument("canplay", fixture.primaryMedia);
@@ -1215,7 +1727,7 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("recovers on wide expansion when bounded compact corrections are ignored", () => {
+  it("recovers on wide expansion when a compact correction was ignored", () => {
     let maximumHeight = 1080;
     const fixture = playerFixture(
       [
@@ -1230,7 +1742,7 @@ describe("CHZZK player highest-quality controller", () => {
         },
       },
     );
-    const harness = controllerHarness(fixture);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
 
     harness.controller.start();
     harness.flushTimer();
@@ -1238,25 +1750,24 @@ describe("CHZZK player highest-quality controller", () => {
     harness.dispatchDocument("waiting", fixture.primaryMedia);
     fixture.selectTrack(1);
     harness.dispatchWindow("resize");
-    assert.ok(harness.flushTimers(40) < 40);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), true);
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(fixture.selectionTrueWrites[2], 3);
+    assert.equal(fixture.selectionTrueWrites[2] >= 2, true);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
-    harness.dispatchWindow("resize");
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
     maximumHeight = 1080;
-    assert.ok(harness.flushTimers(20) < 20);
+    harness.dispatchWindow("resize");
+    for (let step = 0; step < 20 && fixture.player.videoTracks.selectedIndex !== 2; step += 1) {
+      assert.equal(harness.flushTimer(), true);
+    }
     assert.equal(fixture.player.videoTracks.selectedIndex, 2);
-    assert.equal(fixture.selectionTrueWrites[2], 4);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-    assert.equal(harness.pendingTimerCount(), 0);
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
-  it("forgets compact preservation when the remembered high track disappears", () => {
+  it("retains high intent while its track disappears and restores a replacement track object", () => {
     let maximumHeight = 1080;
     const fixture = playerFixture(
       [
@@ -1278,17 +1789,29 @@ describe("CHZZK player highest-quality controller", () => {
     assert.ok(harness.flushTimers(20) < 20);
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
+    const originalHighTrack = fixture.values[2];
     fixture.values.splice(2, 1);
     fixture.player.videoTracks.dispatchTrackEvent("removetrack");
     assert.ok(harness.flushTimers(10) < 10);
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 720);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
     assert.equal(fixture.selectionTrueWrites[1], 1);
+
+    const replacementHighTrack = fixture.addTrack({
+      height: 1080,
+      label: "1080p",
+      width: 1920,
+    });
+    assert.notEqual(replacementHighTrack, originalHighTrack);
+    assert.ok(harness.flushTimers(10) < 10);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
+    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
     assert.equal(harness.pendingTimerCount(), 0);
     harness.controller.stop();
   });
 
-  it("reasserts the highest track after ABR returns without resetting an unchanged selection", () => {
+  it("suppresses an ABR setter before it can reset an unchanged highest selection", () => {
     const fixture = playerFixture([
       { height: 1080, label: "ABR", selected: true, width: 1920 },
       { height: 1080, label: "1080p", width: 1920 },
@@ -1312,7 +1835,8 @@ describe("CHZZK player highest-quality controller", () => {
     fixture.player.videoTracks.dispatchTrackEvent("change");
     harness.flushTimer();
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    assert.equal(fixture.selectionTrueWrites[0], 0);
+    assert.equal(fixture.selectionTrueWrites[1], 1);
 
     harness.controller.stop();
   });
@@ -1359,37 +1883,56 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("caps an ignored event-storm selection at two writes and then becomes quiescent", () => {
+  it("rate-limits ignored writes but keeps retrying until the highest track is accepted", () => {
+    let harness;
+    const writeTimes = [];
     const fixture = playerFixture(
       [
         { height: 1080, label: "ABR", selected: true, width: 1920 },
         { height: 1080, label: "1080p", width: 1920 },
       ],
       {
-        onSelectionWrite({ videoTracks }) {
+        onSelectionWrite({ apply, videoTracks, writeCount }) {
+          writeTimes.push(harness.now());
           for (let index = 0; index < 5; index += 1) {
             videoTracks.dispatchTrackEvent("change");
           }
+          if (writeCount >= 6) apply();
         },
       },
     );
-    const harness = controllerHarness(fixture);
+    harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
 
     harness.controller.start();
-    assert.ok(harness.flushTimers(30) < 30, "the bounded confirmation cycle must terminate");
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(fixture.stored.size, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
+    let steps = 0;
+    while (steps < 100 && fixture.player.videoTracks.selectedIndex !== 1) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
+    }
+
+    assert.ok(steps < 100, "the rate-limited watchdog must eventually recover");
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.equal(fixture.selectionTrueWrites[1], 6);
+    assert.equal(writeTimes.length, 6);
+    assert.equal(writeTimes[1] < 5000, true, "the candidate receives one bounded confirmation write");
+    for (let index = 2; index < writeTimes.length; index += 1) {
+      assert.equal(
+        writeTimes[index] - writeTimes[index - 1] >= 5000,
+        true,
+        `ignored write ${index + 1} must wait for the five-second retry interval`,
+      );
+    }
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    assert.equal(harness.pendingTimerCount() >= 1, true);
 
     for (let index = 0; index < 50; index += 1) {
       fixture.player.videoTracks.dispatchTrackEvent("change");
     }
-    assert.equal(harness.pendingTimerCount(), 1, "the external event storm should coalesce into one scan");
-    assert.equal(harness.flushTimers(10), 1);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(harness.flushTimer(), true, "the event storm should coalesce into one scan");
+    assert.equal(fixture.selectionTrueWrites[1], 6);
+
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
   it("coalesces responsive events and rebinds a same-node replacement VideoTrackList", () => {
@@ -1418,7 +1961,7 @@ describe("CHZZK player highest-quality controller", () => {
       harness.dispatchWindow("orientationchange");
       harness.dispatchVisualViewport("resize");
     }
-    assert.equal(harness.pendingTimerCount(), 2);
+    assert.equal(harness.pendingTimerCount(), 1);
     assert.equal(harness.pendingTimerDelay(), 0);
 
     harness.flushTimer();
@@ -1436,694 +1979,95 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
-  it("bounds rapid ABR corrections and replenishes one write after five stable seconds", () => {
+  it("bounds confirmed ABR corrections and replenishes one write after five seconds", () => {
     const fixture = playerFixture([
       { height: 1080, label: "ABR", selected: true, width: 1920 },
       { height: 1080, label: "1080p", width: 1920 },
     ]);
-    const harness = controllerHarness(fixture);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
 
     harness.controller.start();
     harness.flushTimer();
     assert.equal(fixture.selectionTrueWrites[1], 1);
 
-    fixture.selectTrack(0);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    for (let correction = 0; correction < 3; correction += 1) {
+      fixture.selectTrack(0);
+      for (let index = 0; index < 20; index += 1) {
+        fixture.player.videoTracks.dispatchTrackEvent("change");
+      }
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(fixture.selectionTrueWrites[1], correction + 2);
+      assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    }
 
     fixture.selectTrack(0);
     for (let index = 0; index < 20; index += 1) {
       fixture.player.videoTracks.dispatchTrackEvent("change");
     }
-    harness.flushTimers();
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 4);
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
 
-    fixture.selectTrack(1);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
     harness.advanceTime(5000);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    let recoverySteps = 0;
+    while (recoverySteps < 20 && fixture.selectionTrueWrites[1] < 5) {
+      assert.equal(harness.flushTimer(), true);
+      recoverySteps += 1;
+    }
+    assert.ok(recoverySteps < 20);
+    assert.equal(fixture.selectionTrueWrites[1], 5);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
+  });
+
+  it("coalesces media evidence without a timeupdate listener or an early fifth write", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    assert.equal(harness.flushTimer(), true);
+    for (let correction = 0; correction < 3; correction += 1) {
+      fixture.selectTrack(0);
+      fixture.player.videoTracks.dispatchTrackEvent("change");
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    }
+    assert.equal(fixture.selectionTrueWrites[1], 4);
 
     fixture.selectTrack(0);
     fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 3);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("grants one ready-media recovery after the initial setter writes were ignored", () => {
-    let ready = false;
-    const fixture = playerFixture(
-      [
-        { height: 1080, label: "ABR", selected: true, width: 1920 },
-        { height: 1080, label: "1080p", width: 1920 },
-      ],
-      {
-        onSelectionWrite({ apply }) {
-          if (ready) apply();
-        },
-      },
-    );
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    assert.equal(harness.flushTimer(), true);
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(fixture.storageSetCalls, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
 
-    harness.dispatchDocument("canplay", fixture.unrelatedMedia);
-    assert.ok(harness.flushTimers(10) < 10);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-
-    for (let index = 0; index < 10; index += 1) {
-      harness.dispatchDocument("loadedmetadata", fixture.primaryMedia);
-    }
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-
-    ready = true;
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    for (let index = 0; index < 10; index += 1) {
-      harness.dispatchDocument("canplay", fixture.primaryMedia);
-    }
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 3);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
-
-    for (let index = 0; index < 10; index += 1) {
-      harness.dispatchDocument("loadedmetadata", fixture.primaryMedia);
-      harness.dispatchWindow("resize");
-    }
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(fixture.selectionTrueWrites[1], 3);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("never rearms the same ignored initial candidate from repeated ready-media evidence", () => {
-    const fixture = playerFixture(
-      [
-        { height: 1080, label: "ABR", selected: true, width: 1920 },
-        { height: 1080, label: "1080p", width: 1920 },
-      ],
-      { onSelectionWrite() {} },
+    harness.dispatchDocument("waiting", fixture.primaryMedia);
+    harness.dispatchDocument("stalled", fixture.primaryMedia);
+    harness.dispatchDocument("playing", fixture.primaryMedia);
+    harness.dispatchDocument("canplay", fixture.primaryMedia);
+    harness.dispatchDocument("timeupdate", fixture.primaryMedia);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), false);
+    assert.equal(harness.documentListeners.get("timeupdate")?.size ?? 0, 0);
+    assert.equal(fixture.selectionTrueWrites[1], 4);
+    assert.equal(
+      fixture.player.videoTracks.selectedIndex,
+      0,
+      "media evidence must not manufacture a fifth write token",
     );
-    const harness = controllerHarness(fixture);
 
-    harness.controller.start();
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    for (let index = 0; index < 10; index += 1) {
-      harness.dispatchDocument("canplay", fixture.primaryMedia);
-    }
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(fixture.selectionTrueWrites[1], 3);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(fixture.storageSetCalls, 0);
-
-    for (let index = 0; index < 10; index += 1) {
-      harness.dispatchDocument("canplay", fixture.primaryMedia);
-      assert.ok(harness.flushTimers(10) < 10);
-    }
-    assert.equal(fixture.selectionTrueWrites[1], 3);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("does not grant initial readiness recovery to a previously confirmed candidate", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.flushTimer();
-    fixture.selectTrack(0);
+    harness.advanceTime(5000);
     fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-
-    fixture.selectTrack(0);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.ok(harness.flushTimers(10) < 10);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("holds a repeated correction while media is unsettled and resumes after playback settles", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-
-    fixture.selectTrack(0);
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.dispatchDocument("stalled", fixture.primaryMedia);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerCount(), 1);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    harness.flushTimer();
-    assert.equal(
-      fixture.selectionTrueWrites[1],
-      1,
-      "media settle should enqueue rather than perform a write",
-    );
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 5);
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
     harness.controller.stop();
   });
 
-  it("keeps the primary-media hold across a same-player VideoTrackList replacement", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const replacement = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture, { pathname: "/lives" });
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    fixture.player.videoTracks = replacement.player.videoTracks;
-    harness.dispatchWindow("resize");
-
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(
-      replacement.selectionTrueWrites[1],
-      0,
-      "responsive discovery must not spend a first write while the primary media is waiting",
-    );
-    assert.equal(replacement.player.videoTracks.selectedIndex, 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(replacement.selectionTrueWrites[1], 1);
-    assert.equal(replacement.player.videoTracks.selectedIndex, 1);
-    assert.equal(replacement.selectionTrueWrites[1], 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("settles migrated tracks when playback evidence beats the responsive rebind", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const replacement = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    fixture.setVideoTracks(replacement.player.videoTracks);
-    harness.dispatchWindow("resize");
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-
-    assert.equal(replacement.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerDelay(), 0);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(replacement.selectionTrueWrites[1], 1);
-    assert.equal(replacement.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("keeps a scheduled media settle valid while same-player tracks migrate", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const replacement = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-
-    fixture.setVideoTracks(replacement.player.videoTracks);
-    harness.dispatchWindow("resize");
-    assert.equal(replacement.selectionTrueWrites[1], 0);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(replacement.selectionTrueWrites[1], 1);
-    assert.equal(replacement.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("does not release a hold when the primary video disappears during settle", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    fixture.setPrimaryMedia(null);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(fixture.storageSetCalls, 0);
-    assert.equal(harness.pendingTimerDelay(), 1000);
-    harness.flushTimer();
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    const replacementPrimaryMedia = fixture.setPrimaryMedia();
-    harness.dispatchDocument("playing", replacementPrimaryMedia);
-    harness.dispatchDocument("canplay", replacementPrimaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("preserves waiting and stalled holds while the eligible-route player is temporarily absent", () => {
-    for (const eventType of ["waiting", "stalled"]) {
-      const fixture = playerFixture([
-        { height: 1080, label: "ABR", selected: true, width: 1920 },
-        { height: 1080, label: "1080p", width: 1920 },
-      ]);
-      const replacement = playerFixture([
-        { height: 1080, label: "ABR", selected: true, width: 1920 },
-        { height: 1080, label: "1080p", width: 1920 },
-      ]);
-      const harness = controllerHarness(fixture);
-
-      harness.controller.start();
-      harness.dispatchDocument(eventType, fixture.primaryMedia);
-      harness.flushTimer();
-      assert.equal(fixture.selectionTrueWrites[1], 0);
-
-      fixture.mountDocument({
-        currentPrimaryMedia: null,
-        pane: null,
-        player: null,
-        root: null,
-      });
-      harness.dispatchWindow("resize");
-      harness.flushTimer();
-      harness.flushTimer();
-      assert.equal(fixture.selectionTrueWrites[1], 0);
-
-      fixture.mountDocument(replacement);
-      harness.dispatchWindow("resize");
-      assert.ok(harness.flushTimers(30) < 30);
-      assert.equal(
-        replacement.selectionTrueWrites[1],
-        0,
-        `${eventType} must remain held after a player-less responsive gap`,
-      );
-      assert.equal(replacement.player.videoTracks.selectedIndex, 0);
-
-      harness.dispatchDocument("playing", replacement.primaryMedia);
-      harness.dispatchDocument("canplay", replacement.primaryMedia);
-      assert.ok(harness.flushTimers(20) < 20);
-      assert.equal(replacement.selectionTrueWrites[1], 1);
-      assert.equal(replacement.player.videoTracks.selectedIndex, 1);
-      assert.equal(harness.pendingTimerCount(), 0);
-      harness.controller.stop();
-    }
-  });
-
-  it("migrates a settling hold when the primary changes without another media event", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-
-    fixture.setPrimaryMedia({ paused: false, readyState: 4 });
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerDelay(), 1000);
-
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0, "the readiness check should only enqueue a scan");
-    assert.equal(harness.pendingTimerDelay(), 0);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("bounds the readiness recheck across repeated primary replacement", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    fixture.setPrimaryMedia({ paused: false, readyState: 0 });
-    harness.flushTimer();
-    assert.equal(harness.pendingTimerDelay(), 1000);
-
-    fixture.setPrimaryMedia({ paused: false, readyState: 0 });
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    fixture.setPrimaryMedia({ paused: false, readyState: 4 });
-    harness.dispatchWindow("resize");
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.ok(harness.flushTimers(10) < 10, "replacement churn must keep follow-up scans bounded");
-    assert.equal(harness.pendingTimerCount(), 0, "replacement churn must not create a timer chain");
-
-    const currentPrimaryMedia = fixture.currentPrimaryMedia;
-    harness.dispatchDocument("playing", currentPrimaryMedia);
-    harness.dispatchDocument("canplay", currentPrimaryMedia);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("does not reset the readiness budget on replacement stalled events", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("stalled", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerDelay(), 1000);
-
-    const secondPrimary = fixture.setPrimaryMedia({ paused: false, readyState: 0 });
-    harness.dispatchDocument("stalled", secondPrimary);
-    assert.equal(harness.pendingTimerCount(), 1);
-    assert.equal(harness.pendingTimerDelay(), 1000);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    const thirdPrimary = fixture.setPrimaryMedia({ paused: false, readyState: 4 });
-    harness.dispatchDocument("stalled", thirdPrimary);
-    assert.equal(
-      harness.pendingTimerCount(),
-      0,
-      "a replacement stalled event must not recreate the consumed readiness budget",
-    );
-    harness.dispatchDocument("playing", thirdPrimary);
-    harness.dispatchDocument("canplay", thirdPrimary);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("uses the single readiness check when it discovers a ready replacement primary", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("stalled", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(harness.pendingTimerDelay(), 1000);
-
-    fixture.setPrimaryMedia({ paused: false, readyState: 4 });
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0, "the readiness check should only enqueue a scan");
-    assert.equal(harness.pendingTimerDelay(), 0);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("migrates a media hold to a replaced primary video and ignores unrelated video evidence", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture);
-    const oldPrimaryMedia = fixture.primaryMedia;
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", oldPrimaryMedia);
-    const replacementPrimaryMedia = fixture.setPrimaryMedia();
-
-    const pendingBeforeUnrelated = harness.pendingTimerCount();
-    harness.dispatchDocument("playing", fixture.unrelatedMedia);
-    harness.dispatchDocument("canplay", fixture.unrelatedMedia);
-    assert.equal(harness.pendingTimerCount(), pendingBeforeUnrelated);
-
-    harness.dispatchDocument("playing", replacementPrimaryMedia);
-    harness.dispatchDocument("canplay", replacementPrimaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("retains a primary-media hold captured before VideoTrackList attachment", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const tracks = fixture.player.videoTracks;
-    fixture.setVideoTracks(null);
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    fixture.setVideoTracks(tracks);
-    harness.dispatchWindow("resize");
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.ok(harness.flushTimers(10) < 10, "pre-track hold follow-up scans must remain bounded");
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("rechecks a stalled but playback-ready primary media once before correcting", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("stalled", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerDelay(), 1000);
-
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0, "the stalled recheck should enqueue the correction");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("never releases a waiting hold solely because time elapsed", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.advanceTime(10_000);
-    harness.dispatchWindow("resize");
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("retains waiting history when a settle is interrupted by stalled", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    fixture.primaryMedia.paused = false;
-    fixture.primaryMedia.readyState = 4;
-    const harness = controllerHarness(fixture);
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", fixture.primaryMedia);
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    harness.dispatchDocument("stalled", fixture.primaryMedia);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(
-      fixture.selectionTrueWrites[1],
-      0,
-      "a ready-state timeout must not release an interrupted waiting recovery",
-    );
-    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", fixture.primaryMedia);
-    harness.dispatchDocument("canplay", fixture.primaryMedia);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.selectionTrueWrites[1], 1);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-    assert.equal(harness.pendingTimerCount(), 0);
-    harness.controller.stop();
-  });
-
-  it("binds a media hold to the remounted primary media and ignores stale or nested media events", () => {
-    const fixture = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const replacement = playerFixture([
-      { height: 1080, label: "ABR", selected: true, width: 1920 },
-      { height: 1080, label: "1080p", width: 1920 },
-    ]);
-    const harness = controllerHarness(fixture, { pathname: "/lives" });
-    const oldPrimaryMedia = fixture.primaryMedia;
-
-    harness.controller.start();
-    harness.dispatchDocument("waiting", oldPrimaryMedia);
-    fixture.mountDocument(replacement);
-    harness.dispatchDocument("waiting", replacement.primaryMedia);
-    harness.dispatchWindow("resize");
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(replacement.selectionTrueWrites[1], 0);
-    assert.ok(harness.flushTimers(10) < 10, "remounted hold follow-up scans must remain bounded");
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", oldPrimaryMedia);
-    harness.dispatchDocument("canplay", oldPrimaryMedia);
-    assert.equal(harness.pendingTimerCount(), 0, "the detached media must not release the remounted hold");
-
-    harness.dispatchDocument("playing", replacement.unrelatedMedia);
-    harness.dispatchDocument("canplay", replacement.unrelatedMedia);
-    assert.equal(
-      harness.pendingTimerCount(),
-      0,
-      "an unrelated video nested under the player root must not release the primary-media hold",
-    );
-
-    harness.dispatchDocument("playing", replacement.primaryMedia);
-    harness.dispatchDocument("canplay", replacement.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    harness.flushTimer();
-    harness.flushTimer();
-    assert.equal(replacement.selectionTrueWrites[1], 1);
-    assert.equal(replacement.player.videoTracks.selectedIndex, 1);
-    harness.controller.stop();
-  });
-
-  it("preserves a filter-rejected selected 1080p without downgrade or storage commit", () => {
+  it("persists a selected highest track even when the pane filter rejects it", () => {
     const fixture = playerFixture(
       [
         { allowed: false, height: 1080, label: "1080p", selected: true, width: 1920 },
@@ -2139,8 +2083,12 @@ describe("CHZZK player highest-quality controller", () => {
 
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
     assert.deepEqual(fixture.selectionTrueWrites, [0, 0]);
-    assert.equal(fixture.storageSetCalls, 0);
-    assert.equal(fixture.stored.size, 0);
+    assert.equal(fixture.storageSetCalls, 1);
+    assert.deepEqual(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)), {
+      height: 1080,
+      label: "1080p",
+      width: 1920,
+    });
   });
 
   it("keeps the current track among equal allowed 1080p candidates", () => {
@@ -2159,7 +2107,34 @@ describe("CHZZK player highest-quality controller", () => {
     assert.deepEqual(fixture.selectionTrueWrites, [0, 0, 0]);
   });
 
-  it("selects the highest allowed fallback after ABR replaces a rejected 1080p", () => {
+  it("selects the highest bitrate when concrete tracks have equal dimensions", () => {
+    const fixture = playerFixture([
+      {
+        height: 1080,
+        label: "1080p",
+        selected: true,
+        videoBitrate: 4_000_000,
+        width: 1920,
+      },
+      {
+        height: 1080,
+        label: "1080p",
+        videoBitrate: 8_000_000,
+        width: 1920,
+      },
+    ]);
+
+    selectHighestAllowedPlayerTrack({
+      documentRef: fixture.documentRef,
+      storage: fixture.storage,
+    });
+
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.deepEqual(fixture.selectionTrueWrites, [0, 1]);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+  });
+
+  it("selects a filter-rejected 1080p after ABR replaces the manual selection", () => {
     const fixture = playerFixture(
       [
         { height: 1080, label: "ABR", selected: true, width: 1920 },
@@ -2174,16 +2149,17 @@ describe("CHZZK player highest-quality controller", () => {
       storage: fixture.storage,
     });
 
-    assert.equal(fixture.player.videoTracks.selectedIndex, 2);
-    assert.equal(fixture.selectionTrueWrites[2], 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.equal(fixture.selectionTrueWrites[1], 1);
+    assert.equal(fixture.selectionTrueWrites[2], 0);
     assert.deepEqual(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)), {
-      height: 720,
-      label: "720p",
-      width: 1280,
+      height: 1080,
+      label: "1080p",
+      width: 1920,
     });
   });
 
-  it("refills only one correction token during repeated benign stable changes", () => {
+  it("stable high events preserve only the single correction refilled after five seconds", () => {
     const fixture = playerFixture([
       { height: 1080, label: "ABR", selected: true, width: 1920 },
       { height: 1080, label: "1080p", width: 1920 },
@@ -2192,43 +2168,45 @@ describe("CHZZK player highest-quality controller", () => {
 
     harness.controller.start();
     harness.flushTimer();
-    fixture.selectTrack(0);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    for (let correction = 0; correction < 3; correction += 1) {
+      fixture.selectTrack(0);
+      fixture.player.videoTracks.dispatchTrackEvent("change");
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(fixture.selectionTrueWrites[1], correction + 2);
+      assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    }
 
     fixture.selectTrack(0);
     fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 4);
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
 
     fixture.selectTrack(1);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
     for (let second = 1; second <= 6; second += 1) {
       harness.advanceTime(1000);
       fixture.player.videoTracks.dispatchTrackEvent("change");
-      harness.flushTimer();
+      assert.equal(harness.flushTimer(), true);
     }
-    assert.equal(fixture.selectionTrueWrites[1], 2);
+    assert.equal(fixture.selectionTrueWrites[1], 4);
 
     fixture.selectTrack(0);
     fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 3);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 5);
     assert.equal(fixture.player.videoTracks.selectedIndex, 1);
 
     fixture.selectTrack(0);
     fixture.player.videoTracks.dispatchTrackEvent("change");
-    harness.flushTimer();
-    assert.equal(fixture.selectionTrueWrites[1], 3);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 5);
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
     assert.equal(harness.pendingTimerCount(), 0);
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
-  it("opens a fresh bounded attempt only when the pane and filter identity change", () => {
+  it("does not reset a candidate retry budget when pane and filter identity change", () => {
     const fixture = playerFixture(
       [
         { height: 1080, label: "ABR", selected: true, width: 1920 },
@@ -2236,34 +2214,35 @@ describe("CHZZK player highest-quality controller", () => {
       ],
       { onSelectionWrite() {} },
     );
-    const harness = controllerHarness(fixture);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
 
     harness.controller.start();
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(fixture.selectionTrueWrites[1], 2);
-
-    for (let index = 0; index < 30; index += 1) {
-      fixture.player.videoTracks.dispatchTrackEvent("change");
+    let steps = 0;
+    while (steps < 20 && fixture.selectionTrueWrites[1] < 2) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
     }
-    harness.flushTimers();
+    assert.ok(steps < 20);
     assert.equal(fixture.selectionTrueWrites[1], 2);
 
     fixture.setPane({ filter: () => true });
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    assert.ok(harness.flushTimers(30) < 30);
-    assert.equal(
-      fixture.selectionTrueWrites[1],
-      4,
-      "a new pane/filter identity should receive its own bounded two-write attempt",
-    );
-
     for (let index = 0; index < 30; index += 1) {
       fixture.player.videoTracks.dispatchTrackEvent("change");
     }
-    harness.flushTimers();
-    assert.equal(fixture.selectionTrueWrites[1], 4);
-    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 2, "pane/filter replacement must not retry early");
+
+    harness.advanceTime(5000);
+    steps = 0;
+    while (steps < 20 && fixture.selectionTrueWrites[1] < 3) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
+    }
+    assert.ok(steps < 20);
+    assert.equal(fixture.selectionTrueWrites[1], 3, "only elapsed cooldown may rearm the candidate");
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
   it("invalidates an in-setter remount before storage commit and selects the new generation once", () => {
@@ -2292,7 +2271,11 @@ describe("CHZZK player highest-quality controller", () => {
 
     assert.equal(fixture.selectionTrueWrites[1], 1);
     assert.equal(replacement.selectionTrueWrites[1], 1);
-    assert.equal(fixture.storageSetCalls, 1, "only the selected remounted generation may commit storage");
+    assert.equal(
+      fixture.storageSetCalls,
+      2,
+      "startup baseline plus only the selected remounted generation may commit storage",
+    );
     assert.deepEqual(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)), {
       height: 1440,
       label: "1440p",
@@ -2335,66 +2318,52 @@ describe("CHZZK player highest-quality controller", () => {
     assert.equal(fixture.stored.size, 0);
   });
 
-  it("excludes ineligible-route time from the global refill baseline", () => {
-    let fixture;
-    let harness;
-    let stormMode = false;
-    let stormWrites = 0;
+  it("does not reset the global write bucket across same-site route changes", () => {
+    const fixture = playerFixture(
+      [
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ],
+      { onSelectionWrite() {} },
+    );
+    const harness = controllerHarness(fixture, {
+      pathname: "/",
+      watchdogIntervalMs: 1000,
+    });
 
-    function createGeneration() {
-      return playerFixture(
-        [
-          { height: 1080, label: "ABR", selected: true, width: 1920 },
-          { height: 1080, label: "1080p", width: 1920 },
-        ],
-        {
-          onSelectionWrite({ apply }) {
-            if (!stormMode) {
-              apply();
-              return;
-            }
-            stormWrites += 1;
-            const replacement = createGeneration();
-            fixture.mountDocument(replacement);
-            harness.dispatchWindow("resize");
-          },
-        },
+    harness.controller.start();
+    let steps = 0;
+    while (steps < 20 && fixture.selectionTrueWrites[1] < 2) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
+    }
+    assert.ok(steps < 20);
+    assert.equal(fixture.selectionTrueWrites[1], 2);
+
+    for (const path of ["/following", "/search?keyword=live", "/category/GAME", "/lives"]) {
+      harness.historyRef.pushState({}, "", path);
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(
+        fixture.selectionTrueWrites[1],
+        2,
+        `same-site navigation to ${path} must not refill the global bucket`,
       );
     }
 
-    fixture = createGeneration();
-    harness = controllerHarness(fixture);
-    harness.controller.start();
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-
-    harness.historyRef.pushState({}, "", "/search");
-    assert.ok(harness.flushTimers(20) < 20);
-    fixture.selectTrack(0);
-    harness.advanceTime(20_000);
-
-    harness.historyRef.pushState({}, "", "/live/return");
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
-
     harness.advanceTime(5000);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    assert.ok(harness.flushTimers(20) < 20);
-
-    stormMode = true;
-    fixture.selectTrack(0);
-    fixture.player.videoTracks.dispatchTrackEvent("change");
-    assert.ok(harness.flushTimers(100) < 100);
-    assert.equal(
-      stormWrites,
-      4,
-      "only the post-confirmation five-second interval may replenish one global write",
-    );
-    assert.equal(harness.pendingTimerCount(), 0);
+    harness.historyRef.pushState({}, "", "/live/return");
+    steps = 0;
+    while (steps < 20 && fixture.selectionTrueWrites[1] < 3) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
+    }
+    assert.ok(steps < 20);
+    assert.equal(fixture.selectionTrueWrites[1], 3);
     harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
   });
 
-  it("bounds one failed remount-storm recovery and later recovers on fresh healthy media evidence", () => {
+  it("rate-limits a remount storm without resetting the controller-global bucket", () => {
     const generations = [];
     let fixture;
     let harness;
@@ -2425,28 +2394,48 @@ describe("CHZZK player highest-quality controller", () => {
 
     fixture = createIgnoredGeneration();
     generations.push(fixture);
-    harness = controllerHarness(fixture);
+    harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
     const stormWrites = () =>
       generations.reduce((sum, generation) => sum + generation.selectionTrueWrites[1], 0);
 
     harness.controller.start();
-    let initialFlushes = 0;
-    while (
-      initialFlushes < 100 &&
-      (stormWrites() < 4 || harness.pendingTimerDelay() !== 5000) &&
-      harness.flushTimer()
-    ) {
-      initialFlushes += 1;
+    let steps = 0;
+    while (steps < 20 && stormWrites() < 4) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
     }
-    assert.ok(initialFlushes < 100);
+    assert.ok(steps < 20);
     assert.equal(stormWrites(), 4);
-    assert.equal(harness.pendingTimerDelay(), 5000);
+    assert.equal(generations.length, 5);
 
-    harness.flushTimer();
-    const recoveryFlushLimit = 100;
-    assert.ok(harness.flushTimers(recoveryFlushLimit) < recoveryFlushLimit);
-    assert.equal(stormWrites(), 5, "the fuse may spend only one delayed recovery write");
-    assert.equal(generations.length, stormWrites() + 1);
+    for (let index = 0; index < 30; index += 1) {
+      harness.dispatchWindow("resize");
+      harness.dispatchMutation([
+        {
+          addedNodes: [generations.at(-1).root],
+          removedNodes: [],
+        },
+      ]);
+    }
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(stormWrites(), 4, "player, track, pane, and filter churn must not refill writes");
+
+    harness.advanceTime(5000);
+    harness.dispatchMutation([
+      {
+        addedNodes: [generations.at(-1).root],
+        removedNodes: [],
+      },
+    ]);
+    steps = 0;
+    while (steps < 20 && stormWrites() < 5) {
+      assert.equal(harness.flushTimer(), true);
+      steps += 1;
+    }
+    assert.ok(steps < 20);
+    assert.equal(stormWrites(), 5, "only elapsed cooldown may refill one write");
+    assert.equal(generations.length, 6);
     assert.equal(new Set(generations.map((generation) => generation.player)).size, generations.length);
     assert.equal(
       new Set(generations.map((generation) => generation.player.videoTracks)).size,
@@ -2454,47 +2443,30 @@ describe("CHZZK player highest-quality controller", () => {
     );
     assert.equal(new Set(generations.map((generation) => generation.pane)).size, generations.length);
     assert.equal(new Set(generations.map((generation) => generation.pane.filter)).size, generations.length);
-    assert.equal(fixture.storageSetCalls, 0);
-    assert.equal(fixture.stored.size, 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.advanceTime(20_000);
-    assert.equal(harness.flushTimers(20), 0, "a failed recovery must not become a periodic retry");
-    assert.equal(stormWrites(), 5);
-
-    const healthy = playerFixture([
-      { height: 1440, label: "ABR", selected: true, width: 2560 },
-      { height: 1440, label: "1440p", width: 2560 },
-    ]);
-    const previousRoot = generations.at(-1).root;
-    fixture.mountDocument(healthy);
-    harness.dispatchDocument("waiting", healthy.primaryMedia);
-    harness.dispatchWindow("resize");
-    harness.dispatchMutation([
-      {
-        addedNodes: [healthy.root],
-        removedNodes: [previousRoot],
-      },
-    ]);
-    assert.ok(harness.flushTimers(20) < 20);
-    assert.equal(healthy.selectionTrueWrites[1], 0);
-    assert.equal(harness.pendingTimerCount(), 0);
-
-    harness.dispatchDocument("playing", healthy.primaryMedia);
-    harness.dispatchDocument("canplay", healthy.primaryMedia);
-    assert.equal(harness.pendingTimerDelay(), 250);
-    assert.ok(harness.flushTimers(50) < 50);
-    assert.equal(healthy.selectionTrueWrites[1], 1);
-    assert.equal(healthy.player.videoTracks.selectedIndex, 1);
     assert.equal(fixture.storageSetCalls, 1);
-    assert.deepEqual(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)), {
-      height: 1440,
-      label: "1440p",
-      width: 2560,
-    });
-    assert.equal(stormWrites(), 5);
-    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
     harness.controller.stop();
+  });
+
+  it("cancels the always-high watchdog on stop", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "1080p", selected: true, width: 1920 },
+      { height: 720, label: "720p", width: 1280 },
+    ]);
+    const harness = controllerHarness(fixture, { watchdogIntervalMs: 1000 });
+
+    harness.controller.start();
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(harness.pendingTimerCount(), 1);
+    assert.equal(harness.pendingTimerDelay(), 1000);
+
+    const writesBeforeStop = fixture.selectionTrueWrites[0];
+    harness.controller.stop();
+    assert.equal(harness.pendingTimerCount(), 0);
+    harness.advanceTime(10_000);
+    assert.equal(harness.flushTimers(), 0);
+    assert.equal(fixture.selectionTrueWrites[0], writesBeforeStop);
   });
 
   it("removes responsive, viewport, media, track, and timer state on stop", () => {
@@ -2509,17 +2481,10 @@ describe("CHZZK player highest-quality controller", () => {
 
     harness.controller.start();
     harness.flushTimer();
-    for (const eventType of [
-      "loadedmetadata",
-      "change",
-      "waiting",
-      "stalled",
-      "playing",
-      "canplay",
-      "timeupdate",
-    ]) {
+    for (const eventType of ["loadedmetadata", "change", "waiting", "stalled", "playing", "canplay"]) {
       assert.equal(harness.documentListeners.get(eventType)?.size ?? 0, 1);
     }
+    assert.equal(harness.documentListeners.get("timeupdate")?.size ?? 0, 0);
     for (const eventType of ["popstate", "resize", "orientationchange"]) {
       assert.equal(harness.windowListeners.get(eventType)?.size ?? 0, 1);
     }

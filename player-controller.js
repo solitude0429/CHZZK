@@ -2,44 +2,64 @@
   // src/runtime/player-controller.js
   var PLAYER_LAYOUT_SELECTOR = "#live_player_layout > pzp-pc-layout";
   var QUALITY_PANE_SELECTOR =
-    "#live_player_layout pzp-pc-setting-quality-pane, #live_player_layout pzp-setting-quality";
+    "#live_player_layout pzp-pc-setting-quality-pane, #live_player_layout pzp-setting-quality, #live_player_layout .pzp-pc-setting-quality-pane, #live_player_layout .pzp-setting-quality-pane";
   var QUALITY_STORAGE_KEY = "live-player-video-track";
   var MAX_TRACKS = 64;
+  var MAX_PLAYER_SCAN_NODES = 256;
+  var MAX_REACT_FIBER_DEPTH = 32;
+  var MAX_REACT_FIBER_NODES = 1024;
+  var MAX_REACT_STATE_NODES = 1024;
+  var MAX_REACT_STATE_DEPTH = 8;
   var INITIAL_DISCOVERY_TARGET_RESOLUTION = 1080;
+  var DEFAULT_QUALITY_INTENT = Object.freeze({
+    height: 1080,
+    label: "1080p",
+    resolution: 1080,
+    videoBitrate: 0,
+    width: 1920,
+  });
   var RETRY_DELAYS_MS = [0, 50, 250, 1e3, 3e3];
   var RESPONSIVE_SETTLE_DELAY_MS = 250;
   var RESPONSIVE_RECHECK_DELAYS_MS = [250, 1e3, 3e3];
-  var RESPONSIVE_OVERRIDE_WINDOW_MS = 5e3;
-  var MEDIA_SETTLE_DELAY_MS = 250;
-  var MEDIA_STALLED_RECHECK_DELAY_MS = 1e3;
   var SELECTION_CONFIRM_DELAYS_MS = [50, 200, 750];
   var SELECTION_STABLE_MS = 5e3;
-  var GLOBAL_SELECTION_RECOVERY_DELAY_MS = 5e3;
-  var MAX_MEDIA_READINESS_RECHECKS = 1;
+  var WATCHDOG_INTERVAL_MS = 1e3;
   var MAX_SELECTION_WRITES_PER_CANDIDATE = 2;
   var MAX_GLOBAL_SELECTION_WRITES = 4;
   var MANUAL_QUALITY_LABEL_RE = /^\d{3,4}p$/i;
   var TRACK_LIST_EVENT_TYPES = ["addtrack", "removetrack", "change"];
+  var CONTROLLER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.highest-quality-player-controller");
+  var FILTER_WRAPPER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.highest-quality-filter-wrapper");
+  function ignorePageAccessFailure() {
+    return false;
+  }
   function isPlayerPageLocation(value) {
+    let hostname = "";
     let pathname;
     try {
-      pathname =
-        typeof value?.pathname === "string"
-          ? value.pathname
-          : new globalThis.URL(String(value), "https://chzzk.naver.com").pathname;
+      if (typeof value?.pathname === "string") {
+        pathname = value.pathname;
+        hostname = typeof value.hostname === "string" ? value.hostname.toLowerCase() : "";
+      } else {
+        const url = new globalThis.URL(String(value), "https://chzzk.naver.com");
+        hostname = url.hostname.toLowerCase();
+        pathname = url.pathname;
+      }
     } catch {
       return false;
     }
     return (
-      pathname === "/live" ||
-      pathname.startsWith("/live/") ||
-      pathname === "/lives" ||
-      pathname.startsWith("/lives/")
+      pathname.startsWith("/") &&
+      (!hostname || hostname === "chzzk.naver.com" || hostname.endsWith(".chzzk.naver.com"))
     );
   }
   function positiveDimension(value) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 && number <= 32768 ? number : null;
+  }
+  function positiveVideoBitrate(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 && number <= 1e9 ? number : 0;
   }
   function playerTracks(player) {
     try {
@@ -49,13 +69,212 @@
       return [];
     }
   }
-  function currentPlayerState(documentRef) {
+  function ownDataValue(object, key) {
+    if ((typeof object !== "object" && typeof object !== "function") || object == null) return void 0;
     try {
-      const player = documentRef?.querySelector?.(PLAYER_LAYOUT_SELECTOR) ?? null;
-      return { player, tracks: player?.videoTracks ?? null };
+      const descriptor = Object.getOwnPropertyDescriptor(object, key);
+      return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : void 0;
     } catch {
-      return { player: null, tracks: null };
+      return void 0;
     }
+  }
+  function inheritedPropertyDescriptor(object, key) {
+    let current = object;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (descriptor) return descriptor;
+        current = Object.getPrototypeOf(current);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function playerFromReactBridge(value) {
+    const publicTracks = trackListForPlayer(value);
+    if (publicTracks && playerTracks(value).some((track, index) => trackDescriptor(track, index))) {
+      return value;
+    }
+    const internalPlayer = ownDataValue(value, "_internalPlayer");
+    return internalPlayer &&
+      trackListForPlayer(internalPlayer) &&
+      playerTracks(internalPlayer).some((track, index) => trackDescriptor(track, index))
+      ? internalPlayer
+      : null;
+  }
+  function inspectReactStateForPlayers(root, append, scan) {
+    const queue = [{ depth: 0, value: root }];
+    while (queue.length > 0 && scan.remainingStateNodes > 0) {
+      const { depth, value } = queue.shift();
+      if (
+        (typeof value !== "object" && typeof value !== "function") ||
+        value == null ||
+        scan.stateValues.has(value)
+      ) {
+        continue;
+      }
+      scan.stateValues.add(value);
+      scan.remainingStateNodes -= 1;
+      const player = playerFromReactBridge(value);
+      if (player) {
+        append(player);
+        return true;
+      }
+      if (depth >= MAX_REACT_STATE_DEPTH) continue;
+      if (Array.isArray(value)) {
+        for (const item of value.slice(0, MAX_TRACKS)) queue.push({ depth: depth + 1, value: item });
+        continue;
+      }
+      for (const key of [
+        "baseState",
+        "current",
+        "deps",
+        "lastEffect",
+        "memoizedProps",
+        "memoizedState",
+        "next",
+        "queue",
+        "stateNode",
+        "updateQueue",
+        "value",
+      ]) {
+        const nested = ownDataValue(value, key);
+        if (nested !== void 0) queue.push({ depth: depth + 1, value: nested });
+      }
+    }
+    return false;
+  }
+  function appendReactPlayers(node, append, scan) {
+    let propertyNames;
+    try {
+      propertyNames = Object.getOwnPropertyNames(node);
+    } catch {
+      return;
+    }
+    const roots = propertyNames
+      .filter(
+        (name) =>
+          name.startsWith("__reactFiber$") ||
+          name.startsWith("__reactInternalInstance$") ||
+          name.startsWith("__reactProps$"),
+      )
+      .slice(0, 4)
+      .map((name) => ownDataValue(node, name))
+      .filter(Boolean);
+    for (const root of roots) {
+      let fiber = root;
+      for (
+        let depth = 0;
+        fiber && depth < MAX_REACT_FIBER_DEPTH && scan.remainingFiberNodes > 0;
+        depth += 1
+      ) {
+        if (scan.fibers.has(fiber)) break;
+        scan.fibers.add(fiber);
+        scan.remainingFiberNodes -= 1;
+        if (
+          inspectReactStateForPlayers(ownDataValue(fiber, "memoizedState"), append, scan) ||
+          inspectReactStateForPlayers(ownDataValue(fiber, "updateQueue"), append, scan) ||
+          inspectReactStateForPlayers(ownDataValue(fiber, "memoizedProps"), append, scan) ||
+          inspectReactStateForPlayers(ownDataValue(fiber, "stateNode"), append, scan)
+        ) {
+          return true;
+        }
+        fiber = ownDataValue(fiber, "return");
+      }
+    }
+    return false;
+  }
+  function candidatePlayerElements(documentRef) {
+    const candidates = [];
+    const seen = /* @__PURE__ */ new Set();
+    const reactScan = {
+      fibers: /* @__PURE__ */ new Set(),
+      remainingFiberNodes: MAX_REACT_FIBER_NODES,
+      remainingStateNodes: MAX_REACT_STATE_NODES,
+      stateValues: /* @__PURE__ */ new Set(),
+    };
+    const append = (candidate) => {
+      if (!candidate || seen.has(candidate)) return;
+      seen.add(candidate);
+      candidates.push(candidate);
+    };
+    try {
+      append(documentRef?.querySelector?.(PLAYER_LAYOUT_SELECTOR));
+    } catch {
+      ignorePageAccessFailure();
+    }
+    let layout = null;
+    let reactPlayerFound = false;
+    try {
+      layout = documentRef?.querySelector?.("#live_player_layout") ?? null;
+      append(layout);
+      reactPlayerFound = appendReactPlayers(layout, append, reactScan);
+    } catch {
+      ignorePageAccessFailure();
+    }
+    const appendVideoAndAncestors = (video, stopAtLayout) => {
+      append(video);
+      if (!reactPlayerFound) reactPlayerFound = appendReactPlayers(video, append, reactScan);
+      let ancestor = video?.parentElement ?? null;
+      for (let depth = 0; ancestor && depth < 16; depth += 1) {
+        append(ancestor);
+        if (!reactPlayerFound) reactPlayerFound = appendReactPlayers(ancestor, append, reactScan);
+        if (ancestor === stopAtLayout) break;
+        ancestor = ancestor.parentElement ?? null;
+      }
+    };
+    try {
+      const scopedVideos = Array.from(
+        documentRef?.querySelectorAll?.("#live_player_layout video") ??
+          layout?.querySelectorAll?.("video") ??
+          [],
+      ).slice(0, MAX_TRACKS);
+      for (const video of scopedVideos) {
+        appendVideoAndAncestors(video, layout);
+      }
+    } catch {
+      ignorePageAccessFailure();
+    }
+    if (!reactPlayerFound) {
+      try {
+        const nodes = Array.from(layout?.querySelectorAll?.("*") ?? []).slice(0, MAX_PLAYER_SCAN_NODES);
+        for (const node of nodes) {
+          append(node);
+          if (!reactPlayerFound) reactPlayerFound = appendReactPlayers(node, append, reactScan);
+        }
+      } catch {
+        ignorePageAccessFailure();
+      }
+    }
+    try {
+      const globalVideos = Array.from(
+        documentRef?.querySelectorAll?.("video.webplayer-internal-video") ?? [],
+      ).slice(0, MAX_TRACKS);
+      for (const video of globalVideos) {
+        if (seen.has(video)) continue;
+        appendVideoAndAncestors(video, null);
+      }
+    } catch {
+      ignorePageAccessFailure();
+    }
+    return candidates;
+  }
+  function trackListForPlayer(player) {
+    try {
+      return player?.videoTracks ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function currentPlayerState(documentRef) {
+    let fallback = { player: null, tracks: null };
+    for (const player of candidatePlayerElements(documentRef)) {
+      const tracks = trackListForPlayer(player);
+      if (!fallback.player) fallback = { player, tracks };
+      if (tracks && playerTracks(player).length > 0) return { player, tracks };
+    }
+    return fallback;
   }
   function trackDescriptor(track, index) {
     try {
@@ -76,6 +295,7 @@
         label,
         resolution: Math.min(width, height),
         track,
+        videoBitrate: positiveVideoBitrate(track?.videoBitrate),
         width,
       };
     } catch {
@@ -86,7 +306,11 @@
     return compareTrackQuality(left, right) || right.index - left.index;
   }
   function compareTrackQuality(left, right) {
-    return right.resolution - left.resolution || right.width * right.height - left.width * left.height;
+    return (
+      right.resolution - left.resolution ||
+      right.width * right.height - left.width * left.height ||
+      (right.videoBitrate ?? 0) - (left.videoBitrate ?? 0)
+    );
   }
   function sameTrackQuality(left, right) {
     return compareTrackQuality(left, right) === 0;
@@ -124,51 +348,38 @@
       return null;
     }
   }
-  function resolveHighestAllowedPlayerTrack(documentRef) {
-    let filter;
-    let pane;
-    let player;
-    let tracks;
+  function readStoredTrackIntent(storage) {
+    if (!storage?.getItem) return null;
     try {
-      player = documentRef?.querySelector?.(PLAYER_LAYOUT_SELECTOR);
-      pane = documentRef?.querySelector?.(QUALITY_PANE_SELECTOR);
-      filter = pane?.filter;
-      tracks = player?.videoTracks ?? null;
-    } catch {
-      return { outcome: { reason: "player-access-failed", selected: false } };
-    }
-    if (!player) return { outcome: { reason: "player-missing", selected: false } };
-    if (typeof filter !== "function") {
-      return { outcome: { reason: "quality-filter-missing", selected: false } };
-    }
-    const concreteCandidates = playerTracks(player).map(trackDescriptor).filter(Boolean);
-    const candidates = concreteCandidates
-      .filter((candidate2) => {
-        try {
-          return filter.call(pane, candidate2.track) === true;
-        } catch {
-          return false;
-        }
-      })
-      .sort(compareTrackCandidates);
-    const highestAllowed = candidates[0];
-    if (!highestAllowed) return { outcome: { reason: "allowed-track-missing", selected: false } };
-    const currentConcrete = concreteCandidates.find((candidate2) => isCurrentTrack(player, candidate2));
-    const currentAllowed = candidates.find((candidate2) => candidate2.track === currentConcrete?.track);
-    if (currentConcrete && !currentAllowed && compareTrackQuality(currentConcrete, highestAllowed) < 0) {
+      const value = JSON.parse(storage.getItem(QUALITY_STORAGE_KEY));
+      const label = typeof value?.label === "string" ? value.label.trim() : "";
+      const width = positiveDimension(value?.width);
+      const height = positiveDimension(value?.height);
+      if (!MANUAL_QUALITY_LABEL_RE.test(label) || width == null || height == null) return null;
       return {
-        candidates,
-        concreteCandidates,
-        filter,
-        pane,
-        player,
-        preserved: currentConcrete,
-        tracks,
+        height,
+        label,
+        resolution: Math.min(width, height),
+        videoBitrate: 0,
+        width,
       };
+    } catch {
+      return null;
     }
+  }
+  function resolveHighestConcretePlayerTrack(documentRef) {
+    const { player, tracks } = currentPlayerState(documentRef);
+    if (!player) return { outcome: { reason: "player-missing", selected: false } };
+    const concreteCandidates = playerTracks(player).map(trackDescriptor).filter(Boolean);
+    const candidates = concreteCandidates.sort(compareTrackCandidates);
+    const highestConcrete = candidates[0];
+    if (!highestConcrete) return { outcome: { reason: "concrete-track-missing", selected: false } };
+    const currentConcrete = concreteCandidates.find((candidate2) => isCurrentTrack(player, candidate2));
     const candidate =
-      currentAllowed && sameTrackQuality(currentAllowed, highestAllowed) ? currentAllowed : highestAllowed;
-    return { candidate, candidates, concreteCandidates, filter, pane, player, tracks };
+      currentConcrete && sameTrackQuality(currentConcrete, highestConcrete)
+        ? currentConcrete
+        : highestConcrete;
+    return { candidate, player, tracks };
   }
   function selectedTrackOutcome(candidate, changed) {
     return {
@@ -184,9 +395,6 @@
       left &&
       right &&
       !right.outcome &&
-      !right.preserved &&
-      left.filter === right.filter &&
-      left.pane === right.pane &&
       left.player === right.player &&
       left.tracks === right.tracks &&
       left.candidate.track === right.candidate.track,
@@ -199,19 +407,8 @@
     storage,
   } = {}) {
     const resolvedStorage = resolveStorage(storage);
-    const resolution = resolveHighestAllowedPlayerTrack(documentRef);
+    const resolution = resolveHighestConcretePlayerTrack(documentRef);
     if (resolution.outcome) return resolution.outcome;
-    if (resolution.preserved) {
-      return {
-        changed: false,
-        height: resolution.preserved.height,
-        label: resolution.preserved.label,
-        preserved: true,
-        reason: "current-track-above-responsive-filter",
-        selected: true,
-        width: resolution.preserved.width,
-      };
-    }
     const changed = !isCurrentTrack(resolution.player, resolution.candidate);
     if (changed) {
       if (!allowSelectionWrite) return { reason: "selection-required", selected: false };
@@ -221,7 +418,7 @@
         return { reason: "selection-failed", selected: false };
       }
     }
-    const observedResolution = resolveHighestAllowedPlayerTrack(documentRef);
+    const observedResolution = resolveHighestConcretePlayerTrack(documentRef);
     if (!selectionContextMatches(resolution, observedResolution)) {
       return { reason: "selection-context-changed", selected: false };
     }
@@ -231,64 +428,60 @@
     if (persistSelection) persistSelectedTrack(resolvedStorage, observedResolution.candidate);
     return selectedTrackOutcome(observedResolution.candidate, changed);
   }
+  function nodeBelongsToQualityPane(node) {
+    try {
+      if (node?.matches?.(QUALITY_PANE_SELECTOR) || node?.closest?.(QUALITY_PANE_SELECTOR)) return true;
+    } catch {
+      ignorePageAccessFailure();
+    }
+    const tagName = String(node?.tagName ?? "").toUpperCase();
+    if (tagName === "PZP-PC-SETTING-QUALITY-PANE" || tagName === "PZP-SETTING-QUALITY") {
+      return true;
+    }
+    const classes = String(node?.className ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+    return classes.includes("pzp-pc-setting-quality-pane") || classes.includes("pzp-setting-quality-pane");
+  }
   function eventBelongsToQualityPane(event) {
     const nodes =
       typeof event?.composedPath === "function" ? event.composedPath() : [event?.target].filter(Boolean);
-    return nodes.some((node) => {
-      const tagName = String(node?.tagName ?? "").toUpperCase();
-      return tagName === "PZP-PC-SETTING-QUALITY-PANE" || tagName === "PZP-SETTING-QUALITY";
-    });
+    return nodes.some(nodeBelongsToQualityPane);
   }
-  function currentPlayerMediaEvent(event, documentRef) {
-    let player;
-    let tracks;
-    try {
-      player = documentRef?.querySelector?.(PLAYER_LAYOUT_SELECTOR);
-      tracks = player?.videoTracks ?? null;
-    } catch {
-      return null;
-    }
-    if (!player) return null;
+  function eventBelongsToPlayerMedia(event, documentRef) {
     const nodes =
       typeof event?.composedPath === "function" ? event.composedPath() : [event?.target].filter(Boolean);
     const media = nodes.find((node) => String(node?.tagName ?? "").toUpperCase() === "VIDEO");
-    if (!media || !nodes.includes(player)) return null;
+    if (!media) return false;
     try {
-      const primaryMedia = player.querySelector?.("video") ?? null;
-      if (primaryMedia !== media) return null;
+      const layout = documentRef?.querySelector?.("#live_player_layout") ?? null;
+      if (!layout) return false;
+      return (
+        layout === media ||
+        layout.contains?.(media) === true ||
+        media.closest?.("#live_player_layout") === layout
+      );
     } catch {
-      return null;
+      return false;
     }
-    return { media, player, tracks };
   }
   function mutationTouchesPlayer(records) {
     return (Array.isArray(records) ? records : []).some((record) => {
-      let targetTouchesQualityPane = false;
-      try {
-        const targetTagName = String(record?.target?.tagName ?? "").toUpperCase();
-        targetTouchesQualityPane = Boolean(
-          targetTagName === "PZP-PC-SETTING-QUALITY-PANE" ||
-          targetTagName === "PZP-SETTING-QUALITY" ||
-          record?.target?.closest?.(QUALITY_PANE_SELECTOR),
-        );
-      } catch {
-        targetTouchesQualityPane = false;
-      }
-      if (targetTouchesQualityPane) return true;
+      if (nodeBelongsToQualityPane(record?.target)) return true;
       return [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
         try {
           const tagName = String(node?.tagName ?? "").toUpperCase();
           if (
             node?.id === "live_player_layout" ||
+            tagName === "VIDEO" ||
             tagName === "PZP-PC-LAYOUT" ||
-            tagName === "PZP-PC-SETTING-QUALITY-PANE" ||
-            tagName === "PZP-SETTING-QUALITY"
+            nodeBelongsToQualityPane(node)
           ) {
             return true;
           }
           return Boolean(
             node?.querySelector?.(
-              "#live_player_layout, pzp-pc-layout, pzp-pc-setting-quality-pane, pzp-setting-quality",
+              "#live_player_layout, video, pzp-pc-layout, pzp-pc-setting-quality-pane, pzp-setting-quality, .pzp-pc-setting-quality-pane, .pzp-setting-quality-pane",
             ),
           );
         } catch {
@@ -296,6 +489,21 @@
         }
       });
     });
+  }
+  function mutationContainsPlayerRoot(records) {
+    return (Array.isArray(records) ? records : []).some((record) =>
+      [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
+        try {
+          const tagName = String(node?.tagName ?? "").toUpperCase();
+          if (node?.id === "live_player_layout" || tagName === "VIDEO" || tagName === "PZP-PC-LAYOUT") {
+            return true;
+          }
+          return Boolean(node?.querySelector?.("#live_player_layout, video, pzp-pc-layout"));
+        } catch {
+          return false;
+        }
+      }),
+    );
   }
   function defaultMonotonicNow() {
     try {
@@ -317,36 +525,43 @@
     storage,
     windowRef = globalThis.window,
     visualViewportRef = windowRef?.visualViewport,
+    watchdogIntervalMs = WATCHDOG_INTERVAL_MS,
   } = {}) {
     const resolvedStorage = resolveStorage(storage);
+    const storedIntent = readStoredTrackIntent(resolvedStorage);
+    let qualityIntent =
+      storedIntent && compareTrackQuality(storedIntent, DEFAULT_QUALITY_INTENT) <= 0
+        ? storedIntent
+        : DEFAULT_QUALITY_INTENT;
+    const watchdogDelay =
+      Number.isFinite(Number(watchdogIntervalMs)) && Number(watchdogIntervalMs) > 0
+        ? Number(watchdogIntervalMs)
+        : null;
     let active = false;
     let boundTracks = null;
     let confirmedSelection = null;
     let discoveryContext = null;
     const eventRestorers = [];
     let globalAvailableWrites = MAX_GLOBAL_SELECTION_WRITES;
-    let globalFreshMediaRecoveryAvailable = true;
     let globalLastRefillAt = null;
-    let globalRecoveryAvailable = true;
-    let globalRecoveryTimer = null;
     const historyRestorers = [];
     let lastNow = 0;
-    let mediaHold = null;
-    let mediaSettledTimer = null;
-    let mediaStalledTimer = null;
     let observer = null;
     let responsiveTimer = null;
     let responsiveRecheckIndex = 0;
     let responsiveRecheckLimit = 0;
     let responsiveRecheckTimer = null;
     let responsiveRecheckToken = 0;
-    let responsiveOverrideContext = null;
-    let responsiveOverrideTimer = null;
     let retryIndex = 0;
     let scheduledTimer = null;
     let selectionConfirmationTimer = null;
     let selectionToken = 0;
     let selectionTransaction = null;
+    let watchdogTimer = null;
+    const guardedTracks = /* @__PURE__ */ new Map();
+    let wrappedFilter = null;
+    let wrappedFilterOwnDescriptor = null;
+    let wrappedPane = null;
     function now() {
       try {
         const value = Number(nowImpl());
@@ -361,6 +576,21 @@
       clearTimeoutImpl(scheduledTimer);
       scheduledTimer = null;
     }
+    function cancelWatchdog() {
+      if (watchdogTimer == null) return;
+      clearTimeoutImpl(watchdogTimer);
+      watchdogTimer = null;
+    }
+    function scheduleWatchdog() {
+      if (!active || watchdogDelay == null || watchdogTimer != null) return;
+      watchdogTimer = setTimeoutImpl(() => {
+        watchdogTimer = null;
+        if (!active) return;
+        protectQualityIntent();
+        scheduleScan({ restart: true });
+        scheduleWatchdog();
+      }, watchdogDelay);
+    }
     function cancelResponsiveScan() {
       if (responsiveTimer == null) return;
       clearTimeoutImpl(responsiveTimer);
@@ -370,32 +600,6 @@
       if (responsiveRecheckTimer == null) return;
       clearTimeoutImpl(responsiveRecheckTimer);
       responsiveRecheckTimer = null;
-    }
-    function clearResponsiveOverrideContext() {
-      if (responsiveOverrideTimer != null) {
-        clearTimeoutImpl(responsiveOverrideTimer);
-        responsiveOverrideTimer = null;
-      }
-      responsiveOverrideContext = null;
-    }
-    function armResponsiveOverrideContext() {
-      clearResponsiveOverrideContext();
-      let player;
-      let tracks;
-      try {
-        player = documentRef?.querySelector?.(PLAYER_LAYOUT_SELECTOR) ?? null;
-        tracks = player?.videoTracks ?? null;
-      } catch {
-        return;
-      }
-      if (!player || !tracks) return;
-      const context = { player, tracks };
-      responsiveOverrideContext = context;
-      responsiveOverrideTimer = setTimeoutImpl(() => {
-        if (responsiveOverrideContext !== context) return;
-        responsiveOverrideTimer = null;
-        responsiveOverrideContext = null;
-      }, RESPONSIVE_OVERRIDE_WINDOW_MS);
     }
     function clearResponsiveRechecks() {
       cancelResponsiveRecheck();
@@ -422,60 +626,22 @@
         scheduleScan({ restart: true });
       }, RESPONSIVE_RECHECK_DELAYS_MS[index]);
     }
-    function cancelMediaSettledScan() {
-      if (mediaSettledTimer == null) return;
-      clearTimeoutImpl(mediaSettledTimer);
-      mediaSettledTimer = null;
-    }
-    function cancelMediaStalledScan() {
-      if (mediaStalledTimer == null) return;
-      clearTimeoutImpl(mediaStalledTimer);
-      mediaStalledTimer = null;
-    }
-    function clearMediaHold() {
-      cancelMediaSettledScan();
-      cancelMediaStalledScan();
-      mediaHold = null;
-    }
-    function grantFreshMediaRecovery(hold) {
-      if (
-        hold?.hadUnsettled !== true ||
-        globalAvailableWrites > 0 ||
-        globalRecoveryAvailable ||
-        !globalFreshMediaRecoveryAvailable
-      ) {
-        return;
-      }
-      globalAvailableWrites = 1;
-      globalFreshMediaRecoveryAvailable = false;
-      if (selectionTransaction?.phase === "quiescent") selectionTransaction.phase = "idle";
-    }
     function cancelSelectionConfirmation() {
       if (selectionConfirmationTimer == null) return;
       clearTimeoutImpl(selectionConfirmationTimer);
       selectionConfirmationTimer = null;
     }
-    function cancelGlobalRecovery() {
-      if (globalRecoveryTimer == null) return;
-      clearTimeoutImpl(globalRecoveryTimer);
-      globalRecoveryTimer = null;
-    }
     function clearSelectionTransaction() {
       cancelSelectionConfirmation();
-      cancelGlobalRecovery();
       selectionToken += 1;
       selectionTransaction = null;
     }
     function transactionMatches(transaction, resolution) {
       return Boolean(
         transaction &&
-        transaction.responsiveOverride === (resolution?.responsiveOverride === true) &&
-        transaction.responsiveFilterRejected === (resolution?.responsiveFilterRejected === true) &&
         selectionContextMatches(
           {
             candidate: { track: transaction.track },
-            filter: transaction.filter,
-            pane: transaction.pane,
             player: transaction.player,
             tracks: transaction.tracks,
           },
@@ -495,161 +661,213 @@
     function rememberConfirmedSelection(resolution, candidate = resolution?.candidate) {
       if (!resolution || !candidate) return;
       confirmedSelection = {
-        filter: resolution.filter,
-        pane: resolution.pane,
         player: resolution.player,
         track: candidate.track,
         tracks: resolution.tracks,
       };
     }
-    function responsiveOverrideContextMatches(resolution) {
-      if (!responsiveOverrideContext) return false;
-      if (
-        responsiveOverrideContext.player === resolution?.player &&
-        responsiveOverrideContext.tracks === resolution?.tracks
-      ) {
-        return true;
-      }
-      clearResponsiveOverrideContext();
-      return false;
+    function persistQualityIntent(candidate) {
+      if (!candidate) return;
+      if (qualityIntent && compareTrackQuality(candidate, qualityIntent) > 0) return;
+      qualityIntent = {
+        height: candidate.height,
+        label: candidate.label,
+        resolution: candidate.resolution,
+        videoBitrate: candidate.videoBitrate,
+        width: candidate.width,
+      };
+      protectQualityIntent();
     }
-    function isProvisionalFilteredDemotion(resolution) {
-      const currentCandidate = resolution?.preserved ?? resolution?.candidate;
-      if (
-        responsiveOverrideContext ||
-        !mediaHold ||
-        mediaHold.player !== resolution?.player ||
-        (mediaHold.tracks != null && mediaHold.tracks !== resolution?.tracks) ||
-        !confirmedContextMatches(resolution) ||
-        !currentCandidate ||
-        !isCurrentTrack(resolution.player, currentCandidate)
-      ) {
-        return false;
-      }
-      const remembered = resolution.concreteCandidates?.find(
-        (candidate) => candidate.track === confirmedSelection.track,
-      );
-      if (!remembered) return false;
-      const rememberedAllowed = resolution.candidates?.some(
-        (candidate) => candidate.track === remembered.track,
-      );
-      return (
-        !rememberedAllowed &&
-        remembered.track !== currentCandidate.track &&
-        compareTrackQuality(remembered, currentCandidate) < 0
-      );
+    function protectQualityIntent() {
+      persistSelectedTrack(resolvedStorage, qualityIntent);
     }
-    function deferProvisionalFilteredDemotion(resolution) {
-      if (!isProvisionalFilteredDemotion(resolution)) return false;
-      const candidate = resolution.preserved ?? resolution.candidate;
-      clearSelectionTransaction();
-      continueResponsiveRechecks({
-        ...resolution,
-        candidate,
-        preserved: void 0,
-      });
-      return true;
+    function restoreWrappedFilter() {
+      if (!wrappedPane || !wrappedFilter) return;
+      try {
+        const current = Object.getOwnPropertyDescriptor(wrappedPane, "filter");
+        if (wrappedPane.filter === wrappedFilter && current?.value === wrappedFilter) {
+          if (wrappedFilterOwnDescriptor) {
+            Object.defineProperty(wrappedPane, "filter", wrappedFilterOwnDescriptor);
+          } else {
+            delete wrappedPane.filter;
+          }
+        }
+      } catch {
+        ignorePageAccessFailure();
+      }
+      wrappedFilter = null;
+      wrappedFilterOwnDescriptor = null;
+      wrappedPane = null;
+    }
+    function restoreTrackGuard(track) {
+      const guard = guardedTracks.get(track);
+      if (!guard) return;
+      guardedTracks.delete(track);
+      try {
+        const current = Object.getOwnPropertyDescriptor(track, "selected");
+        if (current?.get !== guard.get || current?.set !== guard.set) return;
+        if (guard.ownDescriptor) {
+          Object.defineProperty(track, "selected", guard.ownDescriptor);
+        } else {
+          delete track.selected;
+        }
+      } catch {
+        ignorePageAccessFailure();
+      }
+    }
+    function restoreTrackGuardsExcept(retainedTracks = null) {
+      for (const track of [...guardedTracks.keys()]) {
+        if (!retainedTracks?.has(track)) restoreTrackGuard(track);
+      }
+    }
+    function ensureTrackSelectionGuards(resolution) {
+      if (resolution?.outcome || !resolution?.player) {
+        restoreTrackGuardsExcept();
+        return;
+      }
+      const currentTracks = playerTracks(resolution.player);
+      const retainedTracks = new Set(currentTracks);
+      restoreTrackGuardsExcept(retainedTracks);
+      for (const [index, track] of currentTracks.entries()) {
+        const existingGuard = guardedTracks.get(track);
+        if (existingGuard) {
+          let currentDescriptor;
+          try {
+            currentDescriptor = Object.getOwnPropertyDescriptor(track, "selected");
+          } catch {
+            continue;
+          }
+          if (currentDescriptor?.get === existingGuard.get && currentDescriptor?.set === existingGuard.set) {
+            continue;
+          }
+          guardedTracks.delete(track);
+        }
+        let ownDescriptor;
+        try {
+          ownDescriptor = Object.getOwnPropertyDescriptor(track, "selected");
+        } catch {
+          continue;
+        }
+        if (ownDescriptor && ownDescriptor.configurable !== true) continue;
+        const selectedDescriptor = ownDescriptor ?? inheritedPropertyDescriptor(track, "selected");
+        if (typeof selectedDescriptor?.get !== "function" || typeof selectedDescriptor?.set !== "function") {
+          continue;
+        }
+        const get = function () {
+          return Reflect.apply(selectedDescriptor.get, track, []);
+        };
+        const set = function (next) {
+          if (next === true) {
+            const currentResolution = resolveHighestConcretePlayerTrack(documentRef);
+            if (!currentResolution.outcome) {
+              const requested = trackDescriptor(track, index);
+              const highest = currentResolution.candidate;
+              if (highest?.track !== track && (!requested || !sameTrackQuality(requested, highest))) {
+                if (!isCurrentTrack(currentResolution.player, highest)) {
+                  highest.track.selected = true;
+                }
+                return;
+              }
+            }
+          }
+          Reflect.apply(selectedDescriptor.set, track, [next]);
+        };
+        try {
+          Object.defineProperty(track, "selected", {
+            configurable: true,
+            enumerable: selectedDescriptor.enumerable === true,
+            get,
+            set,
+          });
+          const installed = Object.getOwnPropertyDescriptor(track, "selected");
+          if (installed?.get !== get || installed?.set !== set) continue;
+        } catch {
+          continue;
+        }
+        guardedTracks.set(track, {
+          get,
+          ownDescriptor,
+          set,
+        });
+      }
+    }
+    function ensureHighestQualityFilter() {
+      let pane;
+      let filter;
+      try {
+        pane = documentRef?.querySelector?.(QUALITY_PANE_SELECTOR) ?? null;
+        filter = pane?.filter;
+      } catch {
+        restoreWrappedFilter();
+        return;
+      }
+      if (pane === wrappedPane && filter === wrappedFilter) return;
+      restoreWrappedFilter();
+      if (!pane || typeof filter !== "function") return;
+      let ownDescriptor;
+      let filterDescriptor;
+      try {
+        ownDescriptor = Object.getOwnPropertyDescriptor(pane, "filter");
+        if (ownDescriptor && ownDescriptor.configurable !== true) return;
+        filterDescriptor = ownDescriptor ?? inheritedPropertyDescriptor(pane, "filter");
+      } catch {
+        return;
+      }
+      const wrapper = function (track, ...args) {
+        if (trackDescriptor(track, 0)) return true;
+        return Reflect.apply(filter, this, [track, ...args]);
+      };
+      try {
+        Object.defineProperty(wrapper, FILTER_WRAPPER_SLOT, {
+          value: true,
+        });
+        Object.defineProperty(pane, "filter", {
+          configurable: true,
+          enumerable: filterDescriptor?.enumerable === true,
+          value: wrapper,
+          writable: true,
+        });
+        if (pane.filter !== wrapper) throw new Error("filter wrapper rejected");
+      } catch {
+        try {
+          const current = Object.getOwnPropertyDescriptor(pane, "filter");
+          if (current?.value === wrapper) {
+            if (ownDescriptor) {
+              Object.defineProperty(pane, "filter", ownDescriptor);
+            } else {
+              delete pane.filter;
+            }
+          }
+        } catch {
+          ignorePageAccessFailure();
+        }
+        return;
+      }
+      wrappedFilter = wrapper;
+      wrappedFilterOwnDescriptor = ownDescriptor;
+      wrappedPane = pane;
     }
     function resolveControllerPlayerTrack() {
-      const resolution = resolveHighestAllowedPlayerTrack(documentRef);
-      if (resolution.outcome || !confirmedSelection) return resolution;
-      if (!confirmedContextMatches(resolution)) {
-        confirmedSelection = null;
-        return resolution;
-      }
-      const remembered = resolution.concreteCandidates?.find(
-        (candidate2) => candidate2.track === confirmedSelection.track,
-      );
-      if (!remembered) {
-        confirmedSelection = null;
-        return resolution;
-      }
-      const rememberedAllowed = resolution.candidates?.some(
-        (candidate2) => candidate2.track === confirmedSelection.track,
-      );
-      if (!responsiveOverrideContextMatches(resolution)) return resolution;
-      let candidate = resolution.candidate;
-      if (candidate && !rememberedAllowed && compareTrackQuality(remembered, candidate) < 0) {
-        candidate = remembered;
-      }
-      const restoringPreservedTransaction = Boolean(
-        resolution.preserved &&
-        selectionTransaction?.responsiveOverride === true &&
-        selectionTransaction.pane === resolution.pane &&
-        selectionTransaction.player === resolution.player &&
-        selectionTransaction.track === resolution.preserved.track &&
-        selectionTransaction.tracks === resolution.tracks,
-      );
-      if (resolution.preserved) {
-        if (compareTrackQuality(remembered, resolution.preserved) < 0) {
-          candidate = remembered;
-        } else if (restoringPreservedTransaction) {
-          candidate = resolution.preserved;
-        } else {
-          return resolution;
-        }
-      }
-      if (!candidate) return resolution;
-      if (candidate.track !== remembered.track) return resolution;
-      const restoringTransaction = Boolean(
-        selectionTransaction?.responsiveOverride === true &&
-        selectionTransaction.pane === resolution.pane &&
-        selectionTransaction.player === resolution.player &&
-        selectionTransaction.track === candidate.track &&
-        selectionTransaction.tracks === resolution.tracks,
-      );
-      if (isCurrentTrack(resolution.player, candidate) && !restoringTransaction) return resolution;
-      return {
-        ...resolution,
-        candidate,
-        preserved: void 0,
-        responsiveFilterRejected: !resolution.candidates?.some(
-          (allowedCandidate) => allowedCandidate.track === candidate.track,
-        ),
-        responsiveOverride: true,
-      };
-    }
-    function hasFilteredHigherCandidate(resolution) {
-      if (!resolution?.candidate || !Array.isArray(resolution.concreteCandidates)) return false;
-      const allowedTracks = new Set(
-        Array.isArray(resolution.candidates) ? resolution.candidates.map((candidate) => candidate.track) : [],
-      );
-      return resolution.concreteCandidates.some(
-        (candidate) =>
-          !allowedTracks.has(candidate.track) && compareTrackQuality(candidate, resolution.candidate) < 0,
-      );
+      ensureHighestQualityFilter();
+      const resolution = resolveHighestConcretePlayerTrack(documentRef);
+      ensureTrackSelectionGuards(resolution);
+      return resolution;
     }
     function continueResponsiveRechecks(resolution) {
       const newDiscoveryContext =
         !discoveryContext ||
-        discoveryContext.pane !== resolution?.pane ||
         discoveryContext.player !== resolution?.player ||
         discoveryContext.tracks !== resolution?.tracks;
       if (newDiscoveryContext) {
         discoveryContext = {
-          pane: resolution.pane,
           player: resolution.player,
           tracks: resolution.tracks,
         };
-        if (
-          resolution.candidate.resolution < INITIAL_DISCOVERY_TARGET_RESOLUTION ||
-          hasFilteredHigherCandidate(resolution)
-        ) {
+        if (resolution.candidate.resolution < INITIAL_DISCOVERY_TARGET_RESOLUTION) {
           armResponsiveRechecks();
         }
-      } else if (responsiveRecheckLimit === 0 && hasFilteredHigherCandidate(resolution)) {
-        armResponsiveRechecks();
       }
       scheduleResponsiveRecheck();
-    }
-    function retainPreservedSelection(resolution) {
-      rememberConfirmedSelection(resolution, resolution.preserved);
-      clearSelectionTransaction();
-      continueResponsiveRechecks({
-        ...resolution,
-        candidate: resolution.preserved,
-        preserved: void 0,
-      });
     }
     function beginSelectionTransaction(resolution) {
       clearSelectionTransaction();
@@ -660,57 +878,16 @@
         availableWrites: MAX_SELECTION_WRITES_PER_CANDIDATE,
         confirmationIndex: 0,
         everConfirmed: candidateWasConfirmed,
-        filter: resolution.filter,
-        initialReadinessRecoveryAvailable: !candidateWasConfirmed,
         lastRefillAt: null,
-        pane: resolution.pane,
         phase: "idle",
         player: resolution.player,
-        responsiveFilterRejected: resolution.responsiveFilterRejected === true,
-        responsiveOverride: resolution.responsiveOverride === true,
+        retryAvailableAt: null,
         stableSince: null,
         token: selectionToken,
         track: resolution.candidate.track,
         tracks: resolution.tracks,
       };
       return selectionTransaction;
-    }
-    function mediaBlocksTransaction(transaction) {
-      return Boolean(
-        transaction?.responsiveOverride !== true &&
-        mediaHold &&
-        mediaHold.player === transaction.player &&
-        (mediaHold.tracks == null || mediaHold.tracks === transaction.tracks),
-      );
-    }
-    function grantInitialReadinessRecovery(evidence) {
-      const transaction = selectionTransaction;
-      if (
-        !evidence ||
-        !transaction ||
-        transaction.everConfirmed ||
-        !transaction.initialReadinessRecoveryAvailable ||
-        transaction.phase !== "quiescent" ||
-        transaction.availableWrites > 0 ||
-        globalAvailableWrites <= 0 ||
-        evidence.player !== transaction.player ||
-        evidence.tracks !== transaction.tracks
-      ) {
-        return false;
-      }
-      const resolution = resolveControllerPlayerTrack();
-      if (
-        resolution.outcome ||
-        resolution.preserved ||
-        !transactionMatches(transaction, resolution) ||
-        isCurrentTrack(resolution.player, resolution.candidate)
-      ) {
-        return false;
-      }
-      transaction.availableWrites = 1;
-      transaction.initialReadinessRecoveryAvailable = false;
-      transaction.phase = "idle";
-      return true;
     }
     function unbindCurrentTracks() {
       const tracks = boundTracks;
@@ -724,70 +901,8 @@
         }
       }
     }
-    function primaryMediaForPlayer(player) {
-      try {
-        return player?.querySelector?.("video") ?? null;
-      } catch {
-        return null;
-      }
-    }
-    function mediaHasResumed(media) {
-      try {
-        const readyState = Number(media?.readyState);
-        return Number.isFinite(readyState) && readyState >= 3 && media?.paused !== true;
-      } catch {
-        return false;
-      }
-    }
-    function scheduleMediaReadinessRecheck(hold) {
-      if (mediaStalledTimer != null || hold.readinessRechecksRemaining <= 0) return;
-      mediaStalledTimer = setTimeoutImpl(() => {
-        mediaStalledTimer = null;
-        if (!active || mediaHold !== hold) return;
-        const { player, tracks } = currentPlayerState(documentRef);
-        const primaryMedia = primaryMediaForPlayer(player);
-        if (!player) return;
-        hold.readinessRechecksRemaining -= 1;
-        if (player !== hold.player || primaryMedia !== hold.media) {
-          cancelMediaSettledScan();
-          hold.media = primaryMedia;
-          hold.player = player;
-          hold.reason = "replacement";
-          hold.tracks = tracks;
-          if (mediaHasResumed(hold.media)) {
-            grantFreshMediaRecovery(hold);
-            clearMediaHold();
-            scheduleFreshEvidenceScan();
-          }
-          return;
-        }
-        if (tracks) hold.tracks = tracks;
-        if (hold.reason !== "waiting" && mediaHasResumed(hold.media)) {
-          grantFreshMediaRecovery(hold);
-          clearMediaHold();
-          scheduleFreshEvidenceScan();
-        }
-      }, MEDIA_STALLED_RECHECK_DELAY_MS);
-    }
-    function reconcileMediaHold(player, tracks) {
-      if (!mediaHold) return;
-      const primaryMedia = primaryMediaForPlayer(player);
-      if (!player) return;
-      if (player !== mediaHold.player || primaryMedia !== mediaHold.media) {
-        cancelMediaSettledScan();
-        mediaHold.media = primaryMedia;
-        mediaHold.player = player;
-        mediaHold.reason = "replacement";
-        mediaHold.tracks = tracks;
-        scheduleMediaReadinessRecheck(mediaHold);
-        return;
-      }
-      if (!mediaHold.media && primaryMedia) mediaHold.media = primaryMedia;
-      if (tracks) mediaHold.tracks = tracks;
-    }
     function bindCurrentTracks() {
-      const { player, tracks } = currentPlayerState(documentRef);
-      reconcileMediaHold(player, tracks);
+      const { tracks } = currentPlayerState(documentRef);
       if (tracks === boundTracks) return;
       unbindCurrentTracks();
       if (!tracks || typeof tracks.addEventListener !== "function") return;
@@ -817,8 +932,6 @@
       const refillCount = Math.floor(elapsed / SELECTION_STABLE_MS);
       if (refillCount <= 0) return;
       globalAvailableWrites = Math.min(MAX_GLOBAL_SELECTION_WRITES, globalAvailableWrites + refillCount);
-      globalFreshMediaRecoveryAvailable = true;
-      globalRecoveryAvailable = true;
       globalLastRefillAt += refillCount * SELECTION_STABLE_MS;
     }
     function markSelectionUnstable(transaction) {
@@ -827,24 +940,16 @@
     }
     function confirmSelection(resolution, transaction, changed) {
       cancelSelectionConfirmation();
-      const ordinaryConfirmation =
-        transaction.responsiveOverride === true
-          ? null
-          : selectHighestAllowedPlayerTrack({
-              allowSelectionWrite: false,
-              documentRef,
-              persistSelection: false,
-              storage: resolvedStorage,
-            });
+      const ordinaryConfirmation = selectHighestAllowedPlayerTrack({
+        allowSelectionWrite: false,
+        documentRef,
+        persistSelection: false,
+        storage: resolvedStorage,
+      });
       const observedResolution = resolveControllerPlayerTrack();
-      if (deferProvisionalFilteredDemotion(observedResolution)) {
-        return { reason: "provisional-filtered-demotion", selected: false };
-      }
       if (
-        (ordinaryConfirmation &&
-          (!ordinaryConfirmation.selected || ordinaryConfirmation.preserved === true)) ||
+        !ordinaryConfirmation.selected ||
         observedResolution.outcome ||
-        observedResolution.preserved ||
         !selectionContextMatches(resolution, observedResolution) ||
         !transactionMatches(transaction, observedResolution) ||
         !isCurrentTrack(observedResolution.player, observedResolution.candidate)
@@ -866,10 +971,11 @@
         replenishGlobalSelectionBudget(observedAt);
       }
       transaction.phase = "confirmed";
+      transaction.availableWrites = MAX_SELECTION_WRITES_PER_CANDIDATE;
       transaction.confirmationIndex = 0;
       transaction.everConfirmed = true;
-      transaction.initialReadinessRecoveryAvailable = false;
-      persistSelectedTrack(resolvedStorage, observedResolution.candidate);
+      transaction.retryAvailableAt = null;
+      persistQualityIntent(observedResolution.candidate);
       rememberConfirmedSelection(observedResolution);
       continueResponsiveRechecks(observedResolution);
       return selectedTrackOutcome(observedResolution.candidate, changed);
@@ -890,11 +996,6 @@
         }
         bindCurrentTracks();
         const resolution = resolveControllerPlayerTrack();
-        if (deferProvisionalFilteredDemotion(resolution)) return;
-        if (resolution.preserved) {
-          retainPreservedSelection(resolution);
-          return;
-        }
         if (resolution.outcome) {
           clearSelectionTransaction();
           scheduleScan({ restart: true });
@@ -909,10 +1010,6 @@
           confirmSelection(resolution, transaction, true);
           return;
         }
-        if (mediaBlocksTransaction(transaction)) {
-          transaction.phase = "waiting-media";
-          return;
-        }
         const nextIndex = index + 1;
         if (nextIndex < SELECTION_CONFIRM_DELAYS_MS.length) {
           scheduleSelectionConfirmation(transaction, nextIndex);
@@ -922,71 +1019,30 @@
         performSelectionWrite(resolution, transaction);
       }, SELECTION_CONFIRM_DELAYS_MS[index]);
     }
-    function scheduleGlobalRecovery(transaction) {
-      if (!globalRecoveryAvailable) {
-        transaction.phase = "quiescent";
-        return { retry: false };
-      }
-      if (globalRecoveryTimer != null) return { retry: false };
-      transaction.phase = "global-cooldown";
-      const token = transaction.token;
-      globalRecoveryTimer = setTimeoutImpl(() => {
-        globalRecoveryTimer = null;
-        if (
-          !active ||
-          selectionTransaction !== transaction ||
-          transaction.token !== token ||
-          !isPlayerPageLocation(locationRef)
-        ) {
-          return;
-        }
-        bindCurrentTracks();
-        const resolution = resolveControllerPlayerTrack();
-        if (deferProvisionalFilteredDemotion(resolution)) return;
-        if (resolution.preserved) {
-          retainPreservedSelection(resolution);
-          return;
-        }
-        if (resolution.outcome) {
-          clearSelectionTransaction();
-          scheduleScan({ restart: true });
-          return;
-        }
-        if (!transactionMatches(transaction, resolution)) {
-          clearSelectionTransaction();
-          scheduleResponsiveScan();
-          return;
-        }
-        if (isCurrentTrack(resolution.player, resolution.candidate)) {
-          confirmSelection(resolution, transaction, false);
-          return;
-        }
-        if (mediaBlocksTransaction(transaction)) {
-          transaction.phase = "waiting-media";
-          return;
-        }
-        globalRecoveryAvailable = false;
-        globalAvailableWrites = 1;
-        transaction.phase = "idle";
-        performSelectionWrite(resolution, transaction);
-      }, GLOBAL_SELECTION_RECOVERY_DELAY_MS);
-      return { retry: false };
-    }
     function performSelectionWrite(resolution, transaction) {
       if (transaction.availableWrites <= 0) {
-        transaction.phase = "quiescent";
-        return { retry: false };
+        if (
+          transaction.retryAvailableAt != null &&
+          now() >= transaction.retryAvailableAt &&
+          globalAvailableWrites > 0
+        ) {
+          transaction.availableWrites = 1;
+        } else {
+          transaction.phase = "quiescent";
+          return { retry: false };
+        }
       }
       if (globalAvailableWrites <= 0) {
-        return scheduleGlobalRecovery(transaction);
-      }
-      if (mediaBlocksTransaction(transaction)) {
-        transaction.phase = "waiting-media";
+        transaction.phase = "quiescent";
         return { retry: false };
       }
       transaction.availableWrites -= 1;
       globalAvailableWrites -= 1;
-      globalLastRefillAt = null;
+      const writtenAt = now();
+      globalLastRefillAt = writtenAt;
+      if (transaction.availableWrites <= 0) {
+        transaction.retryAvailableAt = writtenAt + SELECTION_STABLE_MS;
+      }
       transaction.phase = "applying";
       markSelectionUnstable(transaction);
       try {
@@ -997,13 +1053,6 @@
       }
       bindCurrentTracks();
       const observedResolution = resolveControllerPlayerTrack();
-      if (deferProvisionalFilteredDemotion(observedResolution)) {
-        return { retry: false };
-      }
-      if (observedResolution.preserved) {
-        retainPreservedSelection(observedResolution);
-        return { retry: false };
-      }
       if (observedResolution.outcome || !transactionMatches(transaction, observedResolution)) {
         clearSelectionTransaction();
         scheduleResponsiveScan();
@@ -1017,18 +1066,12 @@
       return { retry: false };
     }
     function reconcileSelection() {
+      protectQualityIntent();
       replenishGlobalSelectionBudget(now());
       const resolution = resolveControllerPlayerTrack();
       if (resolution.outcome) {
         clearSelectionTransaction();
         return { retry: true };
-      }
-      if (deferProvisionalFilteredDemotion(resolution)) {
-        return { retry: false };
-      }
-      if (resolution.preserved) {
-        retainPreservedSelection(resolution);
-        return { retry: false };
       }
       let transaction = selectionTransaction;
       if (!transactionMatches(transaction, resolution)) {
@@ -1046,11 +1089,17 @@
       if (transaction.phase === "applying" && selectionConfirmationTimer != null) {
         return { retry: false };
       }
-      if (transaction.phase === "waiting-media" && mediaBlocksTransaction(transaction)) {
-        return { retry: false };
-      }
       if (transaction.phase === "quiescent") {
-        return { retry: false };
+        if (globalAvailableWrites <= 0) {
+          return { retry: false };
+        }
+        if (transaction.availableWrites <= 0) {
+          if (transaction.retryAvailableAt == null || now() < transaction.retryAvailableAt) {
+            return { retry: false };
+          }
+          transaction.availableWrites = 1;
+        }
+        transaction.phase = "idle";
       }
       transaction.phase = "idle";
       return performSelectionWrite(resolution, transaction);
@@ -1073,9 +1122,7 @@
           confirmedSelection = null;
           discoveryContext = null;
           unbindCurrentTracks();
-          clearMediaHold();
           clearResponsiveRechecks();
-          clearResponsiveOverrideContext();
           clearSelectionTransaction();
           return;
         }
@@ -1096,8 +1143,7 @@
       cancelScheduledScan();
       cancelResponsiveScan();
       cancelSelectionConfirmation();
-      cancelGlobalRecovery();
-      if (selectionTransaction?.phase === "applying" || selectionTransaction?.phase === "global-cooldown") {
+      if (selectionTransaction?.phase === "applying") {
         selectionTransaction.phase = "idle";
       }
       responsiveTimer = setTimeoutImpl(() => {
@@ -1110,7 +1156,7 @@
     function scheduleFreshEvidenceScan() {
       if (responsiveTimer != null) {
         scheduleResponsiveScan({
-          delay: responsiveOverrideContext ? 0 : RESPONSIVE_SETTLE_DELAY_MS,
+          delay: RESPONSIVE_SETTLE_DELAY_MS,
         });
         return;
       }
@@ -1128,85 +1174,19 @@
     function handleRouteChange() {
       if (!isPlayerPageLocation(locationRef)) {
         globalLastRefillAt = null;
-        clearMediaHold();
       }
       clearResponsiveRechecks();
-      clearResponsiveOverrideContext();
       clearSelectionTransaction();
       confirmedSelection = null;
       discoveryContext = null;
       scheduleResponsiveScan();
     }
     function handleResponsiveChange() {
-      armResponsiveOverrideContext();
       scheduleResponsiveScan({ armRechecks: true, delay: 0 });
     }
-    function handleMediaUnsettled(event) {
+    function handleMediaEvidence(event) {
       if (!isPlayerPageLocation(locationRef)) return;
-      const evidence = currentPlayerMediaEvent(event, documentRef);
-      if (!evidence) return;
-      cancelMediaSettledScan();
-      const sameMedia = mediaHold?.media === evidence.media && mediaHold?.player === evidence.player;
-      const hadWaiting = event?.type === "waiting" || (sameMedia && mediaHold?.hadWaiting === true);
-      const reason = hadWaiting ? "waiting" : "stalled";
-      if (!mediaHold) {
-        mediaHold = {
-          ...evidence,
-          hadWaiting,
-          hadUnsettled: true,
-          readinessRechecksRemaining: MAX_MEDIA_READINESS_RECHECKS,
-          reason,
-        };
-      } else {
-        mediaHold.media = evidence.media;
-        mediaHold.player = evidence.player;
-        mediaHold.hadWaiting = hadWaiting;
-        mediaHold.reason = reason;
-        mediaHold.tracks = evidence.tracks;
-      }
-      if (reason === "waiting") cancelMediaStalledScan();
-      if (mediaHold.reason === "stalled") scheduleMediaReadinessRecheck(mediaHold);
-    }
-    function handleMediaSettled(event) {
-      if (!isPlayerPageLocation(locationRef)) return;
-      const evidence = currentPlayerMediaEvent(event, documentRef);
-      if (!evidence) return;
-      const recoveredInitialSelection = grantInitialReadinessRecovery(evidence);
-      if (!mediaHold) {
-        if (recoveredInitialSelection) scheduleFreshEvidenceScan();
-        return;
-      }
-      if (evidence.media !== mediaHold.media || evidence.player !== mediaHold.player) {
-        cancelMediaSettledScan();
-        cancelMediaStalledScan();
-        mediaHold.media = evidence.media;
-        mediaHold.player = evidence.player;
-        mediaHold.reason = "settling";
-        mediaHold.tracks = evidence.tracks;
-      } else {
-        mediaHold.tracks = evidence.tracks;
-        mediaHold.reason = "settling";
-        cancelMediaStalledScan();
-        if (mediaSettledTimer != null) return;
-      }
-      const settledHold = mediaHold;
-      mediaSettledTimer = setTimeoutImpl(() => {
-        mediaSettledTimer = null;
-        if (!active) return;
-        const { player, tracks } = currentPlayerState(documentRef);
-        const primaryMedia = primaryMediaForPlayer(player);
-        if (mediaHold !== settledHold) {
-          return;
-        }
-        if (player !== settledHold.player || primaryMedia !== settledHold.media) {
-          reconcileMediaHold(player, tracks);
-          return;
-        }
-        if (tracks) settledHold.tracks = tracks;
-        grantFreshMediaRecovery(settledHold);
-        clearMediaHold();
-        scheduleFreshEvidenceScan();
-      }, MEDIA_SETTLE_DELAY_MS);
+      if (eventBelongsToPlayerMedia(event, documentRef)) scheduleFreshEvidenceScan();
     }
     function installHistoryHooks() {
       for (const method of ["pushState", "replaceState"]) {
@@ -1260,7 +1240,10 @@
       }
       try {
         observer = new MutationObserverImpl((records) => {
-          if (mutationTouchesPlayer(records)) scheduleResponsiveScan();
+          if (!mutationTouchesPlayer(records)) return;
+          scheduleResponsiveScan({
+            delay: mutationContainsPlayerRoot(records) ? 0 : RESPONSIVE_SETTLE_DELAY_MS,
+          });
         });
         observer.observe(documentRef.documentElement, { childList: true, subtree: true });
         return true;
@@ -1281,13 +1264,13 @@
     function start() {
       if (active || !documentRef?.addEventListener) return;
       active = true;
+      protectQualityIntent();
       installEventListener(documentRef, "loadedmetadata", handleLoadedMetadata, true);
       installEventListener(documentRef, "change", handleQualityChange, true);
-      installEventListener(documentRef, "waiting", handleMediaUnsettled, true);
-      installEventListener(documentRef, "stalled", handleMediaUnsettled, true);
-      installEventListener(documentRef, "playing", handleMediaSettled, true);
-      installEventListener(documentRef, "canplay", handleMediaSettled, true);
-      installEventListener(documentRef, "timeupdate", handleMediaSettled, true);
+      installEventListener(documentRef, "waiting", handleMediaEvidence, true);
+      installEventListener(documentRef, "stalled", handleMediaEvidence, true);
+      installEventListener(documentRef, "playing", handleMediaEvidence, true);
+      installEventListener(documentRef, "canplay", handleMediaEvidence, true);
       if (!installObserver()) {
         installEventListener(documentRef, "DOMContentLoaded", handleDocumentReady, { once: true });
       }
@@ -1297,19 +1280,21 @@
       installEventListener(visualViewportRef, "resize", handleResponsiveChange);
       installHistoryHooks();
       scheduleScan({ restart: true });
+      scheduleWatchdog();
     }
     function stop() {
       if (!active) return;
       active = false;
       cancelScheduledScan();
+      cancelWatchdog();
       cancelResponsiveScan();
       clearResponsiveRechecks();
-      clearResponsiveOverrideContext();
-      clearMediaHold();
       clearSelectionTransaction();
       confirmedSelection = null;
       discoveryContext = null;
       unbindCurrentTracks();
+      restoreTrackGuardsExcept();
+      restoreWrappedFilter();
       try {
         observer?.disconnect?.();
       } catch {
@@ -1321,7 +1306,29 @@
     }
     return Object.freeze({ start, stop });
   }
+  function stopPreviousGlobalController() {
+    try {
+      globalThis[CONTROLLER_SLOT]?.stop?.();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function publishGlobalController(controller) {
+    try {
+      Object.defineProperty(globalThis, CONTROLLER_SLOT, {
+        configurable: true,
+        value: controller,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
   if (typeof document !== "undefined") {
-    createHighestQualityPlayerController().start();
+    stopPreviousGlobalController();
+    const controller = createHighestQualityPlayerController();
+    publishGlobalController(controller);
+    controller.start();
   }
 })();
