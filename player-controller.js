@@ -94,10 +94,16 @@
       return false;
     }
   }
-  function selectHighestAllowedPlayerTrack({
-    documentRef = globalThis.document,
-    storage = globalThis.localStorage,
-  } = {}) {
+  function resolveStorage(storage) {
+    if (storage !== void 0) return storage;
+    try {
+      return globalThis.localStorage ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function selectHighestAllowedPlayerTrack({ documentRef = globalThis.document, storage } = {}) {
+    const resolvedStorage = resolveStorage(storage);
     let filter;
     let pane;
     let player;
@@ -141,7 +147,7 @@
         return { reason: "selection-not-applied", selected: false };
       }
     }
-    persistSelectedTrack(storage, highest);
+    persistSelectedTrack(resolvedStorage, highest);
     return {
       changed,
       height: highest.height,
@@ -189,9 +195,10 @@
     historyRef = globalThis.history,
     locationRef = globalThis.location,
     setTimeoutImpl = globalThis.setTimeout,
-    storage = globalThis.localStorage,
+    storage,
     windowRef = globalThis.window,
   } = {}) {
+    const resolvedStorage = resolveStorage(storage);
     let active = false;
     let boundTracks = null;
     const historyRestorers = [];
@@ -231,7 +238,10 @@
     }
     function scheduleScan({ restart = false } = {}) {
       if (!active) return;
-      if (restart) retryIndex = 0;
+      if (restart) {
+        retryIndex = 0;
+        cancelScheduledScan();
+      }
       if (scheduledTimer != null) return;
       const delay = RETRY_DELAYS_MS[Math.min(retryIndex, RETRY_DELAYS_MS.length - 1)];
       scheduledTimer = setTimeoutImpl(() => {
@@ -243,7 +253,7 @@
           return;
         }
         bindCurrentTracks();
-        const result = selectHighestAllowedPlayerTrack({ documentRef, storage });
+        const result = selectHighestAllowedPlayerTrack({ documentRef, storage: resolvedStorage });
         if (result.selected || retryIndex >= RETRY_DELAYS_MS.length - 1) {
           retryIndex = 0;
           return;

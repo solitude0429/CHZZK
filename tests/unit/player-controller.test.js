@@ -87,7 +87,7 @@ function playerFixture(trackValues, { filter = () => true } = {}) {
   };
 }
 
-function controllerHarness(fixture, { pathname = "/live/test" } = {}) {
+function controllerHarness(fixture, { omitStorage = false, pathname = "/live/test" } = {}) {
   const documentListeners = new Map();
   const locationRef = { pathname };
   const timers = new Map();
@@ -144,7 +144,7 @@ function controllerHarness(fixture, { pathname = "/live/test" } = {}) {
   };
   const originalPushState = historyRef.pushState;
   const originalReplaceState = historyRef.replaceState;
-  const controller = createHighestQualityPlayerController({
+  const controllerOptions = {
     MutationObserverImpl: FakeMutationObserver,
     clearTimeoutImpl(timerId) {
       timers.delete(timerId);
@@ -152,14 +152,15 @@ function controllerHarness(fixture, { pathname = "/live/test" } = {}) {
     documentRef,
     historyRef,
     locationRef,
-    setTimeoutImpl(callback) {
+    setTimeoutImpl(callback, delay) {
       const timerId = ++nextTimerId;
-      timers.set(timerId, callback);
+      timers.set(timerId, { callback, delay });
       return timerId;
     },
-    storage: fixture.storage,
     windowRef,
-  });
+  };
+  if (!omitStorage) controllerOptions.storage = fixture.storage;
+  const controller = createHighestQualityPlayerController(controllerOptions);
 
   return {
     controller,
@@ -167,7 +168,7 @@ function controllerHarness(fixture, { pathname = "/live/test" } = {}) {
     flushTimer() {
       const next = timers.entries().next().value;
       if (!next) return false;
-      const [timerId, callback] = next;
+      const [timerId, { callback }] = next;
       timers.delete(timerId);
       callback();
       return true;
@@ -176,6 +177,12 @@ function controllerHarness(fixture, { pathname = "/live/test" } = {}) {
     locationRef,
     originalPushState,
     originalReplaceState,
+    pendingTimerCount() {
+      return timers.size;
+    },
+    pendingTimerDelay() {
+      return timers.values().next().value?.delay ?? null;
+    },
     windowListeners,
   };
 }
@@ -214,6 +221,41 @@ describe("CHZZK player highest-quality controller", () => {
       width: 1920,
       height: 1080,
     });
+  });
+
+  it("keeps selecting when access to the default site storage is denied", () => {
+    const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
+    const originalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    let harness;
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        const error = new Error("site storage denied");
+        error.name = "SecurityError";
+        throw error;
+      },
+    });
+
+    try {
+      assert.equal(selectHighestAllowedPlayerTrack({ documentRef: fixture.documentRef }).label, "1080p");
+      assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+      assert.equal(fixture.stored.size, 0);
+
+      fixture.values[0].selected = false;
+      fixture.player.videoTracks.selectedIndex = -1;
+      harness = controllerHarness(fixture, { omitStorage: true });
+      harness.controller.start();
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+      assert.equal(fixture.stored.size, 0);
+    } finally {
+      harness?.controller.stop();
+      if (originalStorageDescriptor) {
+        Object.defineProperty(globalThis, "localStorage", originalStorageDescriptor);
+      } else {
+        delete globalThis.localStorage;
+      }
+    }
   });
 
   it("honors the player quality filter and selects the highest permitted fallback", () => {
@@ -452,6 +494,7 @@ describe("CHZZK player highest-quality controller", () => {
     harness.flushTimer();
     harness.flushTimer();
     assert.equal(fixture.player.videoTracks.selectedIndex, -1);
+    assert.equal(harness.pendingTimerDelay(), 1000);
 
     fixture.pane.filter = () => true;
     assert.equal(harness.flushTimer(), true, "a slower bounded retry must remain scheduled");
@@ -459,6 +502,36 @@ describe("CHZZK player highest-quality controller", () => {
     assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
 
     harness.controller.stop();
+  });
+
+  it("replaces a pending slow retry when fresh player evidence arrives", () => {
+    const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
+    fixture.pane.filter = undefined;
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    for (const expectedNextDelay of [50, 250, 1000, 3000]) {
+      assert.equal(harness.flushTimer(), true);
+      assert.equal(harness.pendingTimerDelay(), expectedNextDelay);
+    }
+    assert.equal(fixture.player.videoTracks.selectedIndex, -1);
+
+    fixture.pane.filter = () => true;
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.equal(harness.pendingTimerDelay(), 0);
+    assert.equal(harness.pendingTimerCount(), 1);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.equal(harness.pendingTimerDelay(), 0);
+    assert.equal(harness.pendingTimerCount(), 1);
+
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(harness.pendingTimerCount(), 0);
+
+    harness.controller.stop();
+    for (const eventType of ["addtrack", "removetrack", "change"]) {
+      assert.equal(fixture.player.videoTracks.listenerCount(eventType), 0);
+    }
   });
 
   it("stays active across SPA routes while selecting only on exact player paths", () => {
