@@ -455,13 +455,10 @@
       mediaStalledTimer = setTimeoutImpl(() => {
         mediaStalledTimer = null;
         if (!active || mediaHold !== hold) return;
-        hold.readinessRechecksRemaining -= 1;
         const { player, tracks } = currentPlayerState(documentRef);
         const primaryMedia = primaryMediaForPlayer(player);
-        if (!player) {
-          clearMediaHold();
-          return;
-        }
+        if (!player) return;
+        hold.readinessRechecksRemaining -= 1;
         if (player !== hold.player || primaryMedia !== hold.media) {
           cancelMediaSettledScan();
           hold.media = primaryMedia;
@@ -486,10 +483,7 @@
     function reconcileMediaHold(player, tracks) {
       if (!mediaHold) return;
       const primaryMedia = primaryMediaForPlayer(player);
-      if (!player) {
-        clearMediaHold();
-        return;
-      }
+      if (!player) return;
       if (player !== mediaHold.player || primaryMedia !== mediaHold.media) {
         cancelMediaSettledScan();
         mediaHold.media = primaryMedia;
@@ -763,6 +757,7 @@
         if (!active) return;
         if (!isPlayerPageLocation(locationRef)) {
           retryIndex = 0;
+          globalLastRefillAt = null;
           unbindCurrentTracks();
           clearMediaHold();
           clearSelectionTransaction();
@@ -811,6 +806,7 @@
       scheduleFreshEvidenceScan();
     }
     function handleRouteChange() {
+      if (!isPlayerPageLocation(locationRef)) globalLastRefillAt = null;
       scheduleResponsiveScan();
     }
     function handleResponsiveChange() {
@@ -821,11 +817,12 @@
       if (!evidence) return;
       cancelMediaSettledScan();
       const sameMedia = mediaHold?.media === evidence.media && mediaHold?.player === evidence.player;
-      const reason =
-        event?.type === "waiting" || (sameMedia && mediaHold?.reason === "waiting") ? "waiting" : "stalled";
+      const hadWaiting = event?.type === "waiting" || (sameMedia && mediaHold?.hadWaiting === true);
+      const reason = hadWaiting ? "waiting" : "stalled";
       if (!mediaHold) {
         mediaHold = {
           ...evidence,
+          hadWaiting,
           hadUnsettled: true,
           readinessRechecksRemaining: MAX_MEDIA_READINESS_RECHECKS,
           reason,
@@ -833,6 +830,7 @@
       } else {
         mediaHold.media = evidence.media;
         mediaHold.player = evidence.player;
+        mediaHold.hadWaiting = hadWaiting;
         mediaHold.reason = reason;
         mediaHold.tracks = evidence.tracks;
       }

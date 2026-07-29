@@ -1090,6 +1090,54 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
+  it("preserves waiting and stalled holds while the eligible-route player is temporarily absent", () => {
+    for (const eventType of ["waiting", "stalled"]) {
+      const fixture = playerFixture([
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ]);
+      const replacement = playerFixture([
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ]);
+      const harness = controllerHarness(fixture);
+
+      harness.controller.start();
+      harness.dispatchDocument(eventType, fixture.primaryMedia);
+      harness.flushTimer();
+      assert.equal(fixture.selectionTrueWrites[1], 0);
+
+      fixture.mountDocument({
+        currentPrimaryMedia: null,
+        pane: null,
+        player: null,
+        root: null,
+      });
+      harness.dispatchWindow("resize");
+      harness.flushTimer();
+      harness.flushTimer();
+      assert.equal(fixture.selectionTrueWrites[1], 0);
+
+      fixture.mountDocument(replacement);
+      harness.dispatchWindow("resize");
+      assert.ok(harness.flushTimers(30) < 30);
+      assert.equal(
+        replacement.selectionTrueWrites[1],
+        0,
+        `${eventType} must remain held after a player-less responsive gap`,
+      );
+      assert.equal(replacement.player.videoTracks.selectedIndex, 0);
+
+      harness.dispatchDocument("playing", replacement.primaryMedia);
+      harness.dispatchDocument("canplay", replacement.primaryMedia);
+      assert.ok(harness.flushTimers(20) < 20);
+      assert.equal(replacement.selectionTrueWrites[1], 1);
+      assert.equal(replacement.player.videoTracks.selectedIndex, 1);
+      assert.equal(harness.pendingTimerCount(), 0);
+      harness.controller.stop();
+    }
+  });
+
   it("migrates a settling hold when the primary changes without another media event", () => {
     const fixture = playerFixture([
       { height: 1080, label: "ABR", selected: true, width: 1920 },
@@ -1316,6 +1364,41 @@ describe("CHZZK player highest-quality controller", () => {
     harness.dispatchWindow("resize");
     assert.ok(harness.flushTimers(20) < 20);
     assert.equal(fixture.selectionTrueWrites[1], 0);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(harness.pendingTimerCount(), 0);
+
+    harness.dispatchDocument("playing", fixture.primaryMedia);
+    harness.dispatchDocument("canplay", fixture.primaryMedia);
+    assert.ok(harness.flushTimers(20) < 20);
+    assert.equal(fixture.selectionTrueWrites[1], 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.equal(harness.pendingTimerCount(), 0);
+    harness.controller.stop();
+  });
+
+  it("retains waiting history when a settle is interrupted by stalled", () => {
+    const fixture = playerFixture([
+      { height: 1080, label: "ABR", selected: true, width: 1920 },
+      { height: 1080, label: "1080p", width: 1920 },
+    ]);
+    fixture.primaryMedia.paused = false;
+    fixture.primaryMedia.readyState = 4;
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    harness.dispatchDocument("waiting", fixture.primaryMedia);
+    harness.flushTimer();
+    assert.equal(fixture.selectionTrueWrites[1], 0);
+
+    harness.dispatchDocument("playing", fixture.primaryMedia);
+    assert.equal(harness.pendingTimerDelay(), 250);
+    harness.dispatchDocument("stalled", fixture.primaryMedia);
+    assert.ok(harness.flushTimers(20) < 20);
+    assert.equal(
+      fixture.selectionTrueWrites[1],
+      0,
+      "a ready-state timeout must not release an interrupted waiting recovery",
+    );
     assert.equal(fixture.player.videoTracks.selectedIndex, 0);
     assert.equal(harness.pendingTimerCount(), 0);
 
@@ -1581,6 +1664,65 @@ describe("CHZZK player highest-quality controller", () => {
     assert.equal(typeof outcome.reason, "string");
     assert.equal(fixture.storageSetCalls, 0);
     assert.equal(fixture.stored.size, 0);
+  });
+
+  it("excludes ineligible-route time from the global refill baseline", () => {
+    let fixture;
+    let harness;
+    let stormMode = false;
+    let stormWrites = 0;
+
+    function createGeneration() {
+      return playerFixture(
+        [
+          { height: 1080, label: "ABR", selected: true, width: 1920 },
+          { height: 1080, label: "1080p", width: 1920 },
+        ],
+        {
+          onSelectionWrite({ apply }) {
+            if (!stormMode) {
+              apply();
+              return;
+            }
+            stormWrites += 1;
+            const replacement = createGeneration();
+            fixture.mountDocument(replacement);
+            harness.dispatchWindow("resize");
+          },
+        },
+      );
+    }
+
+    fixture = createGeneration();
+    harness = controllerHarness(fixture);
+    harness.controller.start();
+    assert.ok(harness.flushTimers(20) < 20);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+
+    harness.historyRef.pushState({}, "", "/search");
+    assert.ok(harness.flushTimers(20) < 20);
+    fixture.selectTrack(0);
+    harness.advanceTime(20_000);
+
+    harness.historyRef.pushState({}, "", "/live/return");
+    assert.ok(harness.flushTimers(20) < 20);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+
+    harness.advanceTime(5000);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.ok(harness.flushTimers(20) < 20);
+
+    stormMode = true;
+    fixture.selectTrack(0);
+    fixture.player.videoTracks.dispatchTrackEvent("change");
+    assert.ok(harness.flushTimers(100) < 100);
+    assert.equal(
+      stormWrites,
+      4,
+      "only the post-confirmation five-second interval may replenish one global write",
+    );
+    assert.equal(harness.pendingTimerCount(), 0);
+    harness.controller.stop();
   });
 
   it("bounds one failed remount-storm recovery and later recovers on fresh healthy media evidence", () => {
