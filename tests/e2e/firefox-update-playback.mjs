@@ -289,6 +289,8 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   const pane = document.querySelector("#live_player_layout pzp-pc-setting-quality-pane");
   const trackEvents = new EventTarget();
   const tracks = [];
+  const state = { selectionLabels: [], silentExpansions: 0 };
+  let maximumAllowedHeight = 720;
   tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
   tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
   tracks.dispatchEvent = trackEvents.dispatchEvent.bind(trackEvents);
@@ -301,6 +303,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       set(next) {
         selected = next === true;
         if (!selected) return;
+        state.selectionLabels.push(track.label);
         tracks.selectedIndex = index;
         for (const [otherIndex, otherTrack] of tracks.entries()) {
           if (otherIndex !== index) otherTrack.selected = false;
@@ -314,7 +317,21 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   addTrack({ label: "1080p", width: 1920, height: 1080 });
   tracks.selectedIndex = 0;
   player.videoTracks = tracks;
-  pane.filter = (track) => track.label !== "ABR";
+  pane.filter = (track) => track.label !== "ABR" && track.height <= maximumAllowedHeight;
+  window.__chzzkInitialQualityFixture = Object.freeze({
+    expandSilently() {
+      maximumAllowedHeight = 1080;
+      state.silentExpansions += 1;
+      return this.snapshot();
+    },
+    snapshot() {
+      return {
+        selectedLabel: tracks[tracks.selectedIndex]?.label ?? null,
+        selectionLabels: state.selectionLabels.slice(),
+        silentExpansions: state.silentExpansions,
+      };
+    },
+  });
   player.dispatchEvent(new Event("loadedmetadata"));
 })();
 </script>`);
@@ -348,12 +365,15 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   video.playsInline = true;
   const state = {
     canvasFrames: 0,
+    compactSettledAt: null,
     frameCallbackSupported: typeof video.requestVideoFrameCallback === "function",
     hls: [],
     mediaSetupError: null,
     mode: null,
     mountModes: [],
     pendingMode: null,
+    pageDemotions: 0,
+    pageDemotionAt: null,
     playbackEvents: {
       emptied: 0,
       playing: 0,
@@ -362,11 +382,19 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     },
     renderedFrames: 0,
     resizeEvents: 0,
+    sameNodeModes: [],
     selectionCommits: [],
+    selectionIgnores: [],
     selectionRequests: [],
+    silentExpansionAt: null,
+    silentExpansions: 0,
   };
+  let currentPageSelect = null;
   let generation = 0;
   let masterLoaded = false;
+  let maximumAllowedHeight = 1080;
+  let recoveryExpansionTimer = null;
+  let recoveryMode = false;
   let remountTimer = null;
 
   for (const eventType of ["emptied", "playing", "stalled", "waiting"]) {
@@ -406,6 +434,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     const pane = document.createElement("pzp-pc-setting-quality-pane");
     const trackEvents = new EventTarget();
     const tracks = [];
+    const pageSelections = [];
     tracks.selectedIndex = -1;
     tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
     tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
@@ -416,6 +445,13 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       let pending = false;
       let selected = value.selected === true;
       const track = { height: value.height, label: value.label, width: value.width };
+      const applySelection = () => {
+        selected = true;
+        tracks.selectedIndex = index;
+        for (const [otherIndex, otherTrack] of tracks.entries()) {
+          if (otherIndex !== index) otherTrack.selected = false;
+        }
+      };
       Object.defineProperty(track, "selected", {
         get() { return selected; },
         set(next) {
@@ -423,12 +459,22 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             selected = false;
             return;
           }
+          const requestedAt = performance.now();
           state.selectionRequests.push({
-            at: performance.now(),
+            at: requestedAt,
             generation: currentGeneration,
             label: track.label,
           });
           if (pending || selected) return;
+          if (recoveryMode && track.height > maximumAllowedHeight) {
+            state.selectionIgnores.push({
+              at: requestedAt,
+              generation: currentGeneration,
+              label: track.label,
+              mode: state.mode,
+            });
+            return;
+          }
           pending = true;
           setTimeout(() => {
             pending = false;
@@ -437,11 +483,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             ) {
               return;
             }
-            selected = true;
-            tracks.selectedIndex = index;
-            for (const [otherIndex, otherTrack] of tracks.entries()) {
-              if (otherIndex !== index) otherTrack.selected = false;
-            }
+            applySelection();
             state.selectionCommits.push({
               at: performance.now(),
               generation: currentGeneration,
@@ -450,6 +492,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           }, 20);
         },
       });
+      pageSelections[index] = applySelection;
       tracks.push(track);
       if (selected) tracks.selectedIndex = index;
     };
@@ -458,7 +501,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     addTrack({ height: 720, label: "720p", width: 1280 });
     addTrack({ height: 1080, label: "1080p", width: 1920 });
     player.videoTracks = tracks;
-    pane.filter = (track) => track.label !== "ABR";
+    maximumAllowedHeight = 1080;
+    pane.filter = (track) => track.label !== "ABR" && track.height <= maximumAllowedHeight;
+    currentPageSelect = (index) => pageSelections[index]?.();
     player.append(video);
     layout.append(player, pane);
     if (previousLayout) {
@@ -476,6 +521,31 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   const requestResponsiveMount = () => {
     const nextMode = compactQuery.matches ? "compact" : "wide";
     if (nextMode === state.mode || nextMode === state.pendingMode) return;
+    if (recoveryMode) {
+      clearTimeout(recoveryExpansionTimer);
+      state.mode = nextMode;
+      state.pendingMode = null;
+      state.sameNodeModes.push(nextMode);
+      if (nextMode === "compact") {
+        maximumAllowedHeight = 720;
+        state.pageDemotions += 1;
+        state.pageDemotionAt = performance.now();
+        currentPageSelect?.(1);
+        video.dispatchEvent(new Event("waiting", { bubbles: true, composed: true }));
+        setTimeout(() => {
+          state.compactSettledAt = performance.now();
+          video.dispatchEvent(new Event("playing", { bubbles: true, composed: true }));
+          video.dispatchEvent(new Event("canplay", { bubbles: true, composed: true }));
+        }, 75);
+      } else {
+        recoveryExpansionTimer = setTimeout(() => {
+          maximumAllowedHeight = 1080;
+          state.silentExpansionAt = performance.now();
+          state.silentExpansions += 1;
+        }, 400);
+      }
+      return;
+    }
     state.pendingMode = nextMode;
     clearTimeout(remountTimer);
     remountTimer = setTimeout(() => mountPlayer(nextMode), 75);
@@ -520,6 +590,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       stored = JSON.parse(localStorage.getItem("live-player-video-track"));
     } catch {}
     return {
+      compactSettledAt: state.compactSettledAt,
       frameCallbackSupported: state.frameCallbackSupported,
       generation,
       hls: state.hls.slice(),
@@ -528,6 +599,8 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       mediaSetupError: state.mediaSetupError,
       mode: state.mode,
       mountModes: state.mountModes.slice(),
+      pageDemotions: state.pageDemotions,
+      pageDemotionAt: state.pageDemotionAt,
       pendingMode: state.pendingMode,
       playback: {
         canvasFrames: state.canvasFrames,
@@ -543,14 +616,24 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         videoWidth: video.videoWidth,
       },
       resizeEvents: state.resizeEvents,
+      sameNodeModes: state.sameNodeModes.slice(),
       selectedLabel: selected?.label ?? null,
       selectionCommits: state.selectionCommits.slice(),
+      selectionIgnores: state.selectionIgnores.slice(),
       selectionRequests: state.selectionRequests.slice(),
+      silentExpansionAt: state.silentExpansionAt,
+      silentExpansions: state.silentExpansions,
       stored,
     };
   };
 
-  window.__chzzkResponsiveFixture = Object.freeze({ probeHls, snapshot });
+  const enableSameNodeRecovery = () => {
+    recoveryMode = true;
+    state.sameNodeModes.length = 0;
+    return snapshot();
+  };
+
+  window.__chzzkResponsiveFixture = Object.freeze({ enableSameNodeRecovery, probeHls, snapshot });
   mountPlayer(compactQuery.matches ? "compact" : "wide");
   setTimeout(() => {
     try {
@@ -994,6 +1077,14 @@ async function responsiveFixtureState(driver) {
   return driver.execute("return window.__chzzkResponsiveFixture?.snapshot() ?? null;");
 }
 
+async function enableResponsiveSameNodeRecovery(driver) {
+  const fixture = await driver.execute(
+    "return window.__chzzkResponsiveFixture?.enableSameNodeRecovery() ?? null;",
+  );
+  assert.ok(fixture, "responsive same-node recovery fixture is unavailable");
+  return fixture;
+}
+
 async function waitForResponsivePlayback(
   driver,
   { generation, minimumCurrentTime = 0.25, minimumRenderedFrames = 3, mode },
@@ -1023,6 +1114,45 @@ async function waitForResponsivePlayback(
         playback.streamActive !== true ||
         playback.videoHeight <= 0 ||
         playback.videoWidth <= 0
+      ) {
+        return null;
+      }
+      return fixture;
+    },
+    { intervalMs: 50, timeoutMs: 5000 },
+  );
+}
+
+async function waitForResponsiveCompactDemotion(
+  driver,
+  { generation, minimumCurrentTime, minimumPlayingEvents, minimumRenderedFrames, minimumWaitingEvents },
+) {
+  return poll(
+    async () => {
+      const fixture = await responsiveFixtureState(driver);
+      if (!fixture) return null;
+      if (fixture.mediaSetupError) {
+        throw new Error(`responsive media setup failed: ${fixture.mediaSetupError}`);
+      }
+      const playback = fixture.playback;
+      if (
+        fixture.generation !== generation ||
+        fixture.mode !== "compact" ||
+        fixture.pendingMode != null ||
+        fixture.pageDemotions !== 1 ||
+        fixture.selectedLabel !== "720p" ||
+        fixture.stored?.label !== "1080p" ||
+        fixture.stored?.height !== 1080 ||
+        fixture.selectionIgnores.length < 1 ||
+        playback.connected !== true ||
+        playback.currentTime < minimumCurrentTime ||
+        playback.errorCode != null ||
+        playback.paused !== false ||
+        playback.events.playing < minimumPlayingEvents ||
+        playback.events.waiting < minimumWaitingEvents ||
+        playback.readyState < 3 ||
+        playback.renderedFrames < minimumRenderedFrames ||
+        playback.streamActive !== true
       ) {
         return null;
       }
@@ -1309,10 +1439,32 @@ return {
     );
 
     await driver.setContext("content");
+    const initialFallbackState = await poll(async () => {
+      const fixture = await driver.execute("return window.__chzzkInitialQualityFixture?.snapshot() ?? null;");
+      return fixture?.selectedLabel === "720p" ? fixture : null;
+    });
+    assert.deepEqual(initialFallbackState, {
+      selectedLabel: "720p",
+      selectionLabels: ["720p"],
+      silentExpansions: 0,
+    });
+    const expandedInitialFixture = await driver.execute(
+      "return window.__chzzkInitialQualityFixture?.expandSilently() ?? null;",
+    );
+    assert.deepEqual(expandedInitialFixture, {
+      selectedLabel: "720p",
+      selectionLabels: ["720p"],
+      silentExpansions: 1,
+    });
     const updatedOpenPlayerState = await selectedPlayerQuality(driver);
     assert.deepEqual(updatedOpenPlayerState, {
       selected: { label: "1080p", width: 1920, height: 1080 },
       stored: { label: "1080p", width: 1920, height: 1080 },
+    });
+    assert.deepEqual(await driver.execute("return window.__chzzkInitialQualityFixture.snapshot();"), {
+      selectedLabel: "1080p",
+      selectionLabels: ["720p", "1080p"],
+      silentExpansions: 1,
     });
     const updateOpenAfter = await driver.execute(`return {
   documentToken: window.__chzzkUpdateDocumentToken ?? null,
@@ -1458,6 +1610,139 @@ return tracks[tracks.selectedIndex].label;`),
       false,
       "observed resize-fixture master evidence triggered an unavailable upper-tier probe",
     );
+
+    const responsiveRemountState = responsiveWideState;
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/live/resize-test?same-node-recovery=1`,
+    });
+    const sameNodeInitialState = await waitForResponsivePlayback(driver, {
+      generation: 1,
+      mode: "wide",
+    });
+    assert.deepEqual(sameNodeInitialState.mountModes, ["wide"]);
+    assertResponsiveSelection(sameNodeInitialState, 1);
+    const sameNodeBaseline = await enableResponsiveSameNodeRecovery(driver);
+    const sameNodeBaselineRequests = sameNodeBaseline.selectionRequests.length;
+    const sameNodeBaselineCommits = sameNodeBaseline.selectionCommits.length;
+    const sameNodeCompactRect = await driver.setWindowRect({ height: 800, width: 560 });
+    assert.equal(
+      sameNodeCompactRect.width <= 700,
+      true,
+      "Firefox did not enter compact mode for same-node recovery",
+    );
+    const sameNodeCompactState = await waitForResponsiveCompactDemotion(driver, {
+      generation: 1,
+      minimumCurrentTime: sameNodeBaseline.playback.currentTime + 0.25,
+      minimumPlayingEvents: sameNodeBaseline.playback.events.playing + 1,
+      minimumRenderedFrames: sameNodeBaseline.playback.renderedFrames + 3,
+      minimumWaitingEvents: sameNodeBaseline.playback.events.waiting + 1,
+    });
+    assert.deepEqual(sameNodeCompactState.mountModes, ["wide"]);
+    assert.deepEqual(sameNodeCompactState.sameNodeModes, ["compact"]);
+    assert.equal(sameNodeCompactState.pageDemotions, 1);
+    assert.equal(sameNodeCompactState.selectedLabel, "720p");
+    assert.equal(sameNodeCompactState.stored?.height, 1080);
+    assert.equal(sameNodeCompactState.selectionCommits.length, sameNodeBaselineCommits);
+    assert.equal(
+      sameNodeCompactState.selectionRequests.length,
+      sameNodeBaselineRequests + sameNodeCompactState.selectionIgnores.length,
+    );
+    assert.equal(sameNodeCompactState.selectionIgnores.length >= 1, true);
+    assert.equal(sameNodeCompactState.selectionIgnores.length <= 2, true);
+    assert.deepEqual(
+      sameNodeCompactState.selectionIgnores.map(({ generation, label }) => ({
+        generation,
+        label,
+      })),
+      Array.from({ length: sameNodeCompactState.selectionIgnores.length }, () => ({
+        generation: 1,
+        label: "1080p",
+      })),
+    );
+    assert.equal(
+      sameNodeCompactState.selectionIgnores[0].at >= sameNodeCompactState.pageDemotionAt,
+      true,
+      "the compact correction request predates the page-owned demotion",
+    );
+    assert.equal(
+      sameNodeCompactState.selectionIgnores[0].at - sameNodeCompactState.pageDemotionAt <= 250,
+      true,
+      "the compact correction was not requested within the immediate responsive window",
+    );
+    assert.equal(
+      sameNodeCompactState.selectionCommits.some((entry) => entry.at >= sameNodeCompactState.pageDemotionAt),
+      false,
+      "an ignored compact correction unexpectedly committed",
+    );
+    assert.equal(
+      sameNodeCompactState.compactSettledAt > sameNodeCompactState.pageDemotionAt,
+      true,
+      "the compact fixture did not emit playback-settled evidence after its demotion",
+    );
+    assert.equal(
+      sameNodeCompactState.playback.events.stalled,
+      sameNodeBaseline.playback.events.stalled,
+      "the compact page-owned demotion unexpectedly stalled the real media element",
+    );
+    assert.equal(
+      sameNodeCompactState.playback.events.emptied,
+      sameNodeBaseline.playback.events.emptied,
+      "the compact page-owned demotion unexpectedly emptied the real media element",
+    );
+
+    const sameNodeWideRect = await driver.setWindowRect({ height: 800, width: 1200 });
+    assert.equal(
+      sameNodeWideRect.width >= 1000,
+      true,
+      "Firefox did not restore wide mode for same-node recovery",
+    );
+    let sameNodeWideState = await waitForResponsivePlayback(driver, {
+      generation: 1,
+      minimumCurrentTime: sameNodeCompactState.playback.currentTime + 0.25,
+      minimumRenderedFrames: sameNodeCompactState.playback.renderedFrames + 3,
+      mode: "wide",
+    });
+    sameNodeWideState = await poll(async () => {
+      const fixture = await responsiveFixtureState(driver);
+      return fixture?.silentExpansions === 1 && fixture?.selectedLabel === "1080p" ? fixture : null;
+    });
+    assert.deepEqual(sameNodeWideState.mountModes, ["wide"]);
+    assert.deepEqual(sameNodeWideState.sameNodeModes, ["compact", "wide"]);
+    assert.equal(sameNodeWideState.pageDemotions, 1);
+    assert.equal(sameNodeWideState.silentExpansions, 1);
+    assert.equal(sameNodeWideState.selectionIgnores.length >= 1, true);
+    assert.equal(sameNodeWideState.selectionIgnores.length <= 2, true);
+    assert.equal(
+      sameNodeWideState.selectionRequests.length,
+      sameNodeBaselineRequests + 1 + sameNodeWideState.selectionIgnores.length,
+    );
+    assert.equal(sameNodeWideState.selectionCommits.length, sameNodeBaselineCommits + 1);
+    assert.equal(Number.isFinite(sameNodeWideState.silentExpansionAt), true);
+    assert.deepEqual(
+      sameNodeWideState.selectionRequests
+        .filter((entry) => entry.at >= sameNodeWideState.silentExpansionAt)
+        .map(({ generation, label }) => ({ generation, label })),
+      [{ generation: 1, label: "1080p" }],
+    );
+    assert.deepEqual(
+      sameNodeWideState.selectionCommits
+        .filter((entry) => entry.at >= sameNodeWideState.silentExpansionAt)
+        .map(({ generation, label }) => ({ generation, label })),
+      [{ generation: 1, label: "1080p" }],
+    );
+    assertResponsivePlaybackContinued(sameNodeCompactState, sameNodeWideState);
+    await probeResponsiveHls(driver, "wide-recovered");
+
+    const stableRecoveryState = await driver.executeAsync(
+      `const done = arguments[arguments.length - 1];
+for (let index = 0; index < 20; index += 1) dispatchEvent(new Event("resize"));
+setTimeout(() => done(window.__chzzkResponsiveFixture.snapshot()), 1600);`,
+    );
+    assert.equal(stableRecoveryState.selectionRequests.length, sameNodeWideState.selectionRequests.length);
+    assert.equal(stableRecoveryState.selectionCommits.length, sameNodeWideState.selectionCommits.length);
+    assert.equal(stableRecoveryState.selectionIgnores.length, sameNodeWideState.selectionIgnores.length);
+    assert.equal(stableRecoveryState.selectedLabel, "1080p");
+    assert.equal(stableRecoveryState.stored?.height, 1080);
 
     const requestCountBeforePlayback = requests.length;
     await driver.command("POST", "/url", { url: `https://www.chzzk.naver.com:${state.port}/live/test` });
@@ -1837,6 +2122,7 @@ browser.storage.local.get("chzzkDiagnostics").then(
         manifestScope: "production-required-permissions",
         installedAfter: after.version,
         installedBefore: before.version,
+        initialPlayerRecovery: "silent-720p-to-1080p",
         liveToMiniTransition: "background-acknowledged-in-flight-master-pushState",
         masterResponsePreselection: true,
         miniPlayerCycles: 4,
@@ -1850,7 +2136,8 @@ browser.storage.local.get("chzzkDiagnostics").then(
         playerSpaLifecycle: "home-to-live-to-ineligible-to-live",
         playerStorageQuality: miniPlayerState.stored.label,
         queryPreserved: true,
-        responsivePlayerRemounts: responsiveWideState.generation,
+        responsivePlayerRemounts: responsiveRemountState.generation,
+        responsiveSameNodeRecovery: "compact-720p-intent-preserved-wide-silent-1080p-recovered",
         updatePath: "AddonManager.findUpdates",
       }),
     );
