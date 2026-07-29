@@ -356,7 +356,7 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
     );
   });
 
-  it("continues same-site CHZZK mini-player playback only on dedicated livecloud hosts", () => {
+  it("continues same-site CHZZK mini-player playback on current CHZZK livecloud hosts", () => {
     const miniPlayer = {
       documentUrl: "https://chzzk.naver.com/lives?keyword=another-channel",
       initiator: "https://chzzk.naver.com",
@@ -382,6 +382,58 @@ describe("MV2 required-permission CHZZK redirect request policy", () => {
         policy,
       ),
       true,
+    );
+
+    const currentAkamai = {
+      ...miniPlayer,
+      url:
+        "https://livecloud.akamaized.net/chzzk/lip2_kr/example/480p/segment/" +
+        "example_hls_chunklist.m3u8?Policy=redacted",
+    };
+    assert.deepEqual(shouldRedirectRequest(currentAkamai, policy), {
+      ok: true,
+      quality: "480p",
+      reason: "eligible-chzzk-hls-quality",
+      tabId: 15,
+    });
+    assert.equal(
+      isTrustedMasterPlaylistRequest(
+        {
+          ...currentAkamai,
+          url:
+            "https://livecloud.akamaized.net/chzzk/lip2_kr/example/" +
+            "example_hls_playlist.m3u8?Policy=redacted",
+        },
+        policy,
+      ),
+      true,
+      "the current Akamai CHZZK master must remain eligible in the mini-player",
+    );
+    assert.equal(
+      shouldRedirectRequest(
+        {
+          ...currentAkamai,
+          url:
+            "https://livecloud.akamaized.net/another-service/session/480p/segment/" +
+            "example_hls_chunklist.m3u8?Policy=redacted",
+        },
+        policy,
+      ).ok,
+      false,
+      "the shared Akamai host must require an exact CHZZK path segment",
+    );
+    assert.equal(
+      shouldRedirectRequest(
+        {
+          ...currentAkamai,
+          url:
+            "https://edge.livecloud.akamaized.net/chzzk/session/480p/segment/" +
+            "example_hls_chunklist.m3u8?Policy=redacted",
+        },
+        policy,
+      ).ok,
+      false,
+      "the shared Akamai trust must not expand to sibling hostnames",
     );
 
     const genericCdn = {

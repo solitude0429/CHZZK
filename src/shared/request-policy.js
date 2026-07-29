@@ -94,9 +94,17 @@ function isNumericHlsPlaylistUrl(url) {
   return isHlsPlaylistUrl(url) && Boolean(parseQualityFromUrl(url));
 }
 
-function knownChzzkHlsHost(hostname) {
+function knownChzzkHlsUrl(parsed) {
+  const hostname = parsed.hostname.toLowerCase();
   const knownSuffixes = ["livecloud.pstatic.net.live.gscdn.net", "nvelop-livecloud.pstatic.net"];
-  return knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+  if (knownSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`))) {
+    return true;
+  }
+
+  return (
+    hostname === "livecloud.akamaized.net" &&
+    parsed.pathname.split("/").some((segment) => segment.toLowerCase() === "chzzk")
+  );
 }
 
 function isDedicatedChzzkHlsUrl(url, policy) {
@@ -109,7 +117,7 @@ export function isDedicatedChzzkHlsPlaylistUrl(url, policy) {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:") return false;
-    return knownChzzkHlsHost(parsed.hostname.toLowerCase());
+    return knownChzzkHlsUrl(parsed);
   } catch {
     return false;
   }

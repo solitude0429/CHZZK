@@ -27,7 +27,7 @@ The unit suite includes direct library-boundary misuse tests for canonical relea
 
 ## Functional-only Firefox E2E
 
-The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts.
+The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts. Its runtime policy is loaded from the production policy file; only the idle evidence TTL is shortened to keep the bounded expiry scenario practical.
 
 ```bash
 npm run setup:firefox-e2e
@@ -39,13 +39,15 @@ npm run test:firefox-functional-e2e
 The test exercises real Firefox rather than a VM mock:
 
 1. Installs synthetic version `0.1.3` through geckodriver.
-2. Opens a CHZZK-shaped live fixture, streams only the first master-playlist body chunk, switches the tab to the same-site `/lives` mini-player route, and withholds the remaining master body until a test-only background listener acknowledges that Firefox delivered that exact route update. It then confirms the first numeric request goes directly from `480p` to the master-advertised `1080p` without `2160p`/`1440p` fallback probes. No elapsed-time delay stands in for observer migration.
-3. Confirms the signed-style query remains byte-for-byte unchanged and a client-only fragment does not affect network-URL comparison.
-4. Serves an unusable GAP-only `1080p` response, proves Firefox stays on usable `720p`, then makes the first exact `1080p` recovery fail near the 10-second boundary and the second verify successfully about 15 seconds later. Generous request-cadence upper bounds reject a slow recovery, the page must fetch usable `1080p` only after a distinct successful background verification, every recovery request must carry the current media query rather than the distinct master query, and no `1440p`/`2160p` generic probe may occur.
-5. Keeps Firefox's observed original-live `documentUrl` after the background-acknowledged in-flight-master `history.pushState`, changes mini-player routes repeatedly, and confirms the observed master still selects `1080p` without numeric fallback scans across playlist cycles.
-6. Revalidates the selected playlist with an empty HTTP 304 and confirms the cached target remains usable.
-7. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS.
-8. Calls `AddonManager.findUpdates` and confirms the installed version becomes `0.1.4`.
+2. Loads a normal CHZZK home document, enters `/live` with `pushState`, mounts the player, and requires the packaged MAIN-world controller to select `1080p`. It then leaves for an ineligible route and proves an emitted track change is ignored before returning to `/live` and recovering `1080p`.
+3. Opens a CHZZK-shaped live fixture using the current exact `livecloud.akamaized.net/chzzk` and `stream_hls_*` request families, streams only the first master-playlist body chunk, switches the tab to the same-site `/lives` mini-player route, and withholds the remaining master body until a test-only background listener acknowledges that Firefox delivered that exact route update. It then confirms the first numeric request goes directly from `480p` to the master-advertised `1080p` without `2160p`/`1440p` fallback probes. No elapsed-time delay stands in for observer migration.
+4. Starts the fixture player with only ABR and `720p`, adds `1080p` after the initial retry window, and requires the controller's actual track-list listener to select and persist the exact official `{label,width,height}` value on both `/live` and a fresh `/lives` page.
+5. Runs a separate masterless `480p` Firefox scenario whose `2160p` and `1440p` fixture responses remain blocked until the server has also observed the `1080p` request. This proves all eligible candidates start together and the player converges to the highest successful tier while the unavailable higher results are still consumed first.
+6. Confirms the signed-style query remains byte-for-byte unchanged and a client-only fragment does not affect network-URL comparison.
+7. Serves an unusable GAP-only `1080p` response, proves Firefox converges to usable `720p` while allowing at most one original `480p` request through the production 50 ms fail-open deadline, then makes the first exact `1080p` recovery fail near the 10-second boundary and the second verify successfully about 15 seconds later. Generous request-cadence upper bounds reject a slow recovery, the page must fetch usable `1080p` only after a distinct successful background verification, every recovery request must carry the current media query rather than the distinct master query, and no `1440p`/`2160p` generic probe may occur.
+8. Keeps Firefox's observed original-live `documentUrl` after the background-acknowledged in-flight-master `history.pushState`, changes mini-player routes repeatedly, and confirms the observed master still selects `1080p` without numeric fallback scans across playlist cycles.
+9. Revalidates the selected playlist with an empty HTTP 304 and confirms the cached target remains usable.
+10. Serves strict `updates.json` and synthetic version `0.1.4` over HTTPS, calls `AddonManager.findUpdates`, and confirms the installed version becomes `0.1.4`.
 
 The fixture XPIs are unsigned and exist only in the disposable Developer Edition profile, so signature/update certificate checks are disabled only for this functional test. This test makes no authenticity claim about a Release artifact.
 
