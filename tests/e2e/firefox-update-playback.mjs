@@ -321,6 +321,253 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         return;
       }
 
+      if (host === "www.chzzk.naver.com" && requestUrl.pathname === "/live/resize-test") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK responsive playback E2E</title>
+<style>
+  body { margin: 0; }
+  #resize-canvas {
+    height: 180px;
+    left: -10000px;
+    position: fixed;
+    top: 0;
+    width: 320px;
+  }
+  #resize-video { height: 180px; width: 320px; }
+</style>
+<canvas id="resize-canvas" width="320" height="180"></canvas>
+<script>
+(() => {
+  const compactQuery = matchMedia("(max-width: 700px)");
+  const canvas = document.getElementById("resize-canvas");
+  const context = canvas.getContext("2d", { alpha: false });
+  const video = document.createElement("video");
+  video.id = "resize-video";
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  const state = {
+    canvasFrames: 0,
+    frameCallbackSupported: typeof video.requestVideoFrameCallback === "function",
+    hls: [],
+    mediaSetupError: null,
+    mode: null,
+    mountModes: [],
+    pendingMode: null,
+    playbackEvents: {
+      emptied: 0,
+      playing: 0,
+      stalled: 0,
+      waiting: 0,
+    },
+    renderedFrames: 0,
+    resizeEvents: 0,
+    selectionCommits: [],
+    selectionRequests: [],
+  };
+  let generation = 0;
+  let masterLoaded = false;
+  let remountTimer = null;
+
+  for (const eventType of ["emptied", "playing", "stalled", "waiting"]) {
+    video.addEventListener(eventType, () => {
+      state.playbackEvents[eventType] += 1;
+    });
+  }
+
+  let paintIndex = 0;
+  const paint = () => {
+    paintIndex += 1;
+    context.fillStyle = paintIndex % 2 === 0 ? "#00a86b" : "#1f6feb";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "#ffffff";
+    context.font = "32px sans-serif";
+    context.fillText(String(paintIndex), 24, 64);
+    state.canvasFrames += 1;
+  };
+  paint();
+  setInterval(paint, 40);
+
+  if (state.frameCallbackSupported) {
+    const recordRenderedFrame = () => {
+      state.renderedFrames += 1;
+      video.requestVideoFrameCallback(recordRenderedFrame);
+    };
+    video.requestVideoFrameCallback(recordRenderedFrame);
+  }
+
+  const mountPlayer = (mode) => {
+    generation += 1;
+    const currentGeneration = generation;
+    const previousLayout = document.getElementById("live_player_layout");
+    const layout = document.createElement("div");
+    layout.id = "live_player_layout";
+    const player = document.createElement("pzp-pc-layout");
+    const pane = document.createElement("pzp-pc-setting-quality-pane");
+    const trackEvents = new EventTarget();
+    const tracks = [];
+    tracks.selectedIndex = -1;
+    tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
+    tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
+    tracks.dispatchEvent = trackEvents.dispatchEvent.bind(trackEvents);
+
+    const addTrack = (value) => {
+      const index = tracks.length;
+      let pending = false;
+      let selected = value.selected === true;
+      const track = { height: value.height, label: value.label, width: value.width };
+      Object.defineProperty(track, "selected", {
+        get() { return selected; },
+        set(next) {
+          if (next !== true) {
+            selected = false;
+            return;
+          }
+          state.selectionRequests.push({
+            at: performance.now(),
+            generation: currentGeneration,
+            label: track.label,
+          });
+          if (pending || selected) return;
+          pending = true;
+          setTimeout(() => {
+            pending = false;
+            if (
+              document.querySelector("#live_player_layout > pzp-pc-layout") !== player
+            ) {
+              return;
+            }
+            selected = true;
+            tracks.selectedIndex = index;
+            for (const [otherIndex, otherTrack] of tracks.entries()) {
+              if (otherIndex !== index) otherTrack.selected = false;
+            }
+            state.selectionCommits.push({
+              at: performance.now(),
+              generation: currentGeneration,
+              label: track.label,
+            });
+          }, 20);
+        },
+      });
+      tracks.push(track);
+      if (selected) tracks.selectedIndex = index;
+    };
+
+    addTrack({ height: 1080, label: "ABR", selected: true, width: 1920 });
+    addTrack({ height: 720, label: "720p", width: 1280 });
+    addTrack({ height: 1080, label: "1080p", width: 1920 });
+    player.videoTracks = tracks;
+    pane.filter = (track) => track.label !== "ABR";
+    player.append(video);
+    layout.append(player, pane);
+    if (previousLayout) {
+      previousLayout.insertAdjacentElement("afterend", layout);
+      previousLayout.remove();
+    } else {
+      document.body.append(layout);
+    }
+    state.mode = mode;
+    state.mountModes.push(mode);
+    state.pendingMode = null;
+    player.dispatchEvent(new Event("loadedmetadata"));
+  };
+
+  const requestResponsiveMount = () => {
+    const nextMode = compactQuery.matches ? "compact" : "wide";
+    if (nextMode === state.mode || nextMode === state.pendingMode) return;
+    state.pendingMode = nextMode;
+    clearTimeout(remountTimer);
+    remountTimer = setTimeout(() => mountPlayer(nextMode), 75);
+  };
+
+  addEventListener("resize", () => {
+    state.resizeEvents += 1;
+    requestResponsiveMount();
+  });
+  compactQuery.addEventListener("change", requestResponsiveMount);
+
+  const probeHls = async (phase) => {
+    if (!masterLoaded) {
+      const masterResponse = await fetch(
+        "https://livecloud.akamaized.net:${state.port}/chzzk/resize-fixture/" +
+          "stream_hls_playlist.m3u8?Policy=synthetic-resize-master",
+      );
+      const masterBody = await masterResponse.text();
+      if (!masterResponse.ok || !masterBody.startsWith("#EXTM3U")) {
+        throw new Error("responsive master fixture failed");
+      }
+      masterLoaded = true;
+    }
+    const mediaResponse = await fetch(
+      "https://livecloud.akamaized.net:${state.port}/chzzk/resize-fixture/" +
+        "480p/segment/stream_hls_chunklist.m3u8?Policy=synthetic-resize-current&next=%2F480p%2F",
+    );
+    const mediaBody = await mediaResponse.text();
+    const quality = mediaBody.match(/# fixture-quality=([0-9]{3,4}p)/)?.[1] ?? null;
+    const result = { phase, quality, status: mediaResponse.status };
+    state.hls.push(result);
+    return result;
+  };
+
+  const snapshot = () => {
+    const player = document.querySelector("#live_player_layout > pzp-pc-layout");
+    const tracks = player?.videoTracks;
+    const selectedIndex = Number(tracks?.selectedIndex);
+    const selected = Number.isSafeInteger(selectedIndex) ? tracks[selectedIndex] : null;
+    let stored = null;
+    try {
+      stored = JSON.parse(localStorage.getItem("live-player-video-track"));
+    } catch {}
+    return {
+      frameCallbackSupported: state.frameCallbackSupported,
+      generation,
+      hls: state.hls.slice(),
+      innerHeight,
+      innerWidth,
+      mediaSetupError: state.mediaSetupError,
+      mode: state.mode,
+      mountModes: state.mountModes.slice(),
+      pendingMode: state.pendingMode,
+      playback: {
+        canvasFrames: state.canvasFrames,
+        connected: video.isConnected,
+        currentTime: video.currentTime,
+        errorCode: video.error?.code ?? null,
+        events: { ...state.playbackEvents },
+        paused: video.paused,
+        readyState: video.readyState,
+        renderedFrames: state.renderedFrames,
+        streamActive: video.srcObject?.active === true,
+        videoHeight: video.videoHeight,
+        videoWidth: video.videoWidth,
+      },
+      resizeEvents: state.resizeEvents,
+      selectedLabel: selected?.label ?? null,
+      selectionCommits: state.selectionCommits.slice(),
+      selectionRequests: state.selectionRequests.slice(),
+      stored,
+    };
+  };
+
+  window.__chzzkResponsiveFixture = Object.freeze({ probeHls, snapshot });
+  mountPlayer(compactQuery.matches ? "compact" : "wide");
+  setTimeout(() => {
+    try {
+      const stream = canvas.captureStream(25);
+      video.srcObject = stream;
+      video.play().catch((error) => {
+        state.mediaSetupError = String(error);
+      });
+    } catch (error) {
+      state.mediaSetupError = String(error);
+    }
+  }, 100);
+})();
+</script>`);
+        return;
+      }
+
       if (
         host === "www.chzzk.naver.com" &&
         (requestUrl.pathname === "/live/test" ||
@@ -636,6 +883,10 @@ class WebDriver {
     return this.command("POST", "/execute/async", { args, script });
   }
 
+  async setWindowRect({ height, width }) {
+    return this.command("POST", "/window/rect", { height, width });
+  }
+
   async close() {
     if (!this.sessionId) return;
     try {
@@ -737,6 +988,108 @@ return {
 };`),
     { intervalMs: 50, timeoutMs: 5000 },
   );
+}
+
+async function responsiveFixtureState(driver) {
+  return driver.execute("return window.__chzzkResponsiveFixture?.snapshot() ?? null;");
+}
+
+async function waitForResponsivePlayback(
+  driver,
+  { generation, minimumCurrentTime = 0.25, minimumRenderedFrames = 3, mode },
+) {
+  return poll(
+    async () => {
+      const fixture = await responsiveFixtureState(driver);
+      if (!fixture) return null;
+      if (fixture.mediaSetupError) {
+        throw new Error(`responsive media setup failed: ${fixture.mediaSetupError}`);
+      }
+      const playback = fixture.playback;
+      if (
+        fixture.frameCallbackSupported !== true ||
+        fixture.generation !== generation ||
+        fixture.mode !== mode ||
+        fixture.pendingMode != null ||
+        fixture.selectedLabel !== "1080p" ||
+        fixture.stored?.label !== "1080p" ||
+        fixture.stored?.height !== 1080 ||
+        playback.connected !== true ||
+        playback.currentTime < minimumCurrentTime ||
+        playback.errorCode != null ||
+        playback.paused !== false ||
+        playback.readyState < 3 ||
+        playback.renderedFrames < minimumRenderedFrames ||
+        playback.streamActive !== true ||
+        playback.videoHeight <= 0 ||
+        playback.videoWidth <= 0
+      ) {
+        return null;
+      }
+      return fixture;
+    },
+    { intervalMs: 50, timeoutMs: 5000 },
+  );
+}
+
+async function probeResponsiveHls(driver, phase) {
+  const result = await driver.executeAsync(
+    `const phase = arguments[0];
+const done = arguments[arguments.length - 1];
+const fixture = window.__chzzkResponsiveFixture;
+if (!fixture) {
+  done({ error: "responsive fixture missing" });
+} else {
+  fixture.probeHls(phase).then(done, (error) => done({ error: String(error) }));
+}`,
+    [phase],
+  );
+  if (result?.error) throw new Error(result.error);
+  assert.deepEqual(result, { phase, quality: "1080p", status: 200 });
+  return result;
+}
+
+function assertResponsiveSelection(fixture, expectedGeneration) {
+  assert.equal(fixture.generation, expectedGeneration);
+  assert.equal(fixture.selectionRequests.length, expectedGeneration);
+  assert.equal(fixture.selectionCommits.length, expectedGeneration);
+  for (let generation = 1; generation <= expectedGeneration; generation += 1) {
+    const requests = fixture.selectionRequests.filter((entry) => entry.generation === generation);
+    const commits = fixture.selectionCommits.filter((entry) => entry.generation === generation);
+    assert.equal(
+      requests.length,
+      1,
+      `responsive generation ${generation} received repeated selected=true writes`,
+    );
+    assert.equal(commits.length, 1, `responsive generation ${generation} never committed its selection`);
+    assert.equal(requests[0].label, "1080p");
+    assert.equal(commits[0].label, "1080p");
+    assert.equal(
+      commits[0].at > requests[0].at,
+      true,
+      `responsive generation ${generation} did not apply selection asynchronously`,
+    );
+  }
+}
+
+function assertResponsivePlaybackContinued(before, after) {
+  assert.equal(
+    after.playback.currentTime >= before.playback.currentTime + 0.25,
+    true,
+    "the real Firefox media element did not advance after the responsive remount",
+  );
+  assert.equal(
+    after.playback.renderedFrames >= before.playback.renderedFrames + 3,
+    true,
+    "Firefox did not render new canvas-capture frames after the responsive remount",
+  );
+  for (const eventType of ["emptied", "stalled", "waiting"]) {
+    assert.equal(
+      after.playback.events[eventType],
+      before.playback.events[eventType],
+      `the responsive remount emitted an unexpected ${eventType} media event`,
+    );
+  }
 }
 
 async function mountSpaPlayerFromHome(driver) {
@@ -1013,11 +1366,98 @@ return tracks[tracks.selectedIndex].label;`),
       "the MAIN-world controller must not force a track after leaving an eligible player route",
     );
     await driver.execute(`history.pushState({}, "", "/live/spa-return?from=following");
-document
-  .querySelector("#live_player_layout > pzp-pc-layout")
-  .videoTracks.dispatchEvent(new Event("change"));`);
+    document
+      .querySelector("#live_player_layout > pzp-pc-layout")
+      .videoTracks.dispatchEvent(new Event("change"));`);
     const spaReturnPlayerState = await selectedPlayerQuality(driver);
     assert.equal(spaReturnPlayerState.selected.label, "1080p");
+
+    const responsiveRequestStart = requests.length;
+    const initialWideRect = await driver.setWindowRect({ height: 800, width: 1200 });
+    assert.equal(initialWideRect.width >= 1000, true, "Firefox did not accept the wide window rect");
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/live/resize-test`,
+    });
+    const responsiveInitialState = await waitForResponsivePlayback(driver, {
+      generation: 1,
+      mode: "wide",
+    });
+    assert.equal(
+      responsiveInitialState.innerWidth > 700,
+      true,
+      "the initial WebDriver window did not produce the wide responsive viewport",
+    );
+    assert.deepEqual(responsiveInitialState.mountModes, ["wide"]);
+    assertResponsiveSelection(responsiveInitialState, 1);
+    await probeResponsiveHls(driver, "wide-before");
+
+    const compactRect = await driver.setWindowRect({ height: 800, width: 560 });
+    assert.equal(compactRect.width <= 700, true, "Firefox did not accept the compact window rect");
+    const responsiveCompactState = await waitForResponsivePlayback(driver, {
+      generation: 2,
+      minimumCurrentTime: responsiveInitialState.playback.currentTime + 0.25,
+      minimumRenderedFrames: responsiveInitialState.playback.renderedFrames + 3,
+      mode: "compact",
+    });
+    assert.equal(
+      responsiveCompactState.innerWidth <= 700,
+      true,
+      "the physical WebDriver resize did not cross the compact viewport breakpoint",
+    );
+    assert.equal(
+      responsiveCompactState.resizeEvents > 0,
+      true,
+      "Firefox did not dispatch a resize event for the physical compact transition",
+    );
+    assert.deepEqual(responsiveCompactState.mountModes, ["wide", "compact"]);
+    assertResponsiveSelection(responsiveCompactState, 2);
+    assertResponsivePlaybackContinued(responsiveInitialState, responsiveCompactState);
+    await probeResponsiveHls(driver, "compact");
+
+    const restoredWideRect = await driver.setWindowRect({ height: 800, width: 1200 });
+    assert.equal(restoredWideRect.width >= 1000, true, "Firefox did not restore the wide window rect");
+    let responsiveWideState = await waitForResponsivePlayback(driver, {
+      generation: 3,
+      minimumCurrentTime: responsiveCompactState.playback.currentTime + 0.25,
+      minimumRenderedFrames: responsiveCompactState.playback.renderedFrames + 3,
+      mode: "wide",
+    });
+    assert.equal(
+      responsiveWideState.innerWidth > 700,
+      true,
+      "the physical WebDriver resize did not restore the wide viewport",
+    );
+    assert.deepEqual(responsiveWideState.mountModes, ["wide", "compact", "wide"]);
+    assertResponsiveSelection(responsiveWideState, 3);
+    assertResponsivePlaybackContinued(responsiveCompactState, responsiveWideState);
+    await probeResponsiveHls(driver, "wide-after");
+    responsiveWideState = await responsiveFixtureState(driver);
+    assert.deepEqual(
+      responsiveWideState.hls.map(({ phase, quality }) => ({ phase, quality })),
+      [
+        { phase: "wide-before", quality: "1080p" },
+        { phase: "compact", quality: "1080p" },
+        { phase: "wide-after", quality: "1080p" },
+      ],
+    );
+    const responsiveRequests = requests.slice(responsiveRequestStart);
+    assert.equal(
+      responsiveRequests.filter(
+        (request) =>
+          request.host === "livecloud.akamaized.net" && request.path.includes("/resize-fixture/1080p/"),
+      ).length >= 3,
+      true,
+      "Firefox did not request the redirected 1080p resize fixture in every viewport phase",
+    );
+    assert.equal(
+      responsiveRequests.some(
+        (request) =>
+          request.host === "livecloud.akamaized.net" &&
+          /\/resize-fixture\/(?:1440p|2160p)\//.test(request.path),
+      ),
+      false,
+      "observed resize-fixture master evidence triggered an unavailable upper-tier probe",
+    );
 
     const requestCountBeforePlayback = requests.length;
     await driver.command("POST", "/url", { url: `https://www.chzzk.naver.com:${state.port}/live/test` });
@@ -1063,7 +1503,8 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       },
       { timeoutMs: 5000 },
     );
-    const redirectedRequest = requests.find(
+    const liveToMiniRequests = requests.slice(requestCountBeforePlayback);
+    const redirectedRequest = liveToMiniRequests.find(
       (request) =>
         request.host === "livecloud.akamaized.net" &&
         request.path.includes("/1080p/") &&
@@ -1075,7 +1516,6 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       "?Policy=synthetic&next=%2F480p%2F",
       "runtime redirect must preserve the signed query byte-for-byte",
     );
-    const liveToMiniRequests = requests.slice(requestCountBeforePlayback);
     for (const unavailableQuality of ["2160p", "1440p"]) {
       const fallbackProbeCount = liveToMiniRequests.filter(
         (request) =>
@@ -1387,7 +1827,9 @@ browser.storage.local.get("chzzkDiagnostics").then(
 
     console.log(
       JSON.stringify({
+        asyncPlayerSelection: "one-write-per-generation",
         cacheRevalidation: "304",
+        canvasCapturePlayback: "real-media-progress-without-post-baseline-stall-events",
         clientFragmentNormalized: true,
         firefox: basename(firefoxBinary),
         functionalOnly: true,
@@ -1401,12 +1843,14 @@ browser.storage.local.get("chzzkDiagnostics").then(
         miniPlayerPage: "/lives",
         miniPlayerRouteChanges: 3,
         numericProbeBatch: "2160p+1440p+1080p-concurrent",
+        physicalWindowResize: "1200x800-to-560x800-to-1200x800",
         playbackQuality: "1080p",
         playerLateTrackUpgrade: "720p-to-1080p-addtrack",
         playerSelectedQuality: miniPlayerState.selected.label,
         playerSpaLifecycle: "home-to-live-to-ineligible-to-live",
         playerStorageQuality: miniPlayerState.stored.label,
         queryPreserved: true,
+        responsivePlayerRemounts: responsiveWideState.generation,
         updatePath: "AddonManager.findUpdates",
       }),
     );
