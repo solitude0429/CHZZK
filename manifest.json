@@ -14,7 +14,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "content_security_policy": "script-src 'self'; object-src 'none'; base-uri 'none';",
   "permissions": [
     "https://*.akamaized.net/*",
@@ -51,6 +51,12 @@
       "js": ["site-observer.js"],
       "matches": ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
       "run_at": "document_start"
+    },
+    {
+      "js": ["player-controller.js"],
+      "matches": ["https://*.chzzk.naver.com/*"],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ]
 }

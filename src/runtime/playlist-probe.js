@@ -179,30 +179,51 @@ export function createPlaylistProbe({
       minRedirectQuality: policy.minRedirectQuality,
     });
 
-    for (const candidate of candidates) {
-      if (signal?.aborted) return null;
-      if (skipTargetQualities.has(candidate)) continue;
+    const attempts = candidates.flatMap((candidate) => {
+      if (skipTargetQualities.has(candidate)) return [];
       const candidateNumber = qualityNumber(candidate);
       if (
         !candidateNumber ||
-        candidateNumber < observedNumber ||
+        candidateNumber <= observedNumber ||
         (maximumTargetNumber && candidateNumber > maximumTargetNumber)
       ) {
-        continue;
+        return [];
       }
-
       const candidateUrl = replaceQualityInUrl(details.url, candidate);
-      if (!candidateUrl) continue;
-      if (candidate === parseQualityFromUrl(details.url) || candidateUrl === details.url) {
-        return { evidenceKind: "url-marker", targetQuality: candidate };
-      }
-      if (await fetchSupportsExpectedQuality(candidateUrl, candidate, { signal })) {
+      return candidateUrl ? [{ candidate, candidateUrl }] : [];
+    });
+    const batchController = new AbortController();
+    const abortBatch = () => batchController.abort();
+    if (signal?.aborted) return null;
+    signal?.addEventListener?.("abort", abortBatch, { once: true });
+
+    try {
+      const probes = attempts.map(async ({ candidate, candidateUrl }) => ({
+        candidate,
+        candidateUrl,
+        supported: await fetchSupportsExpectedQuality(candidateUrl, candidate, {
+          signal: batchController.signal,
+        }),
+      }));
+
+      // Every eligible tier starts together, but results are consumed in
+      // descending order so a fast lower response cannot beat a slower valid
+      // higher response. One timed-out tier therefore cannot consume the
+      // whole family budget before 1080p gets a chance.
+      for (const probe of probes) {
+        const result = await probe;
+        if (signal?.aborted) return null;
+        if (!result.supported) continue;
+        batchController.abort();
         return {
           evidenceKind: "url-marker",
-          targetQuality: candidate,
-          validatedNetworkUrl: networkRequestUrl(candidateUrl),
+          targetQuality: result.candidate,
+          validatedNetworkUrl: networkRequestUrl(result.candidateUrl),
         };
       }
+    } finally {
+      batchController.abort();
+      signal?.removeEventListener?.("abort", abortBatch);
     }
 
     return signal?.aborted ||

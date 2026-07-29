@@ -69,8 +69,14 @@ assert.deepEqual(
       matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
       run_at: "document_start",
     },
+    {
+      js: ["player-controller.js"],
+      matches: ["https://*.chzzk.naver.com/*"],
+      run_at: "document_start",
+      world: "MAIN",
+    },
   ],
-  "MV2 content script must be required install-time CHZZK live access for first-request prewarm only",
+  "MV2 must separate isolated prewarm access from the player-only MAIN-world controller",
 );
 assert.equal(
   manifest.optional_permissions,

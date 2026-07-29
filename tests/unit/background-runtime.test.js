@@ -225,6 +225,7 @@ async function loadBackground({
       familyKey: state.familyKey,
       keys: Object.keys(state).sort(),
       tabId: state.tabId,
+      targetQuality: state.targetQuality,
       validatedUrlCount: state.validatedNetworkUrls instanceof Map ? state.validatedNetworkUrls.size : 0,
     })),
     failed: [...failedTargetsBySession.values()].map((state) => ({
@@ -434,7 +435,12 @@ describe("background runtime quality resolution", () => {
       outcome.values.every((value) => value === undefined),
       true,
     );
-    assert.equal(fetches.length, 1, "concurrent requests for one tab/context must share one probe set");
+    assert.equal(fetches.length, 5, "one shared batch must start each eligible candidate exactly once");
+    assert.equal(
+      new Set(fetches).size,
+      5,
+      "the concurrent request must reuse the first family batch instead of duplicating it",
+    );
   });
 
   it("isolates resolved targets across independent playlist families in one live context", async () => {
@@ -483,7 +489,17 @@ describe("background runtime quality resolution", () => {
     familyBProbe.resolve(playlistResponse(requestedByFamily.get("family-b")));
     await Promise.all([first, second]);
 
-    assert.equal(independentProbeCount, 2, "each family must own an independent in-flight promise");
+    assert.equal(independentProbeCount, 8, "each family must own one four-candidate in-flight batch");
+    assert.equal(
+      fetches.filter((url) => url.includes("/family-a/")).length,
+      4,
+      "family A must start its own candidate batch",
+    );
+    assert.equal(
+      fetches.filter((url) => url.includes("/family-b/")).length,
+      4,
+      "family B must start its own candidate batch",
+    );
   });
 
   it("expires URL-marker-only targets within the bounded family evidence TTL", async () => {
@@ -1401,8 +1417,8 @@ describe("background runtime quality resolution", () => {
     assert.equal(await listeners.onBeforeRequest(request), undefined);
     assert.deepEqual(
       fetches.map((url) => url.match(/chunklist_(\d+p)/)?.[1]),
-      ["2160p", "1440p"],
-      "the blocking deadline must expire while the original candidate scan remains in flight",
+      ["2160p", "1440p", "1080p", "720p", "480p"],
+      "the blocking deadline must expire while the original concurrent candidate batch remains in flight",
     );
 
     listeners.onUpdated(tabId, { url: miniPlayerUrl });
@@ -1427,7 +1443,7 @@ describe("background runtime quality resolution", () => {
       "the completed live probe must already be cached for the mini-player request",
     );
     assert.match(plain(nextDecision).redirectUrl, /chunklist_1080p/);
-    assert.equal(fetches.length, 3, "the live-to-mini transition must not restart the candidate scan");
+    assert.equal(fetches.length, 5, "the live-to-mini transition must not restart the candidate batch");
   });
 
   it("continues one unresolved dedicated probe across repeated mini-player SPA routes", async () => {
@@ -1447,7 +1463,7 @@ describe("background runtime quality resolution", () => {
 
     listeners.onUpdated(tabId, { url: firstRoute });
     assert.equal(await listeners.onBeforeRequest(request), undefined);
-    assert.equal(fetches.length, 1);
+    assert.equal(fetches.length, 5);
 
     listeners.onUpdated(tabId, { url: nextRoute });
     pendingProbe.resolve(playlistResponse(fetches[0]));
@@ -1460,7 +1476,7 @@ describe("background runtime quality resolution", () => {
     });
     assert.equal(typeof nextDecision?.then, "undefined");
     assert.match(plain(nextDecision).redirectUrl, /chunklist_2160p/);
-    assert.equal(fetches.length, 1, "a second mini-player route must share the original scan");
+    assert.equal(fetches.length, 5, "a second mini-player route must share the original batch");
   });
 
   it("still aborts an unresolved generic-CDN probe at the mini-player boundary", async () => {
@@ -1480,13 +1496,13 @@ describe("background runtime quality resolution", () => {
       }),
       undefined,
     );
-    assert.equal(fetches.length, 1);
+    assert.equal(fetches.length, 4);
 
     listeners.onUpdated(tabId, { url: miniPlayerUrl });
     assert.equal(
-      fetchOptions[0].signal.aborted,
+      fetchOptions.every((options) => options.signal.aborted),
       true,
-      "only dedicated CHZZK livecloud work may cross into mini-player mode",
+      "every generic-CDN candidate must abort at the mini-player boundary",
     );
     pendingProbe.resolve(playlistResponse(fetches[0]));
     await waitForDiagnosticsQueue();
@@ -2736,7 +2752,7 @@ chunklist_720p.m3u8?Policy=synthetic
   });
 
   it("aborts the whole background resolution after a bounded total budget", async () => {
-    const { fetches, listeners } = await loadBackground({
+    const { fetches, fetchOptions, listeners } = await loadBackground({
       fetchImplementation: async (_url, options) =>
         new Promise((_resolve, reject) => {
           options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
@@ -2747,7 +2763,12 @@ chunklist_720p.m3u8?Policy=synthetic
     await listeners.onBeforeRequest(firstLowQualityRequest(424));
     await waitForDiagnosticsQueue(100);
 
-    assert.equal(fetches.length, 1, "a total resolution timeout must stop the serial candidate loop");
+    assert.equal(fetches.length, 5, "the total budget may start only one bounded candidate batch");
+    assert.equal(
+      fetchOptions.every((options) => options.signal.aborted),
+      true,
+      "the total resolution budget must abort every outstanding candidate",
+    );
   });
 
   it("rejects a candidate when the final playlist quality does not match the requested quality", async () => {
@@ -4030,6 +4051,69 @@ ${renditionRoot}/1080p/segment/chunklist_1080p_highbitrate.m3u8?Policy=current
     const promoted = plain(await listeners.onBeforeRequest(lowRequest));
     assert.match(promoted.redirectUrl, /chunklist_1080p/);
     assert.deepEqual(plain(storage.chzzkDiagnostics.runtimeRedirects.targetsByTab), { 44: "1080p" });
+  });
+
+  it("keeps current Akamai master quality across the live-to-mini-player transition", async () => {
+    const tabId = 650;
+    const liveUrl = "https://chzzk.naver.com/live/example-channel";
+    const miniPlayerUrl = "https://chzzk.naver.com/lives?keyword=another-channel";
+    const masterUrl =
+      "https://livecloud.akamaized.net/chzzk/lip2_kr/example/" + "example_hls_playlist.m3u8?Policy=redacted";
+    const masterPlaylist = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
+1080p/segment/example_hls_chunklist.m3u8?Policy=redacted
+#EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
+720p/segment/example_hls_chunklist.m3u8?Policy=redacted
+`;
+    const { listeners, responseFilters, sessionState } = await loadBackground({
+      tabUrlsById: new Map([[tabId, liveUrl]]),
+    });
+    const masterRequest = {
+      documentUrl: liveUrl,
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      requestId: "akamai-live-master",
+      tabId,
+      type: "xmlhttprequest",
+      url: masterUrl,
+    };
+
+    listeners.onUpdated(tabId, { url: liveUrl });
+    listeners.onBeforeRequest(masterRequest);
+    deliverObservedMasterResponse(
+      listeners,
+      responseFilters,
+      masterRequest.requestId,
+      masterUrl,
+      masterPlaylist,
+    );
+    assert.equal(
+      sessionState().active.some((state) => state.tabId === tabId && state.targetQuality === "1080p"),
+      true,
+      "the observed current master must seed the live-page target",
+    );
+    listeners.onUpdated(tabId, { url: miniPlayerUrl });
+    assert.equal(
+      sessionState().active.some((state) => state.tabId === tabId && state.targetQuality === "1080p"),
+      true,
+      "the current Akamai target must migrate into the mini-player context",
+    );
+
+    const redirected = plain(
+      listeners.onBeforeRequest({
+        documentUrl: liveUrl,
+        initiator: "https://chzzk.naver.com",
+        method: "GET",
+        requestId: "akamai-mini-rendition",
+        tabId,
+        type: "xmlhttprequest",
+        url:
+          "https://livecloud.akamaized.net/chzzk/lip2_kr/example/480p/segment/" +
+          "example_hls_chunklist.m3u8?Policy=redacted",
+      }),
+    );
+
+    assert.match(redirected.redirectUrl, /\/1080p\/segment\/example_hls_chunklist\.m3u8/);
   });
 
   it("lets trusted master evidence demote an earlier numeric target while preserving master monotonicity", async () => {

@@ -78,6 +78,108 @@ describe("runtime playlist probe", () => {
     );
   });
 
+  it("does not let timed-out synthetic tiers starve a usable 1080p candidate", async () => {
+    const requested = [];
+    const timers = new Map();
+    let nextTimerId = 0;
+    const probe = createPlaylistProbe({
+      clearTimeoutImpl(timerId) {
+        timers.delete(timerId);
+      },
+      fetchImpl: async (url, { signal }) => {
+        requested.push(url);
+        if (url.includes("1080p")) {
+          return playlistResponse(networkRequestUrl(url), mediaPlaylist());
+        }
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+            once: true,
+          });
+        });
+      },
+      policy,
+      setTimeoutImpl(callback) {
+        const timerId = ++nextTimerId;
+        timers.set(timerId, callback);
+        return timerId;
+      },
+    });
+    const controller = new AbortController();
+    const resolution = probe.resolveHighestSupportedQuality(
+      {
+        url: "https://edge.pstatic.net/chzzk/channel/chunklist_480p.m3u8?Policy=synthetic",
+      },
+      "480p",
+      { signal: controller.signal },
+    );
+
+    try {
+      await Promise.resolve();
+      assert.equal(
+        requested.some((url) => url.includes("1080p")),
+        true,
+        "every eligible tier must start before a higher timeout can consume the family budget",
+      );
+      for (const timeout of [...timers.values()]) timeout();
+      assert.deepEqual(await resolution, {
+        evidenceKind: "url-marker",
+        targetQuality: "1080p",
+        validatedNetworkUrl: "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8?Policy=synthetic",
+      });
+    } finally {
+      controller.abort();
+    }
+  });
+
+  it("keeps descending quality order while aborting lower outstanding probes", async () => {
+    let resolve1440;
+    let lowerAborted = false;
+    const requested = [];
+    const probe = createPlaylistProbe({
+      fetchImpl: async (url, { signal }) => {
+        requested.push(url);
+        if (url.includes("2160p")) {
+          return playlistResponse(networkRequestUrl(url), "#EXTM3U\n");
+        }
+        if (url.includes("1440p")) {
+          return new Promise((resolve) => {
+            resolve1440 = () => resolve(playlistResponse(networkRequestUrl(url), mediaPlaylist()));
+          });
+        }
+        if (url.includes("1080p")) {
+          return playlistResponse(networkRequestUrl(url), mediaPlaylist());
+        }
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              lowerAborted = true;
+              reject(new DOMException("aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        });
+      },
+      policy,
+    });
+    const resolution = probe.resolveHighestSupportedQuality(
+      {
+        url: "https://edge.pstatic.net/chzzk/channel/chunklist_480p.m3u8?Policy=synthetic",
+      },
+      "480p",
+    );
+
+    await Promise.resolve();
+    assert.equal(requested.length, 4, "all higher candidate probes must share one concurrent batch");
+    resolve1440();
+    assert.deepEqual(await resolution, {
+      evidenceKind: "url-marker",
+      targetQuality: "1440p",
+      validatedNetworkUrl: "https://edge.pstatic.net/chzzk/channel/chunklist_1440p.m3u8?Policy=synthetic",
+    });
+    assert.equal(lowerAborted, true);
+  });
+
   it("compares exact network URLs after removing only the client-side fragment", async () => {
     const url = "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8?Policy=synthetic#tail";
     const accepted = createPlaylistProbe({

@@ -156,6 +156,37 @@ describe("highest-supported-quality helpers", () => {
     assert.equal(playlistFamilyKey(lowLatencyMaster), playlistFamilyKey(rendition));
   });
 
+  it("groups current stream-prefixed CHZZK master and rendition names", () => {
+    const hlsMaster =
+      "https://livecloud.akamaized.net/chzzk/session-a/stream_hls_playlist.m3u8?Policy=synthetic";
+    const lowLatencyMaster =
+      "https://livecloud.akamaized.net/chzzk/session-a/stream_playlist.m3u8?Policy=synthetic";
+    const hlsRendition =
+      "https://livecloud.akamaized.net/chzzk/session-a/1080p/segment/" +
+      "stream_hls_chunklist.m3u8?Policy=synthetic";
+    const lowLatencyRendition =
+      "https://livecloud.akamaized.net/chzzk/session-a/1080p/segment/" +
+      "stream_chunklist.m3u8?Policy=synthetic";
+    const adRendition =
+      "https://livecloud.akamaized.net/chzzk/session-a/1080p/segment/" +
+      "stream_ad_hls_chunklist.m3u8?Policy=synthetic";
+    const suffixedMaster =
+      "https://livecloud.akamaized.net/chzzk/session-a/" + "stream_hls_playlist_high.m3u8?Policy=synthetic";
+    const suffixedRendition =
+      "https://livecloud.akamaized.net/chzzk/session-a/1080p/segment/" +
+      "stream_hls_chunklist_1080p_high.m3u8?Policy=synthetic";
+
+    assert.equal(playlistFamilyKey(hlsMaster), playlistFamilyKey(hlsRendition));
+    assert.equal(playlistFamilyKey(lowLatencyMaster), playlistFamilyKey(lowLatencyRendition));
+    assert.notEqual(
+      playlistFamilyKey(hlsMaster),
+      playlistFamilyKey(lowLatencyMaster),
+      "standard and low-latency filename families must remain independent",
+    );
+    assert.notEqual(playlistFamilyKey(hlsMaster), playlistFamilyKey(adRendition));
+    assert.equal(playlistFamilyKey(suffixedMaster), playlistFamilyKey(suffixedRendition));
+  });
+
   it("separates safe same-root playlist names while stripping signed path tails", () => {
     const generic =
       "https://edge.pstatic.net/chzzk/session-a/360p/segment/chunklist_480p.m3u8?Policy=synthetic";

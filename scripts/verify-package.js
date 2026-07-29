@@ -18,6 +18,7 @@ const allowedFiles = new Set([
   "icon-96.png",
   "icon.png",
   "manifest.json",
+  "player-controller.js",
   "site-observer.js",
 ]);
 

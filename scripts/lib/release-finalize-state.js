@@ -35,7 +35,7 @@ const MAX_RELEASE_METADATA_BYTES = 512 * 1024;
 const MAX_SIGNATURE_METADATA_BYTES = 512 * 1024;
 const MAX_SOURCE_ARCHIVE_BYTES = 8 * 1024 * 1024;
 const MAX_SIGNED_XPI_BYTES = 16 * 1024 * 1024;
-export const RELEASE_VERSION = "0.1.18";
+export const RELEASE_VERSION = "0.1.19";
 export const RELEASE_ADD_ON_ID = "chzzk@solitude0429.local";
 const RELEASE_SOURCE_REPOSITORY = "solitude0429/CHZZK";
 export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk-updates.alpha-apple.dedyn.io/updates.json";
@@ -52,6 +52,7 @@ export const RELEASE_PACKAGE_FILES = Object.freeze([
   "icon-96.png",
   "icon.png",
   "manifest.json",
+  "player-controller.js",
   "site-observer.js",
 ]);
 

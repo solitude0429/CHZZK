@@ -80,6 +80,8 @@ describe("background hardening invariants", () => {
 
     assert.match(docs, /livecloud\.pstatic\.net\.live\.gscdn\.net/);
     assert.match(docs, /nvelop-livecloud\.pstatic\.net/);
+    assert.match(docs, /livecloud\.akamaized\.net/);
+    assert.match(docs, /exact [`/]?chzzk/i);
     assert.match(docs, /generic CDN path markers? (?:are|is) never contextless trust evidence/i);
     assert.match(docs, /markerEvidenceTtlMs/);
     assert.match(docs, /playlist family/i);

@@ -38,3 +38,9 @@ await build({
   outfile: "site-observer.js",
 });
 await formatOutput("site-observer.js");
+await build({
+  ...common,
+  entryPoints: ["src/runtime/player-controller.js"],
+  outfile: "player-controller.js",
+});
+await formatOutput("player-controller.js");

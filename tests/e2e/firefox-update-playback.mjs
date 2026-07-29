@@ -12,30 +12,18 @@ import JSZip from "jszip";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const addOnId = "chzzk@solitude0429.local";
-const fixtureDomains = ["nvelop-livecloud.pstatic.net", "updates.chzzk.test", "www.chzzk.naver.com"];
+const fixtureDomains = ["livecloud.akamaized.net", "updates.chzzk.test", "www.chzzk.naver.com"];
 const fixedZipDate = new Date("1980-01-01T00:00:00.000Z");
 const fixturePlaylistPollIntervalMs = 700;
 const serverArrivalToleranceMs = 250;
+const historicalControllerlessVersion = "0.1.18";
+const productionManifest = JSON.parse(readFileSync(join(repoRoot, "manifest.json"), "utf8"));
+const productionPolicy = JSON.parse(readFileSync(join(repoRoot, "policy/quality-policy.json"), "utf8"));
 const testPolicy = {
-  blockingProbeBudgetMs: 500,
-  chzzkDomains: ["chzzk.naver.com"],
-  defaultTarget: "highest-supported",
-  directRewriteMaxQuality: "highest-supported",
-  knownChzzkHlsPathMarkers: ["/chzzk/"],
-  knownChzzkHlsRequestDomains: ["pstatic.net"],
+  ...productionPolicy,
+  // Accelerate only idle-evidence expiry; request/probe/failure timing stays
+  // byte-for-byte aligned with the production policy.
   markerEvidenceTtlMs: 1000,
-  probeMaxBytes: 256000,
-  probeResolutionBudgetMs: 3000,
-  probeTimeoutMs: 1000,
-  qualityCandidates: ["2160p", "1440p", "1080p", "720p", "480p", "360p"],
-  redirectFailureBackoffMs: 10000,
-  redirectMethods: ["get"],
-  redirectResourceTypes: ["media", "other", "xmlhttprequest"],
-  strategy: "prefer-highest-supported",
-  trustedInitiatorDomains: ["chzzk.naver.com"],
-  trustedRequestDomains: ["pstatic.net"],
-  failedTargetRecoveryProbeIntervalMs: 15000,
-  upgradeProbeIntervalMs: 60000,
 };
 
 function sha256(bytes) {
@@ -62,25 +50,22 @@ async function poll(action, { intervalMs = 100, timeoutMs = 15000 } = {}) {
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-async function makeExtensionXpi({
-  chzzkPermission = "https://*.chzzk.naver.com/*",
-  outputPath,
-  port,
-  runtimeDir,
-  version,
-}) {
-  const productionManifest = JSON.parse(readFileSync(join(repoRoot, "manifest.json"), "utf8"));
+async function makeExtensionXpi({ includePlayerController = true, outputPath, port, runtimeDir, version }) {
   const manifest = {
     ...productionManifest,
     version,
-    permissions: ["storage", "webRequest", "webRequestBlocking", chzzkPermission, "https://*.pstatic.net/*"],
-    content_scripts: [
-      {
-        js: ["site-observer.js"],
-        matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
-        run_at: "document_start",
-      },
-    ],
+    permissions: includePlayerController
+      ? productionManifest.permissions
+      : productionManifest.permissions.filter((permission) => permission !== "scripting"),
+    content_scripts: includePlayerController
+      ? productionManifest.content_scripts
+      : [
+          {
+            js: ["site-observer.js"],
+            matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
+            run_at: "document_start",
+          },
+        ],
     background: {
       persistent: true,
       scripts: ["background.js", "e2e-error-observer.js"],
@@ -103,8 +88,11 @@ async function makeExtensionXpi({
     ["icon-48.png", join(repoRoot, "icon-48.png")],
     ["icon-96.png", join(repoRoot, "icon-96.png")],
     ["icon.png", join(repoRoot, "icon.png")],
-    ["site-observer.js", join(runtimeDir, "site-observer.js")],
   ];
+  if (includePlayerController) {
+    files.push(["player-controller.js", join(runtimeDir, "player-controller.js")]);
+  }
+  files.push(["site-observer.js", join(runtimeDir, "site-observer.js")]);
   zip.file("manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`), {
     date: fixedZipDate,
     unixPermissions: 0o100644,
@@ -119,7 +107,7 @@ async function makeExtensionXpi({
   },
   {
     types: ["media", "other", "xmlhttprequest"],
-    urls: ["https://*.pstatic.net/*"],
+    urls: ["https://*.akamaized.net/*"],
   },
 );
 browser.tabs.onUpdated.addListener((_tabId, changeInfo) => {
@@ -139,7 +127,7 @@ browser.tabs.onUpdated.addListener((_tabId, changeInfo) => {
   Promise.resolve()
     .then(() =>
       fetch(
-        "https://nvelop-livecloud.pstatic.net:" +
+        "https://livecloud.akamaized.net:" +
           updatedUrl.port +
           "/chzzk/fixture/transition-ack",
         { cache: "no-store" },
@@ -171,6 +159,7 @@ async function buildFixtureRuntime(outputDir) {
     entryPoints: {
       background: "src/runtime/background.js",
       diagnostics: "src/runtime/diagnostics-page.js",
+      "player-controller": "src/runtime/player-controller.js",
       "site-observer": "src/runtime/site-observer.js",
     },
     format: "iife",
@@ -225,6 +214,24 @@ function generateCertificate(directory) {
   return { certificatePath, keyPath };
 }
 
+function releaseConcurrentProbeBatch(state) {
+  const upperQualities = new Set(state.pendingProbeUpper.map(({ quality }) => quality));
+  if (!state.pendingProbe1080 || !upperQualities.has("2160p") || !upperQualities.has("1440p")) {
+    return;
+  }
+
+  state.probeBatchConcurrent = true;
+  for (const pending of state.pendingProbeUpper.splice(0)) {
+    if (pending.response.destroyed || pending.response.writableEnded) continue;
+    pending.requestRecord.fixturePlaylistKind = "unavailable-upper-probe";
+    pending.response.statusCode = 404;
+    pending.response.end("not available");
+  }
+  const pending1080 = state.pendingProbe1080;
+  state.pendingProbe1080 = null;
+  pending1080.finishPlaylist();
+}
+
 function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   return https.createServer(
     { cert: readFileSync(certificatePath), key: readFileSync(keyPath) },
@@ -242,10 +249,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       response.setHeader("access-control-allow-origin", "*");
       response.setHeader("cache-control", "no-store");
 
-      if (
-        host === "nvelop-livecloud.pstatic.net" &&
-        requestUrl.pathname === "/chzzk/fixture/transition-ack"
-      ) {
+      if (host === "livecloud.akamaized.net" && requestUrl.pathname === "/chzzk/fixture/transition-ack") {
         state.transitionAckCount += 1;
         const pendingMaster = state.pendingTransitionMaster;
         if (pendingMaster) {
@@ -258,45 +262,153 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         return;
       }
 
+      if (host === "www.chzzk.naver.com" && requestUrl.pathname === "/") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(
+          '<!doctype html><meta charset="utf-8"><title>CHZZK SPA entry</title><div id="result">home</div>',
+        );
+        return;
+      }
+
+      if (host === "www.chzzk.naver.com" && requestUrl.pathname === "/live/update-open") {
+        state.updateOpenDocumentCount += 1;
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK open-update E2E</title>
+<div id="live_player_layout">
+  <pzp-pc-layout></pzp-pc-layout>
+  <pzp-pc-setting-quality-pane></pzp-pc-setting-quality-pane>
+</div>
+<script>
+(() => {
+  Object.defineProperty(window, "__chzzkUpdateDocumentToken", {
+    configurable: false,
+    value: "update-open-${state.updateOpenDocumentCount}",
+    writable: false,
+  });
+  const player = document.querySelector("#live_player_layout > pzp-pc-layout");
+  const pane = document.querySelector("#live_player_layout pzp-pc-setting-quality-pane");
+  const trackEvents = new EventTarget();
+  const tracks = [];
+  tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
+  tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
+  tracks.dispatchEvent = trackEvents.dispatchEvent.bind(trackEvents);
+  const addTrack = (value) => {
+    const index = tracks.length;
+    let selected = value.selected === true;
+    const track = { label: value.label, width: value.width, height: value.height };
+    Object.defineProperty(track, "selected", {
+      get() { return selected; },
+      set(next) {
+        selected = next === true;
+        if (!selected) return;
+        tracks.selectedIndex = index;
+        for (const [otherIndex, otherTrack] of tracks.entries()) {
+          if (otherIndex !== index) otherTrack.selected = false;
+        }
+      },
+    });
+    tracks.push(track);
+  };
+  addTrack({ label: "ABR", width: 1920, height: 1080, selected: true });
+  addTrack({ label: "720p", width: 1280, height: 720 });
+  addTrack({ label: "1080p", width: 1920, height: 1080 });
+  tracks.selectedIndex = 0;
+  player.videoTracks = tracks;
+  pane.filter = (track) => track.label !== "ABR";
+  player.dispatchEvent(new Event("loadedmetadata"));
+})();
+</script>`);
+        return;
+      }
+
       if (
         host === "www.chzzk.naver.com" &&
         (requestUrl.pathname === "/live/test" ||
           requestUrl.pathname === "/live/gap-test" ||
+          requestUrl.pathname === "/live/probe-test" ||
           requestUrl.pathname === "/lives")
       ) {
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK E2E</title>
+<div id="live_player_layout">
+  <pzp-pc-layout></pzp-pc-layout>
+  <pzp-pc-setting-quality-pane></pzp-pc-setting-quality-pane>
+</div>
 <div id="result">pending</div>
 <script>
+(() => {
+  const player = document.querySelector("#live_player_layout > pzp-pc-layout");
+  const pane = document.querySelector("#live_player_layout pzp-pc-setting-quality-pane");
+  const trackEvents = new EventTarget();
+  const tracks = [];
+  tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
+  tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
+  tracks.dispatchEvent = trackEvents.dispatchEvent.bind(trackEvents);
+  const addTrack = (value) => {
+    const index = tracks.length;
+    let selected = value.selected;
+    const track = { label: value.label, width: value.width, height: value.height };
+    Object.defineProperty(track, "selected", {
+      get() { return selected; },
+      set(next) {
+        selected = next === true;
+        if (!selected) return;
+        tracks.selectedIndex = index;
+        for (const [otherIndex, otherTrack] of tracks.entries()) {
+          if (otherIndex !== index) otherTrack.selected = false;
+        }
+      },
+    });
+    tracks.push(track);
+    return track;
+  };
+  addTrack({ label: "ABR", width: 1920, height: 1080, selected: true });
+  addTrack({ label: "720p", width: 1280, height: 720, selected: false });
+  tracks.selectedIndex = 0;
+  player.videoTracks = tracks;
+  pane.filter = (track) => track.label !== "ABR";
+  player.dispatchEvent(new Event("loadedmetadata"));
+  setTimeout(() => {
+    addTrack({ label: "1080p", width: 1920, height: 1080, selected: false });
+    tracks.dispatchEvent(new Event("addtrack"));
+  }, 500);
+})();
 (async () => {
   try {
     const liveToMiniTransition = location.pathname === "/live/test";
     const gapScenario = location.pathname === "/live/gap-test";
-    const fixtureName = gapScenario ? "gap-fixture" : "fixture";
-    const masterUrl =
-      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/" +
-      fixtureName +
-      "/hls_playlist.m3u8?Policy=synthetic-master" +
-      (liveToMiniTransition ? "&transition=live-to-mini" : "");
-    const masterResponse = await fetch(masterUrl);
-    if (liveToMiniTransition) {
-      history.pushState({}, "", "/lives?keyword=another-channel-live-to-mini");
+    const probeScenario = location.pathname === "/live/probe-test";
+    const fixtureName = probeScenario ? "probe-fixture" : gapScenario ? "gap-fixture" : "fixture";
+    if (!probeScenario) {
+      const masterUrl =
+        "https://livecloud.akamaized.net:${state.port}/chzzk/" +
+        fixtureName +
+        "/stream_hls_playlist.m3u8?Policy=synthetic-master" +
+        (liveToMiniTransition ? "&transition=live-to-mini" : "");
+      const masterResponse = await fetch(masterUrl);
+      if (liveToMiniTransition) {
+        history.pushState({}, "", "/lives?keyword=another-channel-live-to-mini");
+      }
+      const masterBody = await masterResponse.text();
+      if (!masterResponse.ok || !masterBody.startsWith("#EXTM3U")) {
+        throw new Error("master fixture failed");
+      }
     }
-    const masterBody = await masterResponse.text();
-    if (!masterResponse.ok || !masterBody.startsWith("#EXTM3U")) {
-      throw new Error("master fixture failed");
-    }
-    const mediaPolicy = gapScenario ? "synthetic-gap-current" : "synthetic";
+    const mediaPolicy = probeScenario
+      ? "synthetic-probe-current"
+      : gapScenario
+        ? "synthetic-gap-current"
+        : "synthetic";
     const mediaUrl =
-      "https://nvelop-livecloud.pstatic.net:${state.port}/chzzk/" +
+      "https://livecloud.akamaized.net:${state.port}/chzzk/" +
       fixtureName +
-      "/480p/segment/chunklist_480p_highbitrate.m3u8?Policy=" +
+      "/480p/segment/stream_hls_chunklist.m3u8?Policy=" +
       mediaPolicy +
       "&next=%2F480p%2F#client-only-fragment";
     let finalBody = "";
     let finalStatus = 0;
     const qualityHistory = [];
-    const requestLimit = gapScenario ? 48 : 4;
+    const requestLimit = gapScenario ? 48 : probeScenario ? 20 : 4;
     for (let index = 0; index < requestLimit; index += 1) {
       const response = await fetch(mediaUrl);
       finalStatus = response.status;
@@ -310,9 +422,11 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         gapScenario &&
         qualityHistory.includes("720p") &&
         qualityHistory[qualityHistory.length - 1] === "1080p";
-      if (recoveredAfterFallback) break;
+      if (recoveredAfterFallback || (probeScenario && observedQuality === "1080p")) break;
       if (index < requestLimit - 1) {
-        await new Promise((resolve) => setTimeout(resolve, ${fixturePlaylistPollIntervalMs}));
+        await new Promise((resolve) =>
+          setTimeout(resolve, probeScenario ? 100 : ${fixturePlaylistPollIntervalMs}),
+        );
       }
     }
     const result = document.getElementById("result");
@@ -326,8 +440,8 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         return;
       }
 
-      if (host === "nvelop-livecloud.pstatic.net" && requestUrl.pathname.endsWith(".m3u8")) {
-        if (requestUrl.pathname.endsWith("/hls_playlist.m3u8")) {
+      if (host === "livecloud.akamaized.net" && requestUrl.pathname.endsWith(".m3u8")) {
+        if (requestUrl.pathname.endsWith("/stream_hls_playlist.m3u8")) {
           response.statusCode = 200;
           response.setHeader("content-type", "application/vnd.apple.mpegurl");
           const variantQuery = requestUrl.pathname.includes("/gap-fixture/")
@@ -335,9 +449,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             : "Policy=synthetic&next=%2F480p%2F";
           const masterBody = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=8384000,RESOLUTION=1920x1080,FRAME-RATE=60.00
-1080p/segment/chunklist_1080p_highbitrate.m3u8?${variantQuery}
+1080p/segment/stream_hls_chunklist.m3u8?${variantQuery}
 #EXT-X-STREAM-INF:BANDWIDTH=3192000,RESOLUTION=1280x720,FRAME-RATE=60.00
-720p/segment/chunklist_720p_highbitrate.m3u8?${variantQuery}
+720p/segment/stream_hls_chunklist.m3u8?${variantQuery}
 `;
           if (requestUrl.searchParams.get("transition") === "live-to-mini") {
             const initialMasterChunk = "#EXTM3U\n";
@@ -389,7 +503,26 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
                 : `#EXTM3U\n# fixture-quality=${quality}\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-${quality}.ts\n`,
             );
           };
+          if (requestUrl.pathname.includes("/probe-fixture/")) {
+            if (quality === "1080p" && !state.probeBatchConcurrent) {
+              state.pendingProbe1080 = { finishPlaylist };
+              releaseConcurrentProbeBatch(state);
+              return;
+            }
+          }
           finishPlaylist();
+        } else if (
+          requestUrl.pathname.includes("/probe-fixture/") &&
+          (quality === "2160p" || quality === "1440p")
+        ) {
+          if (state.probeBatchConcurrent) {
+            requestRecord.fixturePlaylistKind = "unavailable-upper-probe";
+            response.statusCode = 404;
+            response.end("not available");
+            return;
+          }
+          state.pendingProbeUpper.push({ quality, requestRecord, response });
+          releaseConcurrentProbeBatch(state);
         } else {
           response.statusCode = 404;
           response.end("not available");
@@ -584,6 +717,68 @@ AddonManager.getAddonByID(addonId).then((addon) => {
   );
 }
 
+async function selectedPlayerQuality(driver) {
+  return poll(
+    async () =>
+      driver.execute(`const player = document.querySelector("#live_player_layout > pzp-pc-layout");
+const tracks = player && player.videoTracks;
+const selectedIndex = Number(tracks && tracks.selectedIndex);
+const selected = Number.isSafeInteger(selectedIndex) ? tracks[selectedIndex] : null;
+let stored = null;
+try {
+  stored = JSON.parse(localStorage.getItem("live-player-video-track"));
+} catch {}
+if (!selected || selected.label !== "1080p" || selected.height !== 1080 || stored?.height !== 1080) {
+  return null;
+}
+return {
+  selected: { label: selected.label, width: selected.width, height: selected.height },
+  stored,
+};`),
+    { intervalMs: 50, timeoutMs: 5000 },
+  );
+}
+
+async function mountSpaPlayerFromHome(driver) {
+  return driver.execute(`history.pushState({}, "", "/live/spa-entry?from=home");
+const layout = document.createElement("div");
+layout.id = "live_player_layout";
+const player = document.createElement("pzp-pc-layout");
+const pane = document.createElement("pzp-pc-setting-quality-pane");
+layout.append(player, pane);
+document.body.append(layout);
+const trackEvents = new EventTarget();
+const tracks = [];
+tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
+tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
+tracks.dispatchEvent = trackEvents.dispatchEvent.bind(trackEvents);
+const addTrack = (value) => {
+  const index = tracks.length;
+  let selected = value.selected === true;
+  const track = { label: value.label, width: value.width, height: value.height };
+  Object.defineProperty(track, "selected", {
+    get() { return selected; },
+    set(next) {
+      selected = next === true;
+      if (!selected) return;
+      tracks.selectedIndex = index;
+      for (const [otherIndex, otherTrack] of tracks.entries()) {
+        if (otherIndex !== index) otherTrack.selected = false;
+      }
+    },
+  });
+  tracks.push(track);
+};
+addTrack({ label: "ABR", width: 1920, height: 1080, selected: true });
+addTrack({ label: "720p", width: 1280, height: 720 });
+addTrack({ label: "1080p", width: 1920, height: 1080 });
+tracks.selectedIndex = 0;
+player.videoTracks = tracks;
+pane.filter = (track) => track.label !== "ABR";
+player.dispatchEvent(new Event("loadedmetadata"));
+return location.pathname;`);
+}
+
 async function main() {
   const firefoxBinary = process.env.FIREFOX_BINARY;
   const geckodriverBinary = process.env.GECKODRIVER_BINARY;
@@ -596,13 +791,17 @@ async function main() {
   const requests = [];
   const state = {
     gap1080ResponseCount: 0,
+    pendingProbe1080: null,
+    pendingProbeUpper: [],
     pendingTransitionMaster: null,
     port: null,
+    probeBatchConcurrent: false,
     transitionAckCount: 0,
     transitionMasterReleasedByAck: false,
     updateManifest: null,
     updateXpiBytes: null,
     updateXpiPath: null,
+    updateOpenDocumentCount: 0,
   };
   const { certificatePath, keyPath } = generateCertificate(workDir);
   const server = createFixtureServer({ certificatePath, keyPath, requests, state });
@@ -613,22 +812,57 @@ async function main() {
   try {
     state.port = await listen(server);
     await buildFixtureRuntime(runtimeDir);
-    const oldXpiPath = join(workDir, "chzzk-0.1.3.xpi");
-    const updateXpiPath = join(workDir, "chzzk-0.1.4.xpi");
-    await makeExtensionXpi({
-      chzzkPermission: "https://*.chzzk.naver.com/live/*",
+    const updateVersion = productionManifest.version;
+    const oldXpiPath = join(workDir, `chzzk-${historicalControllerlessVersion}.xpi`);
+    const updateXpiPath = join(workDir, `chzzk-${updateVersion}.xpi`);
+    const oldXpiBytes = await makeExtensionXpi({
+      includePlayerController: false,
       outputPath: oldXpiPath,
       port: state.port,
       runtimeDir,
-      version: "0.1.3",
+      version: historicalControllerlessVersion,
     });
     state.updateXpiBytes = await makeExtensionXpi({
       outputPath: updateXpiPath,
       port: state.port,
       runtimeDir,
-      version: "0.1.4",
+      version: updateVersion,
     });
-    state.updateXpiPath = "/releases/0.1.4/chzzk-0.1.4.xpi";
+    const oldArchive = await JSZip.loadAsync(oldXpiBytes);
+    const oldManifestEntry = oldArchive.file("manifest.json");
+    assert.ok(oldManifestEntry, "the controller-less XPI must contain a manifest");
+    const oldManifest = JSON.parse(await oldManifestEntry.async("string"));
+    assert.equal(
+      oldManifest.permissions.includes("scripting"),
+      false,
+      "the synthetic 0.1.18 XPI must not inherit the later scripting permission",
+    );
+    assert.deepEqual(oldManifest.content_scripts, [
+      {
+        js: ["site-observer.js"],
+        matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
+        run_at: "document_start",
+      },
+    ]);
+    assert.equal(
+      oldArchive.file("player-controller.js"),
+      null,
+      "the synthetic 0.1.18 XPI must not contain the later player controller",
+    );
+    const updateArchive = await JSZip.loadAsync(state.updateXpiBytes);
+    assert.ok(
+      updateArchive.file("player-controller.js"),
+      "the update XPI must package the MAIN-world player controller",
+    );
+    assert.equal(
+      JSON.parse(await updateArchive.file("manifest.json").async("string")).content_scripts.some(
+        (contentScript) =>
+          contentScript.world === "MAIN" && contentScript.js?.includes("player-controller.js"),
+      ),
+      true,
+      "the update manifest must register the packaged player controller in MAIN world",
+    );
+    state.updateXpiPath = `/releases/${updateVersion}/chzzk-${updateVersion}.xpi`;
     state.updateManifest = {
       addons: {
         [addOnId]: {
@@ -637,7 +871,7 @@ async function main() {
               applications: { gecko: { strict_min_version: "140.0" } },
               update_hash: `sha256:${sha256(state.updateXpiBytes)}`,
               update_link: `https://updates.chzzk.test:${state.port}${state.updateXpiPath}`,
-              version: "0.1.4",
+              version: updateVersion,
             },
           ],
         },
@@ -658,7 +892,7 @@ async function main() {
     const before = await installedAddon(driver);
     assert.equal(before?.active, true);
     assert.equal(before?.id, addOnId);
-    assert.equal(before?.version, "0.1.3");
+    assert.equal(before?.version, historicalControllerlessVersion);
     assert.match(before?.baseUrl ?? "", /^moz-extension:\/\//);
 
     await driver.setContext("content");
@@ -670,6 +904,120 @@ async function main() {
       },
       { timeoutMs: 5000 },
     );
+
+    const updateOpenUrl = `https://www.chzzk.naver.com:${state.port}/live/update-open`;
+    await driver.setContext("content");
+    await driver.command("POST", "/url", { url: updateOpenUrl });
+    const updateOpenRequestsBefore = requests.filter(
+      (request) => request.host === "www.chzzk.naver.com" && request.path === "/live/update-open",
+    ).length;
+    assert.equal(updateOpenRequestsBefore, 1);
+    const updateOpenBefore = await driver.execute(`const player =
+  document.querySelector("#live_player_layout > pzp-pc-layout");
+const tracks = player && player.videoTracks;
+return {
+  documentToken: window.__chzzkUpdateDocumentToken ?? null,
+  navigationEntryCount: performance.getEntriesByType("navigation").length,
+  selectedLabel: tracks?.[tracks.selectedIndex]?.label ?? null,
+  storageValue: localStorage.getItem("live-player-video-track"),
+  timeOrigin: performance.timeOrigin,
+  url: location.href,
+};`);
+    assert.deepEqual(updateOpenBefore, {
+      documentToken: "update-open-1",
+      navigationEntryCount: 1,
+      selectedLabel: "ABR",
+      storageValue: null,
+      timeOrigin: updateOpenBefore.timeOrigin,
+      url: updateOpenUrl,
+    });
+
+    const updateResult = await triggerAddonUpdate(driver);
+    if (updateResult?.status !== "installed" || updateResult?.version !== updateVersion) {
+      throw new Error(`Firefox update failed: ${JSON.stringify({ before, updateResult })}`);
+    }
+    const after = await poll(async () => {
+      const addon = await installedAddon(driver);
+      return addon?.version === updateVersion ? addon : null;
+    });
+    assert.equal(after.active, true);
+    assert.equal(after.id, addOnId);
+    assert.equal(after.version, updateVersion);
+    assert.match(after.baseUrl ?? "", /^moz-extension:\/\//);
+    assert.equal(
+      requests.some((request) => request.host === "updates.chzzk.test" && request.path === "/updates.json"),
+      true,
+    );
+    assert.equal(
+      requests.some(
+        (request) => request.host === "updates.chzzk.test" && request.path === state.updateXpiPath,
+      ),
+      true,
+    );
+
+    await driver.setContext("content");
+    const updatedOpenPlayerState = await selectedPlayerQuality(driver);
+    assert.deepEqual(updatedOpenPlayerState, {
+      selected: { label: "1080p", width: 1920, height: 1080 },
+      stored: { label: "1080p", width: 1920, height: 1080 },
+    });
+    const updateOpenAfter = await driver.execute(`return {
+  documentToken: window.__chzzkUpdateDocumentToken ?? null,
+  navigationEntryCount: performance.getEntriesByType("navigation").length,
+  timeOrigin: performance.timeOrigin,
+  url: location.href,
+};`);
+    assert.deepEqual(updateOpenAfter, {
+      documentToken: updateOpenBefore.documentToken,
+      navigationEntryCount: updateOpenBefore.navigationEntryCount,
+      timeOrigin: updateOpenBefore.timeOrigin,
+      url: updateOpenBefore.url,
+    });
+    assert.equal(
+      requests.filter(
+        (request) => request.host === "www.chzzk.naver.com" && request.path === "/live/update-open",
+      ).length,
+      updateOpenRequestsBefore,
+      "the open CHZZK document must not navigate or reload during the extension update",
+    );
+    assert.equal(
+      await driver.execute(`const tracks =
+  document.querySelector("#live_player_layout > pzp-pc-layout").videoTracks;
+tracks[0].selected = true;
+tracks.dispatchEvent(new Event("change"));
+return tracks[tracks.selectedIndex].label;`),
+      "ABR",
+      "the fixture must expose a real post-update ABR reversion before controller recovery",
+    );
+    assert.equal((await selectedPlayerQuality(driver)).selected.label, "1080p");
+
+    await driver.setContext("content");
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/`,
+    });
+    assert.equal(await mountSpaPlayerFromHome(driver), "/live/spa-entry");
+    const spaEntryPlayerState = await selectedPlayerQuality(driver);
+    assert.equal(spaEntryPlayerState.selected.label, "1080p");
+    const ineligibleSelection = await driver.execute(`history.pushState({}, "", "/following");
+const tracks = document.querySelector("#live_player_layout > pzp-pc-layout").videoTracks;
+tracks[0].selected = true;
+tracks.dispatchEvent(new Event("change"));
+return tracks.selectedIndex;`);
+    assert.equal(ineligibleSelection, 0);
+    await delay(400);
+    assert.equal(
+      await driver.execute(`const tracks =
+  document.querySelector("#live_player_layout > pzp-pc-layout").videoTracks;
+return tracks[tracks.selectedIndex].label;`),
+      "ABR",
+      "the MAIN-world controller must not force a track after leaving an eligible player route",
+    );
+    await driver.execute(`history.pushState({}, "", "/live/spa-return?from=following");
+document
+  .querySelector("#live_player_layout > pzp-pc-layout")
+  .videoTracks.dispatchEvent(new Event("change"));`);
+    const spaReturnPlayerState = await selectedPlayerQuality(driver);
+    assert.equal(spaReturnPlayerState.selected.label, "1080p");
 
     const requestCountBeforePlayback = requests.length;
     await driver.command("POST", "/url", { url: `https://www.chzzk.naver.com:${state.port}/live/test` });
@@ -683,7 +1031,7 @@ async function main() {
       { intervalMs: 100, timeoutMs: 15000 },
     );
     if (!/^200:#EXTM3U\n# fixture-quality=1080p/m.test(playbackResult)) {
-      await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+      await driver.command("POST", "/url", { url: `${after.baseUrl}diagnostics.html` });
       const diagnosticsPayload = await poll(
         async () => {
           const value = await driver.execute("return document.getElementById('payload')?.value || null;");
@@ -702,7 +1050,12 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
         `Firefox playback stayed below 1080p: ${playbackResult}\nObserved webRequest error: ${observedWebRequestError}\nDiagnostics: ${diagnosticsPayload}`,
       );
     }
-    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+    const livePlayerState = await selectedPlayerQuality(driver);
+    assert.deepEqual(livePlayerState, {
+      selected: { label: "1080p", width: 1920, height: 1080 },
+      stored: { label: "1080p", width: 1920, height: 1080 },
+    });
+    await driver.command("POST", "/url", { url: `${after.baseUrl}diagnostics.html` });
     const playbackDiagnostics = await poll(
       async () => {
         const value = await driver.execute("return document.getElementById('payload')?.value || null;");
@@ -712,9 +1065,9 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
     );
     const redirectedRequest = requests.find(
       (request) =>
-        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.host === "livecloud.akamaized.net" &&
         request.path.includes("/1080p/") &&
-        request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+        request.path.includes("stream_hls_chunklist.m3u8"),
     );
     assert.ok(redirectedRequest, "Firefox did not issue the redirected 1080p playlist request");
     assert.equal(
@@ -726,7 +1079,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
     for (const unavailableQuality of ["2160p", "1440p"]) {
       const fallbackProbeCount = liveToMiniRequests.filter(
         (request) =>
-          request.host === "nvelop-livecloud.pstatic.net" && request.path.includes(`/${unavailableQuality}/`),
+          request.host === "livecloud.akamaized.net" && request.path.includes(`/${unavailableQuality}/`),
       ).length;
       if (fallbackProbeCount !== 0) {
         throw new Error(
@@ -737,8 +1090,8 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
     assert.equal(
       liveToMiniRequests.some(
         (request) =>
-          request.host === "nvelop-livecloud.pstatic.net" &&
-          request.path.endsWith("/hls_playlist.m3u8") &&
+          request.host === "livecloud.akamaized.net" &&
+          request.path.endsWith("/stream_hls_playlist.m3u8") &&
           request.search.includes("transition=live-to-mini"),
       ),
       true,
@@ -748,6 +1101,60 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       state.transitionAckCount > 0 && state.transitionMasterReleasedByAck,
       true,
       "the master body was not gated on a background-observed live-to-mini transition",
+    );
+
+    const requestCountBeforeProbeScenario = requests.length;
+    await driver.setContext("content");
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/live/probe-test`,
+    });
+    const probePlaybackResult = await poll(
+      async () => {
+        const text = await driver.execute(
+          "return document.getElementById('result') && document.getElementById('result').textContent;",
+        );
+        return text && text !== "pending" ? text : null;
+      },
+      { intervalMs: 50, timeoutMs: 5000 },
+    );
+    assert.match(
+      probePlaybackResult,
+      /^200:#EXTM3U\n# fixture-quality=1080p/m,
+      "the masterless numeric path did not converge to the concurrently proven 1080p rendition",
+    );
+    const probeScenarioRequests = requests.slice(requestCountBeforeProbeScenario);
+    assert.equal(
+      probeScenarioRequests.some(
+        (request) =>
+          request.host === "livecloud.akamaized.net" && request.path.includes("/probe-fixture/1080p/"),
+      ),
+      true,
+      "the masterless Firefox scenario never probed 1080p",
+    );
+    for (const upperQuality of ["2160p", "1440p"]) {
+      assert.equal(
+        probeScenarioRequests.some(
+          (request) =>
+            request.host === "livecloud.akamaized.net" &&
+            request.path.includes(`/probe-fixture/${upperQuality}/`),
+        ),
+        true,
+        `the masterless Firefox scenario never started the ${upperQuality} probe`,
+      );
+    }
+    assert.equal(
+      probeScenarioRequests.some(
+        (request) =>
+          request.host === "livecloud.akamaized.net" &&
+          request.path.includes("/probe-fixture/stream_hls_playlist.m3u8"),
+      ),
+      false,
+      "the numeric-probe scenario unexpectedly received master evidence",
+    );
+    assert.equal(
+      state.probeBatchConcurrent,
+      true,
+      "1080p was not requested while both unavailable upper-tier probes were still pending",
     );
 
     const requestCountBeforeGapScenario = requests.length;
@@ -777,15 +1184,24 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       /(?:^|,)720p(?:,|$)/,
       "Firefox did not expose usable 720p playback while 1080p was GAP-only",
     );
-    assert.match(
-      gapQualityHistory,
-      /^1080p,720p(?:,720p)*,1080p$/,
-      "Firefox did not remain on 720p between the initial GAP response and verified 1080p recovery",
+    const gapQualities = gapQualityHistory.split(",");
+    assert.equal(gapQualities[0], "1080p");
+    assert.equal(gapQualities.at(-1), "1080p");
+    const recoveryQualities = gapQualities.slice(1, -1);
+    assert.equal(
+      recoveryQualities.every((quality) => quality === "720p" || quality === "480p"),
+      true,
+      "GAP recovery exposed an unexpected quality outside the 720p fallback and original 480p request",
+    );
+    assert.equal(
+      recoveryQualities.filter((quality) => quality === "480p").length <= 1,
+      true,
+      "the production 50ms fail-open budget exposed more than one original 480p request",
     );
     const gapScenarioRequests = requests.slice(requestCountBeforeGapScenario);
-    const exactHighPath = "/chzzk/gap-fixture/1080p/segment/chunklist_1080p_highbitrate.m3u8";
+    const exactHighPath = "/chzzk/gap-fixture/1080p/segment/stream_hls_chunklist.m3u8";
     const highRequests = gapScenarioRequests.filter(
-      (request) => request.host === "nvelop-livecloud.pstatic.net" && request.path === exactHighPath,
+      (request) => request.host === "livecloud.akamaized.net" && request.path === exactHighPath,
     );
     const initialGap = highRequests.find((request) => request.fixturePlaylistKind === "initial-gap");
     const failedFirstRecovery = highRequests.find((request) => request.fixturePlaylistKind === "retry-gap");
@@ -804,7 +1220,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
     const initialGapIndex = gapScenarioRequests.indexOf(initialGap);
     const usableFallbackIndex = gapScenarioRequests.findIndex(
       (request) =>
-        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.host === "livecloud.akamaized.net" &&
         request.path.includes("/gap-fixture/720p/") &&
         request.fixturePlaylistKind === "usable",
     );
@@ -834,8 +1250,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
     assert.equal(
       gapScenarioRequests.some(
         (request) =>
-          request.host === "nvelop-livecloud.pstatic.net" &&
-          /\/gap-fixture\/(?:1440p|2160p)\//.test(request.path),
+          request.host === "livecloud.akamaized.net" && /\/gap-fixture\/(?:1440p|2160p)\//.test(request.path),
       ),
       false,
       "master recovery must not launch generic 1440p or 2160p probes",
@@ -873,7 +1288,7 @@ browser.storage.local.get("chzzkE2eLastWebRequestError").then(
       true,
       "Firefox waited too long before repeating the 1080p recovery attempt",
     );
-    await driver.command("POST", "/url", { url: `${before.baseUrl}diagnostics.html` });
+    await driver.command("POST", "/url", { url: `${after.baseUrl}diagnostics.html` });
     const gapDiagnostics = await poll(
       async () => {
         const stored = await driver.executeAsync(
@@ -908,35 +1323,11 @@ browser.storage.local.get("chzzkDiagnostics").then(
       "the GAP-only response did not invalidate the selected 1080p target",
     );
 
-    await driver.setContext("content");
-    await driver.command("POST", "/url", { url: "about:blank" });
-    const updateResult = await triggerAddonUpdate(driver);
-    if (updateResult?.status !== "installed" || updateResult?.version !== "0.1.4") {
-      throw new Error(`Firefox update failed: ${JSON.stringify({ before, updateResult })}`);
-    }
-    const after = await poll(async () => {
-      const addon = await installedAddon(driver);
-      return addon?.version === "0.1.4" ? addon : null;
-    });
-    assert.equal(after.active, true);
-    assert.equal(after.id, addOnId);
-    assert.equal(after.version, "0.1.4");
-    assert.equal(
-      requests.some((request) => request.host === "updates.chzzk.test" && request.path === "/updates.json"),
-      true,
-    );
-    assert.equal(
-      requests.some(
-        (request) => request.host === "updates.chzzk.test" && request.path === state.updateXpiPath,
-      ),
-      true,
-    );
-
     const redirectedCountBeforeMiniPlayer = requests.filter(
       (request) =>
-        request.host === "nvelop-livecloud.pstatic.net" &&
+        request.host === "livecloud.akamaized.net" &&
         request.path.includes("/1080p/") &&
-        request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+        request.path.includes("stream_hls_chunklist.m3u8"),
     ).length;
     const requestCountBeforeMiniPlayer = requests.length;
     await driver.setContext("content");
@@ -957,12 +1348,17 @@ browser.storage.local.get("chzzkDiagnostics").then(
       /^200:#EXTM3U\n# fixture-quality=1080p/m,
       "same-origin list/search page did not retain redirected mini-player quality",
     );
+    const miniPlayerState = await selectedPlayerQuality(driver);
+    assert.deepEqual(miniPlayerState, {
+      selected: { label: "1080p", width: 1920, height: 1080 },
+      stored: { label: "1080p", width: 1920, height: 1080 },
+    });
     assert.equal(
       requests.filter(
         (request) =>
-          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.host === "livecloud.akamaized.net" &&
           request.path.includes("/1080p/") &&
-          request.path.includes("chunklist_1080p_highbitrate.m3u8"),
+          request.path.includes("stream_hls_chunklist.m3u8"),
       ).length > redirectedCountBeforeMiniPlayer,
       true,
       "Firefox did not expose the /lives-initiated playlist to the extension",
@@ -972,8 +1368,7 @@ browser.storage.local.get("chzzkDiagnostics").then(
       assert.equal(
         miniPlayerRequests.filter(
           (request) =>
-            request.host === "nvelop-livecloud.pstatic.net" &&
-            request.path.includes(`/${unavailableQuality}/`),
+            request.host === "livecloud.akamaized.net" && request.path.includes(`/${unavailableQuality}/`),
         ).length,
         0,
         `observed mini-player master evidence triggered a ${unavailableQuality} fallback probe`,
@@ -983,7 +1378,7 @@ browser.storage.local.get("chzzkDiagnostics").then(
       miniPlayerRequests.some(
         (request) =>
           request.cacheRevalidation &&
-          request.host === "nvelop-livecloud.pstatic.net" &&
+          request.host === "livecloud.akamaized.net" &&
           request.path.includes("/1080p/"),
       ),
       true,
@@ -997,7 +1392,7 @@ browser.storage.local.get("chzzkDiagnostics").then(
         firefox: basename(firefoxBinary),
         functionalOnly: true,
         gapSegmentRecovery: "1080p-gap-to-720p-to-1080p",
-        hostPermissionUpgrade: "/live/* -> /*",
+        manifestScope: "production-required-permissions",
         installedAfter: after.version,
         installedBefore: before.version,
         liveToMiniTransition: "background-acknowledged-in-flight-master-pushState",
@@ -1005,7 +1400,12 @@ browser.storage.local.get("chzzkDiagnostics").then(
         miniPlayerCycles: 4,
         miniPlayerPage: "/lives",
         miniPlayerRouteChanges: 3,
+        numericProbeBatch: "2160p+1440p+1080p-concurrent",
         playbackQuality: "1080p",
+        playerLateTrackUpgrade: "720p-to-1080p-addtrack",
+        playerSelectedQuality: miniPlayerState.selected.label,
+        playerSpaLifecycle: "home-to-live-to-ineligible-to-live",
+        playerStorageQuality: miniPlayerState.stored.label,
         queryPreserved: true,
         updatePath: "AddonManager.findUpdates",
       }),
@@ -1031,6 +1431,10 @@ browser.storage.local.get("chzzkDiagnostics").then(
       state.pendingTransitionMaster.response.destroy();
       state.pendingTransitionMaster = null;
     }
+    for (const pending of state.pendingProbeUpper.splice(0)) {
+      pending.response.destroy();
+    }
+    state.pendingProbe1080 = null;
     await closeServer(server);
     rmSync(workDir, { force: true, recursive: true });
   }
