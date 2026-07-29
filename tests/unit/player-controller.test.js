@@ -442,6 +442,25 @@ describe("CHZZK player highest-quality controller", () => {
     controller.stop();
   });
 
+  it("keeps a bounded slower retry when an existing pane initializes its filter late", () => {
+    const fixture = playerFixture([{ height: 1080, label: "1080p", width: 1920 }]);
+    fixture.pane.filter = undefined;
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    harness.flushTimer();
+    harness.flushTimer();
+    harness.flushTimer();
+    assert.equal(fixture.player.videoTracks.selectedIndex, -1);
+
+    fixture.pane.filter = () => true;
+    assert.equal(harness.flushTimer(), true, "a slower bounded retry must remain scheduled");
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+
+    harness.controller.stop();
+  });
+
   it("stays active across SPA routes while selecting only on exact player paths", () => {
     const fixture = playerFixture([
       { height: 1080, label: "ABR", selected: true, width: 1920 },

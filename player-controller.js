@@ -5,7 +5,7 @@
     "#live_player_layout pzp-pc-setting-quality-pane, #live_player_layout pzp-setting-quality";
   var QUALITY_STORAGE_KEY = "live-player-video-track";
   var MAX_TRACKS = 64;
-  var RETRY_DELAYS_MS = [0, 50, 250];
+  var RETRY_DELAYS_MS = [0, 50, 250, 1e3, 3e3];
   var MANUAL_QUALITY_LABEL_RE = /^\d{3,4}p$/i;
   var TRACK_LIST_EVENT_TYPES = ["addtrack", "removetrack", "change"];
   function isPlayerPageLocation(value) {

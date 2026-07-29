@@ -4,7 +4,7 @@ export const QUALITY_PANE_SELECTOR =
 export const QUALITY_STORAGE_KEY = "live-player-video-track";
 
 const MAX_TRACKS = 64;
-const RETRY_DELAYS_MS = [0, 50, 250];
+const RETRY_DELAYS_MS = [0, 50, 250, 1000, 3000];
 const MANUAL_QUALITY_LABEL_RE = /^\d{3,4}p$/i;
 const TRACK_LIST_EVENT_TYPES = ["addtrack", "removetrack", "change"];
 
