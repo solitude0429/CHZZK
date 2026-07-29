@@ -16,7 +16,7 @@ const fixtureDomains = ["livecloud.akamaized.net", "updates.chzzk.test", "www.ch
 const fixedZipDate = new Date("1980-01-01T00:00:00.000Z");
 const fixturePlaylistPollIntervalMs = 700;
 const serverArrivalToleranceMs = 250;
-const historicalControllerlessVersion = "0.1.18";
+const previousReleaseVersion = "0.1.21";
 const productionManifest = JSON.parse(readFileSync(join(repoRoot, "manifest.json"), "utf8"));
 const productionPolicy = JSON.parse(readFileSync(join(repoRoot, "policy/quality-policy.json"), "utf8"));
 const testPolicy = {
@@ -50,22 +50,30 @@ async function poll(action, { intervalMs = 100, timeoutMs = 15000 } = {}) {
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
-async function makeExtensionXpi({ includePlayerController = true, outputPath, port, runtimeDir, version }) {
+async function makeExtensionXpi({
+  includeLegacyPlayerController = false,
+  includePlayerController = true,
+  outputPath,
+  port,
+  runtimeDir,
+  version,
+}) {
   const manifest = {
     ...productionManifest,
     version,
     permissions: includePlayerController
       ? productionManifest.permissions
       : productionManifest.permissions.filter((permission) => permission !== "scripting"),
-    content_scripts: includePlayerController
-      ? productionManifest.content_scripts
-      : [
-          {
-            js: ["site-observer.js"],
-            matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
-            run_at: "document_start",
-          },
-        ],
+    content_scripts:
+      includePlayerController || includeLegacyPlayerController
+        ? productionManifest.content_scripts
+        : [
+            {
+              js: ["site-observer.js"],
+              matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
+              run_at: "document_start",
+            },
+          ],
     background: {
       persistent: true,
       scripts: ["background.js", "e2e-error-observer.js"],
@@ -91,6 +99,36 @@ async function makeExtensionXpi({ includePlayerController = true, outputPath, po
   ];
   if (includePlayerController) {
     files.push(["player-controller.js", join(runtimeDir, "player-controller.js")]);
+  } else if (includeLegacyPlayerController) {
+    zip.file(
+      "player-controller.js",
+      Buffer.from(`(() => {
+  const state = { routeCalls: 0, writes: 0 };
+  Object.defineProperty(globalThis, "__chzzkLegacyControllerState", {
+    configurable: true,
+    value: state,
+  });
+  const demote = () => {
+    const tracks = document.querySelector("#live_player_layout > pzp-pc-layout")?.videoTracks;
+    const low = Array.from(tracks ?? []).find((track) => track?.label === "720p");
+    if (!low || low.selected === true) return;
+    low.selected = true;
+    state.writes += 1;
+  };
+  addEventListener("resize", demote);
+  document.addEventListener("loadedmetadata", demote, true);
+  const originalPushState = history.pushState;
+  history.pushState = function (...args) {
+    const result = Reflect.apply(originalPushState, this, args);
+    state.routeCalls += 1;
+    demote();
+    return result;
+  };
+  setTimeout(demote, 0);
+})();
+`),
+      { date: fixedZipDate, unixPermissions: 0o100644 },
+    );
   }
   files.push(["site-observer.js", join(runtimeDir, "site-observer.js")]);
   zip.file("manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`), {
@@ -299,6 +337,8 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     let selected = value.selected === true;
     const track = { label: value.label, width: value.width, height: value.height };
     Object.defineProperty(track, "selected", {
+      configurable: true,
+      enumerable: true,
       get() { return selected; },
       set(next) {
         selected = next === true;
@@ -374,6 +414,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     pendingMode: null,
     pageDemotions: 0,
     pageDemotionAt: null,
+    pageDemotionTimes: [],
     playbackEvents: {
       emptied: 0,
       playing: 0,
@@ -386,6 +427,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     selectionCommits: [],
     selectionIgnores: [],
     selectionRequests: [],
+    nativeFilterResets: 0,
     silentExpansionAt: null,
     silentExpansions: 0,
   };
@@ -393,7 +435,11 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   let generation = 0;
   let masterLoaded = false;
   let maximumAllowedHeight = 1080;
+  let mountedLayout = null;
+  let mountedPane = null;
+  let mountedTracks = null;
   let recoveryExpansionTimer = null;
+  const recoveryDemotionTimers = new Set();
   let recoveryMode = false;
   let remountTimer = null;
 
@@ -430,11 +476,13 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     const previousLayout = document.getElementById("live_player_layout");
     const layout = document.createElement("div");
     layout.id = "live_player_layout";
-    const player = document.createElement("pzp-pc-layout");
-    const pane = document.createElement("pzp-pc-setting-quality-pane");
+    const playerHost = document.createElement("div");
+    playerHost.className = "pzp fixture-player-host";
+    const pane = document.createElement("div");
+    pane.className = "pzp-setting-quality-pane";
+    const internalPlayer = {};
     const trackEvents = new EventTarget();
     const tracks = [];
-    const pageSelections = [];
     tracks.selectedIndex = -1;
     tracks.addEventListener = trackEvents.addEventListener.bind(trackEvents);
     tracks.removeEventListener = trackEvents.removeEventListener.bind(trackEvents);
@@ -444,7 +492,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       const index = tracks.length;
       let pending = false;
       let selected = value.selected === true;
-      const track = { height: value.height, label: value.label, width: value.width };
+      let track;
       const applySelection = () => {
         selected = true;
         tracks.selectedIndex = index;
@@ -452,7 +500,10 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           if (otherIndex !== index) otherTrack.selected = false;
         }
       };
-      Object.defineProperty(track, "selected", {
+      const trackPrototype = {};
+      Object.defineProperty(trackPrototype, "selected", {
+        configurable: true,
+        enumerable: true,
         get() { return selected; },
         set(next) {
           if (next !== true) {
@@ -466,7 +517,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             label: track.label,
           });
           if (pending || selected) return;
-          if (recoveryMode && track.height > maximumAllowedHeight) {
+          if (track.label !== "ABR" && pane.filter(track) !== true) {
             state.selectionIgnores.push({
               at: requestedAt,
               generation: currentGeneration,
@@ -478,11 +529,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           pending = true;
           setTimeout(() => {
             pending = false;
-            if (
-              document.querySelector("#live_player_layout > pzp-pc-layout") !== player
-            ) {
-              return;
-            }
+            if (document.getElementById("live_player_layout") !== layout) return;
             applySelection();
             state.selectionCommits.push({
               at: performance.now(),
@@ -492,20 +539,49 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           }, 20);
         },
       });
-      pageSelections[index] = applySelection;
+      track = Object.assign(Object.create(trackPrototype), {
+        height: value.height,
+        label: value.label,
+        width: value.width,
+      });
       tracks.push(track);
       if (selected) tracks.selectedIndex = index;
     };
 
-    addTrack({ height: 1080, label: "ABR", selected: true, width: 1920 });
-    addTrack({ height: 720, label: "720p", width: 1280 });
+    addTrack({
+      height: 1080,
+      label: "ABR",
+      selected: mode !== "compact",
+      width: 1920,
+    });
+    addTrack({
+      height: 720,
+      label: "720p",
+      selected: mode === "compact",
+      width: 1280,
+    });
     addTrack({ height: 1080, label: "1080p", width: 1920 });
-    player.videoTracks = tracks;
-    maximumAllowedHeight = 1080;
+    internalPlayer.videoTracks = tracks;
+    maximumAllowedHeight = mode === "compact" ? 720 : 1080;
     pane.filter = (track) => track.label !== "ABR" && track.height <= maximumAllowedHeight;
-    currentPageSelect = (index) => pageSelections[index]?.();
-    player.append(video);
-    layout.append(player, pane);
+    currentPageSelect = (index) => {
+      if (tracks[index]) tracks[index].selected = true;
+    };
+    const playerWrapper = { _internalPlayer: internalPlayer };
+    Object.defineProperty(playerWrapper, "videoTracks", {
+      get: () => tracks,
+    });
+    const effect = { deps: [playerWrapper], next: null };
+    const componentFiber = {
+      memoizedState: { memoizedState: effect, next: null },
+      return: null,
+    };
+    Object.defineProperty(layout, "__reactFiber$chzzkFixture", {
+      configurable: true,
+      value: { return: componentFiber },
+    });
+    playerHost.append(video);
+    layout.append(playerHost, pane);
     if (previousLayout) {
       previousLayout.insertAdjacentElement("afterend", layout);
       previousLayout.remove();
@@ -515,7 +591,64 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     state.mode = mode;
     state.mountModes.push(mode);
     state.pendingMode = null;
-    player.dispatchEvent(new Event("loadedmetadata"));
+    mountedLayout = layout;
+    mountedPane = pane;
+    mountedTracks = tracks;
+    video.dispatchEvent(new Event("loadedmetadata", { bubbles: true, composed: true }));
+  };
+
+  const clearRecoveryDemotions = () => {
+    for (const timer of recoveryDemotionTimers) clearTimeout(timer);
+    recoveryDemotionTimers.clear();
+  };
+
+  const applyCompactDemotion = () => {
+    if (state.mode !== "compact" || !mountedPane || !mountedTracks) return;
+    maximumAllowedHeight = 720;
+    mountedPane.filter = (track) => track.label !== "ABR" && track.height <= maximumAllowedHeight;
+    state.nativeFilterResets += 1;
+    state.pageDemotions += 1;
+    const demotedAt = performance.now();
+    state.pageDemotionAt ??= demotedAt;
+    state.pageDemotionTimes.push(demotedAt);
+    localStorage.setItem(
+      "live-player-video-track",
+      JSON.stringify({ label: "720p", width: 1280, height: 720 }),
+    );
+    currentPageSelect?.(1);
+    setTimeout(() => {
+      const selectedIndex = Number(mountedTracks?.selectedIndex);
+      const selected = Number.isSafeInteger(selectedIndex) ? mountedTracks?.[selectedIndex] : null;
+      if (selected?.label !== "720p") return;
+      video.dispatchEvent(new Event("waiting", { bubbles: true, composed: true }));
+      setTimeout(() => {
+        state.compactSettledAt = performance.now();
+        video.dispatchEvent(new Event("playing", { bubbles: true, composed: true }));
+        video.dispatchEvent(new Event("canplay", { bubbles: true, composed: true }));
+      }, 75);
+    }, 25);
+  };
+
+  const scheduleRecoveryTimer = (callback, delayMs) => {
+    const timer = setTimeout(() => {
+      recoveryDemotionTimers.delete(timer);
+      callback();
+    }, delayMs);
+    recoveryDemotionTimers.add(timer);
+  };
+
+  const scheduleRemainingCompactDemotions = (remaining) => {
+    if (remaining <= 0 || state.mode !== "compact") return;
+    const selectedIndex = Number(mountedTracks?.selectedIndex);
+    const selected = Number.isSafeInteger(selectedIndex) ? mountedTracks?.[selectedIndex] : null;
+    if (selected?.label !== "1080p") {
+      scheduleRecoveryTimer(() => scheduleRemainingCompactDemotions(remaining), 100);
+      return;
+    }
+    scheduleRecoveryTimer(() => {
+      applyCompactDemotion();
+      scheduleRemainingCompactDemotions(remaining - 1);
+    }, 400);
   };
 
   const requestResponsiveMount = () => {
@@ -527,19 +660,18 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       state.pendingMode = null;
       state.sameNodeModes.push(nextMode);
       if (nextMode === "compact") {
-        maximumAllowedHeight = 720;
-        state.pageDemotions += 1;
-        state.pageDemotionAt = performance.now();
-        currentPageSelect?.(1);
-        video.dispatchEvent(new Event("waiting", { bubbles: true, composed: true }));
-        setTimeout(() => {
-          state.compactSettledAt = performance.now();
-          video.dispatchEvent(new Event("playing", { bubbles: true, composed: true }));
-          video.dispatchEvent(new Event("canplay", { bubbles: true, composed: true }));
-        }, 75);
+        clearRecoveryDemotions();
+        applyCompactDemotion();
+        scheduleRemainingCompactDemotions(3);
       } else {
+        clearRecoveryDemotions();
         recoveryExpansionTimer = setTimeout(() => {
           maximumAllowedHeight = 1080;
+          if (mountedPane) {
+            mountedPane.filter = (track) =>
+              track.label !== "ABR" && track.height <= maximumAllowedHeight;
+            state.nativeFilterResets += 1;
+          }
           state.silentExpansionAt = performance.now();
           state.silentExpansions += 1;
         }, 400);
@@ -581,8 +713,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
   };
 
   const snapshot = () => {
-    const player = document.querySelector("#live_player_layout > pzp-pc-layout");
-    const tracks = player?.videoTracks;
+    const layout = document.getElementById("live_player_layout");
+    const pane = layout === mountedLayout ? mountedPane : null;
+    const tracks = layout === mountedLayout ? mountedTracks : null;
     const selectedIndex = Number(tracks?.selectedIndex);
     const selected = Number.isSafeInteger(selectedIndex) ? tracks[selectedIndex] : null;
     let stored = null;
@@ -591,6 +724,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     } catch {}
     return {
       compactSettledAt: state.compactSettledAt,
+      filterAllowsSelected: selected ? pane?.filter?.(selected) === true : null,
+      nativeFilterAllowsSelected:
+        selected?.label === "ABR" ? false : selected?.height <= maximumAllowedHeight,
       frameCallbackSupported: state.frameCallbackSupported,
       generation,
       hls: state.hls.slice(),
@@ -601,6 +737,7 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       mountModes: state.mountModes.slice(),
       pageDemotions: state.pageDemotions,
       pageDemotionAt: state.pageDemotionAt,
+      pageDemotionTimes: state.pageDemotionTimes.slice(),
       pendingMode: state.pendingMode,
       playback: {
         canvasFrames: state.canvasFrames,
@@ -616,6 +753,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         videoWidth: video.videoWidth,
       },
       resizeEvents: state.resizeEvents,
+      nativeFilterResets: state.nativeFilterResets,
+      reactBridgeOnly:
+        layout?.querySelector("pzp-pc-layout") == null && layout?.videoTracks == null,
       sameNodeModes: state.sameNodeModes.slice(),
       selectedLabel: selected?.label ?? null,
       selectionCommits: state.selectionCommits.slice(),
@@ -1123,9 +1263,9 @@ async function waitForResponsivePlayback(
   );
 }
 
-async function waitForResponsiveCompactDemotion(
+async function waitForResponsiveCompactRecovery(
   driver,
-  { generation, minimumCurrentTime, minimumPlayingEvents, minimumRenderedFrames, minimumWaitingEvents },
+  { generation, minimumCurrentTime, minimumRenderedFrames },
 ) {
   return poll(
     async () => {
@@ -1139,17 +1279,15 @@ async function waitForResponsiveCompactDemotion(
         fixture.generation !== generation ||
         fixture.mode !== "compact" ||
         fixture.pendingMode != null ||
-        fixture.pageDemotions !== 1 ||
-        fixture.selectedLabel !== "720p" ||
+        fixture.pageDemotions !== 4 ||
+        fixture.selectedLabel !== "1080p" ||
         fixture.stored?.label !== "1080p" ||
         fixture.stored?.height !== 1080 ||
-        fixture.selectionIgnores.length < 1 ||
+        fixture.selectionIgnores.length !== 0 ||
         playback.connected !== true ||
         playback.currentTime < minimumCurrentTime ||
         playback.errorCode != null ||
         playback.paused !== false ||
-        playback.events.playing < minimumPlayingEvents ||
-        playback.events.waiting < minimumWaitingEvents ||
         playback.readyState < 3 ||
         playback.renderedFrames < minimumRenderedFrames ||
         playback.streamActive !== true
@@ -1158,7 +1296,7 @@ async function waitForResponsiveCompactDemotion(
       }
       return fixture;
     },
-    { intervalMs: 50, timeoutMs: 5000 },
+    { intervalMs: 50, timeoutMs: 15000 },
   );
 }
 
@@ -1240,6 +1378,8 @@ const addTrack = (value) => {
   let selected = value.selected === true;
   const track = { label: value.label, width: value.width, height: value.height };
   Object.defineProperty(track, "selected", {
+    configurable: true,
+    enumerable: true,
     get() { return selected; },
     set(next) {
       selected = next === true;
@@ -1296,14 +1436,15 @@ async function main() {
     state.port = await listen(server);
     await buildFixtureRuntime(runtimeDir);
     const updateVersion = productionManifest.version;
-    const oldXpiPath = join(workDir, `chzzk-${historicalControllerlessVersion}.xpi`);
+    const oldXpiPath = join(workDir, `chzzk-${previousReleaseVersion}.xpi`);
     const updateXpiPath = join(workDir, `chzzk-${updateVersion}.xpi`);
     const oldXpiBytes = await makeExtensionXpi({
+      includeLegacyPlayerController: true,
       includePlayerController: false,
       outputPath: oldXpiPath,
       port: state.port,
       runtimeDir,
-      version: historicalControllerlessVersion,
+      version: previousReleaseVersion,
     });
     state.updateXpiBytes = await makeExtensionXpi({
       outputPath: updateXpiPath,
@@ -1313,24 +1454,17 @@ async function main() {
     });
     const oldArchive = await JSZip.loadAsync(oldXpiBytes);
     const oldManifestEntry = oldArchive.file("manifest.json");
-    assert.ok(oldManifestEntry, "the controller-less XPI must contain a manifest");
+    assert.ok(oldManifestEntry, "the previous-release fixture XPI must contain a manifest");
     const oldManifest = JSON.parse(await oldManifestEntry.async("string"));
     assert.equal(
       oldManifest.permissions.includes("scripting"),
       false,
-      "the synthetic 0.1.18 XPI must not inherit the later scripting permission",
+      "the previous-release fixture must retain the production permission surface",
     );
-    assert.deepEqual(oldManifest.content_scripts, [
-      {
-        js: ["site-observer.js"],
-        matches: ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
-        run_at: "document_start",
-      },
-    ]);
-    assert.equal(
+    assert.deepEqual(oldManifest.content_scripts, productionManifest.content_scripts);
+    assert.ok(
       oldArchive.file("player-controller.js"),
-      null,
-      "the synthetic 0.1.18 XPI must not contain the later player controller",
+      "the previous-release fixture must exercise a legacy MAIN-world controller",
     );
     const updateArchive = await JSZip.loadAsync(state.updateXpiBytes);
     assert.ok(
@@ -1375,7 +1509,7 @@ async function main() {
     const before = await installedAddon(driver);
     assert.equal(before?.active, true);
     assert.equal(before?.id, addOnId);
-    assert.equal(before?.version, historicalControllerlessVersion);
+    assert.equal(before?.version, previousReleaseVersion);
     assert.match(before?.baseUrl ?? "", /^moz-extension:\/\//);
 
     await driver.setContext("content");
@@ -1395,21 +1529,28 @@ async function main() {
       (request) => request.host === "www.chzzk.naver.com" && request.path === "/live/update-open",
     ).length;
     assert.equal(updateOpenRequestsBefore, 1);
-    const updateOpenBefore = await driver.execute(`const player =
+    const updateOpenBefore = await poll(async () => {
+      const snapshot = await driver.execute(`const player =
   document.querySelector("#live_player_layout > pzp-pc-layout");
 const tracks = player && player.videoTracks;
 return {
   documentToken: window.__chzzkUpdateDocumentToken ?? null,
+  legacyRouteCalls: window.__chzzkLegacyControllerState?.routeCalls ?? null,
+  legacyWrites: window.__chzzkLegacyControllerState?.writes ?? null,
   navigationEntryCount: performance.getEntriesByType("navigation").length,
   selectedLabel: tracks?.[tracks.selectedIndex]?.label ?? null,
   storageValue: localStorage.getItem("live-player-video-track"),
   timeOrigin: performance.timeOrigin,
   url: location.href,
 };`);
+      return snapshot?.selectedLabel === "720p" && snapshot?.legacyWrites === 1 ? snapshot : null;
+    });
     assert.deepEqual(updateOpenBefore, {
       documentToken: "update-open-1",
+      legacyRouteCalls: 0,
+      legacyWrites: 1,
       navigationEntryCount: 1,
-      selectedLabel: "ABR",
+      selectedLabel: "720p",
       storageValue: null,
       timeOrigin: updateOpenBefore.timeOrigin,
       url: updateOpenUrl,
@@ -1439,29 +1580,20 @@ return {
     );
 
     await driver.setContext("content");
-    const initialFallbackState = await poll(async () => {
-      const fixture = await driver.execute("return window.__chzzkInitialQualityFixture?.snapshot() ?? null;");
-      return fixture?.selectedLabel === "720p" ? fixture : null;
-    });
-    assert.deepEqual(initialFallbackState, {
-      selectedLabel: "720p",
-      selectionLabels: ["720p"],
-      silentExpansions: 0,
-    });
-    const expandedInitialFixture = await driver.execute(
-      "return window.__chzzkInitialQualityFixture?.expandSilently() ?? null;",
-    );
-    assert.deepEqual(expandedInitialFixture, {
-      selectedLabel: "720p",
-      selectionLabels: ["720p"],
-      silentExpansions: 1,
-    });
     const updatedOpenPlayerState = await selectedPlayerQuality(driver);
     assert.deepEqual(updatedOpenPlayerState, {
       selected: { label: "1080p", width: 1920, height: 1080 },
       stored: { label: "1080p", width: 1920, height: 1080 },
     });
     assert.deepEqual(await driver.execute("return window.__chzzkInitialQualityFixture.snapshot();"), {
+      selectedLabel: "1080p",
+      selectionLabels: ["720p", "1080p"],
+      silentExpansions: 0,
+    });
+    const expandedInitialFixture = await driver.execute(
+      "return window.__chzzkInitialQualityFixture?.expandSilently() ?? null;",
+    );
+    assert.deepEqual(expandedInitialFixture, {
       selectedLabel: "1080p",
       selectionLabels: ["720p", "1080p"],
       silentExpansions: 1,
@@ -1485,14 +1617,40 @@ return {
       updateOpenRequestsBefore,
       "the open CHZZK document must not navigate or reload during the extension update",
     );
+    const legacyLifecycleBefore = await driver.execute(`return window.__chzzkLegacyControllerState
+  ? {
+      routeCalls: window.__chzzkLegacyControllerState.routeCalls,
+      writes: window.__chzzkLegacyControllerState.writes,
+    }
+  : null;`);
+    await driver.execute(`history.pushState({}, "", "/live/update-open?lifecycle-probe=1");
+dispatchEvent(new Event("resize"));`);
+    await delay(300);
+    const legacyLifecycleAfter = await driver.execute(`return window.__chzzkLegacyControllerState
+  ? {
+      routeCalls: window.__chzzkLegacyControllerState.routeCalls,
+      writes: window.__chzzkLegacyControllerState.writes,
+    }
+  : null;`);
+    if (legacyLifecycleBefore) {
+      assert.deepEqual(legacyLifecycleAfter, {
+        routeCalls: legacyLifecycleBefore.routeCalls + 1,
+        writes: legacyLifecycleBefore.writes + 2,
+      });
+    }
+    assert.deepEqual(await driver.execute("return window.__chzzkInitialQualityFixture.snapshot();"), {
+      selectedLabel: "1080p",
+      selectionLabels: ["720p", "1080p"],
+      silentExpansions: 1,
+    });
     assert.equal(
       await driver.execute(`const tracks =
   document.querySelector("#live_player_layout > pzp-pc-layout").videoTracks;
 tracks[0].selected = true;
 tracks.dispatchEvent(new Event("change"));
 return tracks[tracks.selectedIndex].label;`),
-      "ABR",
-      "the fixture must expose a real post-update ABR reversion before controller recovery",
+      "1080p",
+      "the synchronous guard allowed a post-update ABR demotion to reach the player",
     );
     assert.equal((await selectedPlayerQuality(driver)).selected.label, "1080p");
 
@@ -1503,19 +1661,22 @@ return tracks[tracks.selectedIndex].label;`),
     assert.equal(await mountSpaPlayerFromHome(driver), "/live/spa-entry");
     const spaEntryPlayerState = await selectedPlayerQuality(driver);
     assert.equal(spaEntryPlayerState.selected.label, "1080p");
-    const ineligibleSelection = await driver.execute(`history.pushState({}, "", "/following");
+    const followingSelection = await driver.execute(`history.pushState({}, "", "/following");
 const tracks = document.querySelector("#live_player_layout > pzp-pc-layout").videoTracks;
 tracks[0].selected = true;
 tracks.dispatchEvent(new Event("change"));
 return tracks.selectedIndex;`);
-    assert.equal(ineligibleSelection, 0);
-    await delay(400);
+    assert.equal(followingSelection, 2);
+    assert.equal(
+      (await selectedPlayerQuality(driver)).selected.label,
+      "1080p",
+      "the MAIN-world controller must keep the mini-player at the highest quality on /following",
+    );
     assert.equal(
       await driver.execute(`const tracks =
   document.querySelector("#live_player_layout > pzp-pc-layout").videoTracks;
 return tracks[tracks.selectedIndex].label;`),
-      "ABR",
-      "the MAIN-world controller must not force a track after leaving an eligible player route",
+      "1080p",
     );
     await driver.execute(`history.pushState({}, "", "/live/spa-return?from=following");
     document
@@ -1562,6 +1723,17 @@ return tracks[tracks.selectedIndex].label;`),
       "Firefox did not dispatch a resize event for the physical compact transition",
     );
     assert.deepEqual(responsiveCompactState.mountModes, ["wide", "compact"]);
+    assert.equal(
+      responsiveCompactState.filterAllowsSelected,
+      true,
+      "the controller did not override the compact filter for the concrete 1080p track",
+    );
+    assert.equal(
+      responsiveCompactState.nativeFilterAllowsSelected,
+      false,
+      "the responsive remount did not exercise the page's native compact veto",
+    );
+    assert.equal(responsiveCompactState.reactBridgeOnly, true);
     assertResponsiveSelection(responsiveCompactState, 2);
     assertResponsivePlaybackContinued(responsiveInitialState, responsiveCompactState);
     await probeResponsiveHls(driver, "compact");
@@ -1610,6 +1782,15 @@ return tracks[tracks.selectedIndex].label;`),
       false,
       "observed resize-fixture master evidence triggered an unavailable upper-tier probe",
     );
+    assert.equal(
+      responsiveRequests.some(
+        (request) =>
+          request.host === "livecloud.akamaized.net" &&
+          /\/resize-fixture\/(?:480p|720p)\//.test(request.path),
+      ),
+      false,
+      "a responsive phase reached a lower rendition instead of the redirected 1080p target",
+    );
 
     const responsiveRemountState = responsiveWideState;
     await driver.command("POST", "/url", {
@@ -1630,54 +1811,41 @@ return tracks[tracks.selectedIndex].label;`),
       true,
       "Firefox did not enter compact mode for same-node recovery",
     );
-    const sameNodeCompactState = await waitForResponsiveCompactDemotion(driver, {
+    const sameNodeCompactState = await waitForResponsiveCompactRecovery(driver, {
       generation: 1,
       minimumCurrentTime: sameNodeBaseline.playback.currentTime + 0.25,
-      minimumPlayingEvents: sameNodeBaseline.playback.events.playing + 1,
       minimumRenderedFrames: sameNodeBaseline.playback.renderedFrames + 3,
-      minimumWaitingEvents: sameNodeBaseline.playback.events.waiting + 1,
     });
     assert.deepEqual(sameNodeCompactState.mountModes, ["wide"]);
     assert.deepEqual(sameNodeCompactState.sameNodeModes, ["compact"]);
-    assert.equal(sameNodeCompactState.pageDemotions, 1);
-    assert.equal(sameNodeCompactState.selectedLabel, "720p");
+    assert.equal(sameNodeCompactState.pageDemotions, 4);
+    assert.equal(sameNodeCompactState.pageDemotionTimes.length, 4);
+    assert.equal(sameNodeCompactState.nativeFilterResets, 4);
+    assert.equal(sameNodeCompactState.selectedLabel, "1080p");
     assert.equal(sameNodeCompactState.stored?.height, 1080);
     assert.equal(sameNodeCompactState.selectionCommits.length, sameNodeBaselineCommits);
-    assert.equal(
-      sameNodeCompactState.selectionRequests.length,
-      sameNodeBaselineRequests + sameNodeCompactState.selectionIgnores.length,
-    );
-    assert.equal(sameNodeCompactState.selectionIgnores.length >= 1, true);
-    assert.equal(sameNodeCompactState.selectionIgnores.length <= 2, true);
+    assert.equal(sameNodeCompactState.selectionRequests.length, sameNodeBaselineRequests);
+    assert.equal(sameNodeCompactState.selectionIgnores.length, 0);
     assert.deepEqual(
-      sameNodeCompactState.selectionIgnores.map(({ generation, label }) => ({
-        generation,
-        label,
-      })),
-      Array.from({ length: sameNodeCompactState.selectionIgnores.length }, () => ({
-        generation: 1,
-        label: "1080p",
-      })),
-    );
-    assert.equal(
-      sameNodeCompactState.selectionIgnores[0].at >= sameNodeCompactState.pageDemotionAt,
-      true,
-      "the compact correction request predates the page-owned demotion",
-    );
-    assert.equal(
-      sameNodeCompactState.selectionIgnores[0].at - sameNodeCompactState.pageDemotionAt <= 250,
-      true,
-      "the compact correction was not requested within the immediate responsive window",
+      sameNodeCompactState.selectionRequests
+        .slice(sameNodeBaselineRequests)
+        .map(({ generation, label }) => ({ generation, label })),
+      [],
     );
     assert.equal(
       sameNodeCompactState.selectionCommits.some((entry) => entry.at >= sameNodeCompactState.pageDemotionAt),
       false,
-      "an ignored compact correction unexpectedly committed",
+      "a compact low-track attempt reached the page-owned setter instead of being synchronously suppressed",
     );
     assert.equal(
-      sameNodeCompactState.compactSettledAt > sameNodeCompactState.pageDemotionAt,
-      true,
-      "the compact fixture did not emit playback-settled evidence after its demotion",
+      sameNodeCompactState.compactSettledAt,
+      null,
+      "the guarded compact attempts unexpectedly entered a buffering cycle",
+    );
+    assert.equal(
+      sameNodeCompactState.playback.events.waiting,
+      sameNodeBaseline.playback.events.waiting,
+      "the synchronous lower-track guard did not prevent a waiting event",
     );
     assert.equal(
       sameNodeCompactState.playback.events.stalled,
@@ -1708,27 +1876,24 @@ return tracks[tracks.selectedIndex].label;`),
     });
     assert.deepEqual(sameNodeWideState.mountModes, ["wide"]);
     assert.deepEqual(sameNodeWideState.sameNodeModes, ["compact", "wide"]);
-    assert.equal(sameNodeWideState.pageDemotions, 1);
+    assert.equal(sameNodeWideState.pageDemotions, 4);
     assert.equal(sameNodeWideState.silentExpansions, 1);
-    assert.equal(sameNodeWideState.selectionIgnores.length >= 1, true);
-    assert.equal(sameNodeWideState.selectionIgnores.length <= 2, true);
-    assert.equal(
-      sameNodeWideState.selectionRequests.length,
-      sameNodeBaselineRequests + 1 + sameNodeWideState.selectionIgnores.length,
-    );
-    assert.equal(sameNodeWideState.selectionCommits.length, sameNodeBaselineCommits + 1);
+    assert.equal(sameNodeWideState.nativeFilterResets, 5);
+    assert.equal(sameNodeWideState.selectionIgnores.length, 0);
+    assert.equal(sameNodeWideState.selectionRequests.length, sameNodeCompactState.selectionRequests.length);
+    assert.equal(sameNodeWideState.selectionCommits.length, sameNodeCompactState.selectionCommits.length);
     assert.equal(Number.isFinite(sameNodeWideState.silentExpansionAt), true);
     assert.deepEqual(
       sameNodeWideState.selectionRequests
         .filter((entry) => entry.at >= sameNodeWideState.silentExpansionAt)
         .map(({ generation, label }) => ({ generation, label })),
-      [{ generation: 1, label: "1080p" }],
+      [],
     );
     assert.deepEqual(
       sameNodeWideState.selectionCommits
         .filter((entry) => entry.at >= sameNodeWideState.silentExpansionAt)
         .map(({ generation, label }) => ({ generation, label })),
-      [{ generation: 1, label: "1080p" }],
+      [],
     );
     assertResponsivePlaybackContinued(sameNodeCompactState, sameNodeWideState);
     await probeResponsiveHls(driver, "wide-recovered");
@@ -1743,6 +1908,28 @@ setTimeout(() => done(window.__chzzkResponsiveFixture.snapshot()), 1600);`,
     assert.equal(stableRecoveryState.selectionIgnores.length, sameNodeWideState.selectionIgnores.length);
     assert.equal(stableRecoveryState.selectedLabel, "1080p");
     assert.equal(stableRecoveryState.stored?.height, 1080);
+
+    const coldCompactRect = await driver.setWindowRect({ height: 800, width: 560 });
+    assert.equal(coldCompactRect.width <= 700, true, "Firefox did not retain the compact viewport");
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/live/resize-test?cold-compact=1`,
+    });
+    const coldCompactState = await waitForResponsivePlayback(driver, {
+      generation: 1,
+      mode: "compact",
+    });
+    assert.deepEqual(coldCompactState.mountModes, ["compact"]);
+    assert.equal(
+      coldCompactState.filterAllowsSelected,
+      true,
+      "the cold compact controller did not override the native filter veto",
+    );
+    assert.equal(coldCompactState.nativeFilterAllowsSelected, false);
+    assert.equal(coldCompactState.reactBridgeOnly, true);
+    assertResponsiveSelection(coldCompactState, 1);
+    await probeResponsiveHls(driver, "cold-compact");
+    const postColdCompactRect = await driver.setWindowRect({ height: 800, width: 1200 });
+    assert.equal(postColdCompactRect.width >= 1000, true, "Firefox did not leave cold compact mode");
 
     const requestCountBeforePlayback = requests.length;
     await driver.command("POST", "/url", { url: `https://www.chzzk.naver.com:${state.port}/live/test` });
@@ -2116,13 +2303,14 @@ browser.storage.local.get("chzzkDiagnostics").then(
         cacheRevalidation: "304",
         canvasCapturePlayback: "real-media-progress-without-post-baseline-stall-events",
         clientFragmentNormalized: true,
+        coldCompactPlayerSelection: "filter-vetoed-1080p",
         firefox: basename(firefoxBinary),
         functionalOnly: true,
         gapSegmentRecovery: "1080p-gap-to-720p-to-1080p",
         manifestScope: "production-required-permissions",
         installedAfter: after.version,
         installedBefore: before.version,
-        initialPlayerRecovery: "silent-720p-to-1080p",
+        initialPlayerRecovery: "cold-filter-vetoed-1080p",
         liveToMiniTransition: "background-acknowledged-in-flight-master-pushState",
         masterResponsePreselection: true,
         miniPlayerCycles: 4,
@@ -2137,7 +2325,7 @@ browser.storage.local.get("chzzkDiagnostics").then(
         playerStorageQuality: miniPlayerState.stored.label,
         queryPreserved: true,
         responsivePlayerRemounts: responsiveRemountState.generation,
-        responsiveSameNodeRecovery: "compact-720p-intent-preserved-wide-silent-1080p-recovered",
+        responsiveSameNodeRecovery: "compact-low-track-setters-suppressed-without-buffering",
         updatePath: "AddonManager.findUpdates",
       }),
     );
