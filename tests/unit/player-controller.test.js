@@ -1883,6 +1883,50 @@ describe("CHZZK player highest-quality controller", () => {
     harness.controller.stop();
   });
 
+  it("preserves an in-flight highest-track confirmation across player-root mutation evidence", () => {
+    let pendingApply = null;
+    const fixture = playerFixture(
+      [
+        { height: 1080, label: "ABR", selected: true, width: 1920 },
+        { height: 1080, label: "1080p", width: 1920 },
+      ],
+      {
+        onSelectionWrite({ apply }) {
+          pendingApply = apply;
+        },
+      },
+    );
+    const harness = controllerHarness(fixture);
+
+    harness.controller.start();
+    assert.equal(harness.flushTimer(), true);
+    assert.equal(fixture.selectionTrueWrites[1], 1);
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+
+    harness.dispatchMutation([
+      {
+        addedNodes: [fixture.root],
+        removedNodes: [],
+      },
+    ]);
+    assert.equal(harness.flushTimer(), true, "player-root evidence should enqueue an urgent scan");
+    assert.equal(harness.flushTimer(), true, "the urgent scan should observe the applying transaction");
+    assert.equal(
+      fixture.selectionTrueWrites[1],
+      1,
+      "the urgent scan must not duplicate the in-flight highest-track setter",
+    );
+    assert.equal(fixture.player.videoTracks.selectedIndex, 0);
+
+    pendingApply();
+    assert.equal(harness.flushTimer(), true, "the original confirmation should observe the apply");
+    assert.equal(fixture.player.videoTracks.selectedIndex, 1);
+    assert.equal(fixture.selectionTrueWrites[1], 1);
+    assert.equal(JSON.parse(fixture.stored.get(QUALITY_STORAGE_KEY)).height, 1080);
+    assert.equal(harness.pendingTimerCount(), 0);
+    harness.controller.stop();
+  });
+
   it("rate-limits ignored writes but keeps retrying until the highest track is accepted", () => {
     let harness;
     const writeTimes = [];

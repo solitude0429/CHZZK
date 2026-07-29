@@ -1233,10 +1233,6 @@ export function createHighestQualityPlayerController({
     if (armRechecks) armResponsiveRechecks();
     cancelScheduledScan();
     cancelResponsiveScan();
-    cancelSelectionConfirmation();
-    if (selectionTransaction?.phase === "applying") {
-      selectionTransaction.phase = "idle";
-    }
     responsiveTimer = setTimeoutImpl(() => {
       responsiveTimer = null;
       if (!active) return;
