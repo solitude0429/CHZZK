@@ -10,12 +10,13 @@
   },
   "overrides": {
     "adm-zip": "0.6.0",
-    "brace-expansion": "5.0.8",
-    "fast-uri": "3.1.4",
+    "brace-expansion": "5.0.9",
+    "fast-uri": "3.1.5",
+    "js-yaml": "4.3.1",
     "shell-quote": "1.10.0"
   },
   "scripts": {
-    "audit:deps": "npm audit --audit-level=moderate",
+    "audit:deps": "node scripts/audit-dependencies.js",
     "audit:package": "node scripts/verify-package.js",
     "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
@@ -52,7 +53,7 @@
     "globals": "17.7.0",
     "jszip": "3.10.1",
     "prettier": "3.9.6",
-    "web-ext": "10.5.0",
+    "web-ext": "10.6.0",
     "yaml": "2.9.0"
   }
 }
