@@ -35,15 +35,16 @@ const MAX_RELEASE_METADATA_BYTES = 512 * 1024;
 const MAX_SIGNATURE_METADATA_BYTES = 512 * 1024;
 const MAX_SOURCE_ARCHIVE_BYTES = 8 * 1024 * 1024;
 const MAX_SIGNED_XPI_BYTES = 16 * 1024 * 1024;
-export const RELEASE_VERSION = "0.1.22";
+export const RELEASE_VERSION = "0.1.23";
 export const RELEASE_ADD_ON_ID = "chzzk@solitude0429.local";
 const RELEASE_SOURCE_REPOSITORY = "solitude0429/CHZZK";
-export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk-updates.alpha-apple.dedyn.io/updates.json";
+export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk.home.arpa:8443/updates.json";
 const TRUSTED_ASSET_UPLOADER = Object.freeze({ login: "github-actions[bot]", type: "Bot" });
 
 export const RELEASE_PACKAGE_FILES = Object.freeze([
   "LICENSE",
   "NOTICE",
+  "ad-guard.css",
   "background.js",
   "diagnostics.html",
   "diagnostics.js",

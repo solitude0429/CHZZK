@@ -10,8 +10,10 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -29,6 +31,7 @@ const LOCK_ACQUIRE_TIMEOUT_MS = 5000;
 const LOCK_CONFLICT_WAIT_SECONDS = "1";
 const LOCK_RELEASE_TIMEOUT_MS = 5000;
 const LOCK_TERMINATION_TIMEOUT_MS = 1000;
+const LOCK_EXECUTABLE_CANDIDATES = Object.freeze(["/usr/bin/flock", "/run/current-system/sw/bin/flock"]);
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -143,10 +146,30 @@ function assertPrivateRegularFile(path, expectedUid) {
   return stat;
 }
 
+function protectedLockExecutable() {
+  for (const candidate of LOCK_EXECUTABLE_CANDIDATES) {
+    try {
+      const executable = realpathSync(candidate);
+      const metadata = statSync(executable);
+      if (
+        metadata.isFile() &&
+        metadata.uid === 0 &&
+        (metadata.mode & 0o022) === 0 &&
+        (metadata.mode & 0o111) !== 0
+      ) {
+        return executable;
+      }
+    } catch {
+      // Try the next fixed system profile. PATH lookup is intentionally forbidden.
+    }
+  }
+  throw new Error("A protected system flock executable is unavailable");
+}
+
 function startProcessBoundLock(lockPath) {
   const readyMarker = "chzzk-deployment-lock-ready\n";
   const child = spawn(
-    "/usr/bin/flock",
+    protectedLockExecutable(),
     [
       "--exclusive",
       "--timeout",
@@ -156,7 +179,7 @@ function startProcessBoundLock(lockPath) {
       lockPath,
       "/bin/sh",
       "-c",
-      `printf '${readyMarker}'; /bin/cat >/dev/null`,
+      `printf '${readyMarker}'; while IFS= read -r _line; do :; done`,
     ],
     { stdio: ["pipe", "pipe", "pipe"] },
   );

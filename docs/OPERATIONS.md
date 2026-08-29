@@ -55,12 +55,13 @@ gh release verify "v$VERSION" --repo solitude0429/CHZZK
   export -n BASHOPTS SHELLOPTS 2>/dev/null || true
   printf '%s\n' "$chzzk_deploy_token" |
     /usr/bin/env -i CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY=1 \
-      LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+      PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin \
       "/absolute/protected/chzzk-internal-update-deploy-bootstrap.mjs" \
       "<canonical published version>" \
       "solitude0429/CHZZK" \
       "$PWD" \
-      "/var/www/chzzk-updates"
+      "/srv/admin/chzzk-updates"
   chzzk_deploy_status=$?
   unset chzzk_deploy_token
   exit "$chzzk_deploy_status"
@@ -69,7 +70,7 @@ gh release verify "v$VERSION" --repo solitude0429/CHZZK
 
 The trusted parent shell disables command/input tracing before copying the token, then removes dynamic-loader, shell-startup, Node, proxy, and CA injection variables before starting even `/usr/bin/env`; do not replace that boundary with a one-line `GH_TOKEN=...` invocation. The bootstrap then requires the clean-parent marker and token on stdin, starts absolute system Node under a second empty environment, and requires the supplied checkout to equal trusted Git's canonical worktree root with the pinned repository origin. Only then does it verify that its own canonical `.mjs` path is outside that complete checkout, operator-owned with exact mode `0500`, and contained by a private operator-owned directory. It discovers only protected absolute system tools, creates a private GitHub CLI home, binds the canonical repository, clean checkout, and release to the protected remote head, Git-blob-verifies the deployment entrypoint and its complete local import graph, and executes those sealed bytes. It owns the artifact-download directory under its private execution tree so terminal child failure is cleaned by the parent. The checkout-local deployment entrypoint and an npm script are not public operational interfaces.
 
-Both the deployment and repository-settings polyglot bootstraps require protected root-owned `/usr/bin/node` as an explicit host prerequisite. Their shell launchers never search `PATH` or claim support for alternate Node locations.
+The deployment polyglot bootstrap accepts only the fixed protected system paths `/usr/bin/node` or `/run/current-system/sw/bin/node`; its Git and GitHub CLI candidates are likewise fixed, including the NixOS system profile. The repository-settings bootstrap continues to require `/usr/bin/node`. Neither launcher searches `PATH` for an executable.
 
 12. Verify live `updates.json` and XPI MIME type, SHA-256, version, add-on ID, minimum Firefox version, source commit, and stable symlink targets.
 13. Run the old-signed-to-new-signed stock-Firefox update smoke from `docs/TESTING.md`.

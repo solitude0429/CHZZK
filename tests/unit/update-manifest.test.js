@@ -32,7 +32,7 @@ function metadata() {
     sourceDigest: "b".repeat(40),
     sourceRepository: "solitude0429/CHZZK",
     strictMinVersion: "140.0",
-    updateManifestUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+    updateManifestUrl: "https://chzzk.home.arpa:8443/updates.json",
     version: "0.1.4",
   };
 }
@@ -48,10 +48,7 @@ describe("strict Firefox update manifest", () => {
       const update = document.addons["chzzk@solitude0429.local"].updates[0];
       assert.equal(update.version, "0.1.4");
       assert.equal(update.update_hash, `sha256:${sha256(signedBytes)}`);
-      assert.equal(
-        update.update_link,
-        "https://chzzk-updates.alpha-apple.dedyn.io/releases/0.1.4/chzzk-0.1.4-signed.xpi",
-      );
+      assert.equal(update.update_link, "https://chzzk.home.arpa:8443/releases/0.1.4/chzzk-0.1.4-signed.xpi");
       assert.deepEqual(
         validateUpdateManifestDocument(document, {
           expectedMetadata: metadata(),
@@ -90,7 +87,7 @@ describe("strict Firefox update manifest", () => {
       (() => {
         const copy = structuredClone(base);
         copy.addons[metadata().addOnId].updates[0].update_link =
-          "https://user:pass@chzzk-updates.alpha-apple.dedyn.io/releases/0.1.4/chzzk-0.1.4-signed.xpi?token=bad#fragment";
+          "https://user:pass@chzzk.home.arpa:8443/releases/0.1.4/chzzk-0.1.4-signed.xpi?token=bad#fragment";
         return copy;
       })(),
     ];

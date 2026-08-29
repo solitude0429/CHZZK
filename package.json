@@ -1,21 +1,22 @@
 {
   "name": "chzzk",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "private": true,
   "type": "module",
-  "description": "Personal Firefox WebExtension for tab-scoped CHZZK HLS session redirect hardening.",
+  "description": "Personal Firefox WebExtension for CHZZK ad removal and highest-quality playback.",
   "repository": {
     "type": "git",
     "url": "https://github.com/solitude0429/CHZZK.git"
   },
   "overrides": {
     "adm-zip": "0.6.0",
-    "brace-expansion": "5.0.8",
-    "fast-uri": "3.1.4",
+    "brace-expansion": "5.0.9",
+    "fast-uri": "3.1.5",
+    "js-yaml": "4.3.1",
     "shell-quote": "1.10.0"
   },
   "scripts": {
-    "audit:deps": "npm audit --audit-level=moderate",
+    "audit:deps": "node scripts/audit-dependencies.js",
     "audit:package": "node scripts/verify-package.js",
     "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests",
     "build:runtime": "node scripts/build-runtime.js",
@@ -32,7 +33,7 @@
     "test": "node --test tests/unit/*.test.js",
     "test:coverage": "npm run test:coverage:shared && npm run test:coverage:background",
     "test:coverage:background": "node scripts/verify-background-coverage.js",
-    "test:coverage:shared": "node --test --experimental-test-coverage --test-coverage-include=src/shared/**/*.js --test-coverage-lines=95 --test-coverage-branches=80 --test-coverage-functions=95 tests/unit/diagnostics.test.js tests/unit/playlist-evidence.test.js tests/unit/quality.test.js tests/unit/quality-validated-variants.test.js tests/unit/session-rules.test.js tests/unit/shared-edge-coverage.test.js",
+    "test:coverage:shared": "node --test --experimental-test-coverage --test-coverage-include=src/shared/**/*.js --test-coverage-lines=95 --test-coverage-branches=80 --test-coverage-functions=95 tests/unit/ad-request-policy.test.js tests/unit/diagnostics.test.js tests/unit/playlist-evidence.test.js tests/unit/quality.test.js tests/unit/quality-validated-variants.test.js tests/unit/session-rules.test.js tests/unit/shared-edge-coverage.test.js",
     "test:audit-fuzz": "node scripts/audit-fuzz.js",
     "test:firefox-e2e": "npm run test:firefox-functional-e2e",
     "test:firefox-functional-e2e": "node tests/e2e/firefox-update-playback.mjs",
@@ -52,7 +53,7 @@
     "globals": "17.7.0",
     "jszip": "3.10.1",
     "prettier": "3.9.6",
-    "web-ext": "10.5.0",
+    "web-ext": "10.6.0",
     "yaml": "2.9.0"
   }
 }

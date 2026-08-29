@@ -373,6 +373,48 @@ function familyRequest(tabId, family, requestId = undefined) {
 }
 
 describe("background runtime quality resolution", () => {
+  it("cancels only trusted CHZZK ad-state APIs and strips the live-detail detector token", async () => {
+    const { listeners } = await loadBackground();
+    const base = {
+      documentUrl: "https://chzzk.naver.com/live/channel-id",
+      initiator: "https://chzzk.naver.com",
+      method: "GET",
+      tabId: 42,
+      type: "xmlhttprequest",
+    };
+
+    assert.ok(listeners.filter.urls.includes("https://api.chzzk.naver.com/ad-polling/v1/lives/*/ad*"));
+    assert.deepEqual(
+      plain(
+        await listeners.onBeforeRequest({
+          ...base,
+          url: "https://api.chzzk.naver.com/ad-polling/v1/lives/live-id/ad?ts=123",
+        }),
+      ),
+      { cancel: true },
+    );
+    assert.deepEqual(
+      plain(
+        await listeners.onBeforeRequest({
+          ...base,
+          url: "https://api.chzzk.naver.com/service/v3/channels/channel-id/live-detail?dt=token&cu=1",
+        }),
+      ),
+      {
+        redirectUrl: "https://api.chzzk.naver.com/service/v3/channels/channel-id/live-detail?cu=1",
+      },
+    );
+    assert.equal(
+      await listeners.onBeforeRequest({
+        ...base,
+        documentUrl: "https://example.com/",
+        initiator: undefined,
+        url: "https://api.chzzk.naver.com/service/v1/lives/live-id/ads/current",
+      }),
+      undefined,
+    );
+  });
+
   it("does not hard-code a startup quality and redirects the first request to the highest supported candidate", async () => {
     const { fetches, listeners, storage } = await loadBackground({
       availableQualities: new Set(["1440p", "1080p"]),

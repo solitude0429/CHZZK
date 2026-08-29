@@ -1,4 +1,5 @@
 import policy from "../../policy/quality-policy.json";
+import { CHZZK_AD_WEB_REQUEST_URLS, chzzkAdRequestDecision } from "../shared/ad-request-policy.js";
 import {
   normalizeDiagnostics,
   recordDecision,
@@ -31,7 +32,7 @@ import { createSessionStateStore } from "./session-state-store.js";
 
 const api = globalThis.browser ?? globalThis.chrome;
 const STORAGE_KEY = "chzzkDiagnostics";
-const WEB_REQUEST_URLS = configuredWebRequestUrls(policy);
+const WEB_REQUEST_URLS = [...configuredWebRequestUrls(policy), ...CHZZK_AD_WEB_REQUEST_URLS].sort();
 const activeLiveTabIds = new Set();
 const liveContextByTab = new Map();
 const miniPlayerTabIds = new Set();
@@ -2218,6 +2219,8 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
 }
 
 function handleRequest(details) {
+  const adRequestDecision = chzzkAdRequestDecision(details);
+  if (adRequestDecision) return adRequestDecision;
   if (sweepExpiredSessionState()) scheduleRedirectDiagnostics();
   if (!isHlsPlaylistUrl(details?.url)) return undefined;
   // Firefox keeps requestId stable across redirects and invokes onBeforeRequest

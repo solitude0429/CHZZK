@@ -70,6 +70,7 @@ assert.deepEqual(
       run_at: "document_start",
     },
     {
+      css: ["ad-guard.css"],
       js: ["player-controller.js"],
       matches: ["https://*.chzzk.naver.com/*"],
       run_at: "document_start",
@@ -106,7 +107,7 @@ assert.deepEqual(
 );
 assert.equal(
   manifest.browser_specific_settings?.gecko?.update_url,
-  "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+  "https://chzzk.home.arpa:8443/updates.json",
   "Firefox auto-update manifest URL must remain stable",
 );
 assert.deepEqual(

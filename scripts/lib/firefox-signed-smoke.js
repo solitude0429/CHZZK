@@ -14,6 +14,7 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import JSZip from "jszip";
 
 import { MAX_AMO_JSON_BYTES, MAX_SIGNED_XPI_BYTES, assertReleaseMetadata } from "./amo-client.js";
 
@@ -30,6 +31,7 @@ const SUPPORTED_NODE_PLATFORMS = new Set([
   "win32",
 ]);
 const WEB_ELEMENT_ID = "element-6066-11e4-a52e-4f735466cecf";
+const MAX_SIGNED_MANIFEST_BYTES = 256 * 1024;
 
 function resolveInputPath(path, environmentName) {
   if (typeof path !== "string" || !path) throw new Error(`${environmentName} is required`);
@@ -136,6 +138,54 @@ export function validateSignedSmokeInputs(
     oldSignedXpiPath: mode === "update" ? oldSignedXpiPath : null,
     oldVersion,
   };
+}
+
+export async function readSignedXpiUpdateIdentity(path, { expectedAddOnId, expectedVersion }) {
+  const bytes = readFileSync(path);
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(bytes);
+  } catch (error) {
+    throw new Error(`Previous signed XPI is not a readable ZIP: ${error.message}`);
+  }
+  const entry = zip.file("manifest.json");
+  if (!entry || entry.dir || (entry.unsafeOriginalName && entry.unsafeOriginalName !== entry.name)) {
+    throw new Error("Previous signed XPI does not contain one safe manifest.json entry");
+  }
+  const manifestBytes = await entry.async("nodebuffer");
+  if (manifestBytes.length <= 0 || manifestBytes.length > MAX_SIGNED_MANIFEST_BYTES) {
+    throw new Error("Previous signed XPI manifest.json has an invalid size");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes.toString("utf8"));
+  } catch {
+    throw new Error("Previous signed XPI manifest.json is not valid JSON");
+  }
+  const gecko = manifest.browser_specific_settings?.gecko;
+  if (gecko?.id !== expectedAddOnId || manifest.version !== expectedVersion) {
+    throw new Error("Previous signed XPI manifest identity does not match the expected old release");
+  }
+  let updateUrl;
+  try {
+    updateUrl = new URL(gecko.update_url);
+  } catch {
+    throw new Error("Previous signed XPI update URL is invalid");
+  }
+  if (
+    updateUrl.protocol !== "https:" ||
+    updateUrl.username ||
+    updateUrl.password ||
+    updateUrl.hash ||
+    updateUrl.href !== gecko.update_url
+  ) {
+    throw new Error("Previous signed XPI update URL is not canonical HTTPS");
+  }
+  return Object.freeze({
+    addOnId: gecko.id,
+    updateUrl: updateUrl.href,
+    version: manifest.version,
+  });
 }
 
 export function bindGeckodriverService(input, service) {
@@ -712,6 +762,13 @@ async function withDisposableFirefox({ firefoxBinary, port }, action) {
 
 export async function runFirefoxSignedSmoke(rawInput) {
   const input = validateSignedSmokeInputs(rawInput);
+  const previousIdentity =
+    input.mode === "update"
+      ? await readSignedXpiUpdateIdentity(input.oldSignedXpiPath, {
+          expectedAddOnId: input.metadata.addOnId,
+          expectedVersion: input.oldVersion,
+        })
+      : null;
   const service = await startGeckodriver(input.geckodriverBinary);
   const expectedFinal = {
     expectedAddOnId: input.metadata.addOnId,
@@ -719,6 +776,13 @@ export async function runFirefoxSignedSmoke(rawInput) {
     expectedVersion: input.metadata.version,
   };
   const firefoxInput = bindGeckodriverService(input, service);
+  const expectedPrevious = previousIdentity
+    ? {
+        expectedAddOnId: previousIdentity.addOnId,
+        expectedUpdateUrl: previousIdentity.updateUrl,
+        expectedVersion: previousIdentity.version,
+      }
+    : null;
   try {
     const finalInstall = await withDisposableFirefox(firefoxInput, (driver) =>
       installAndInspect(driver, input.newSignedXpiPath, expectedFinal),
@@ -727,8 +791,7 @@ export async function runFirefoxSignedSmoke(rawInput) {
     if (input.mode === "update") {
       const manual = await withDisposableFirefox(firefoxInput, async (driver) => {
         const before = await installAndInspect(driver, input.oldSignedXpiPath, {
-          ...expectedFinal,
-          expectedVersion: input.oldVersion,
+          ...expectedPrevious,
         });
         const disabled = await setAddonAutomaticUpdates(driver, input.metadata.addOnId, false);
         if (disabled?.status !== "disabled") {
@@ -742,9 +805,8 @@ export async function runFirefoxSignedSmoke(rawInput) {
         }
         const pending = await inspectAddon(driver, input.metadata.addOnId);
         assertTrustedPermanentAddon({
-          ...expectedFinal,
+          ...expectedPrevious,
           ...pending,
-          expectedVersion: input.oldVersion,
         });
         const manualInstall = await installManualAddonUpdateThroughDetailsUi(driver, input.metadata.addOnId);
         if (manualInstall?.status !== "clicked") {
@@ -770,8 +832,7 @@ export async function runFirefoxSignedSmoke(rawInput) {
       });
       const automatic = await withDisposableFirefox(firefoxInput, async (driver) => {
         const before = await installAndInspect(driver, input.oldSignedXpiPath, {
-          ...expectedFinal,
-          expectedVersion: input.oldVersion,
+          ...expectedPrevious,
         });
         const updateResult = await triggerAddonUpdateThroughManagerUi(driver);
         if (updateResult?.status !== "installed") {

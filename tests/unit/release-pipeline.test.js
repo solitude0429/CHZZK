@@ -71,7 +71,7 @@ function syntheticMetadata(sourceArchiveSha256, sourceArchiveSize) {
     sourceDigest: "a".repeat(40),
     sourceRepository: "solitude0429/CHZZK",
     strictMinVersion: "140.0",
-    updateManifestUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+    updateManifestUrl: "https://chzzk.home.arpa:8443/updates.json",
     version: "0.1.4",
   };
 }

@@ -5,6 +5,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import JSZip from "jszip";
 
 import {
   MAX_SIGNED_SMOKE_RESULT_BYTES,
@@ -13,6 +14,7 @@ import {
   buildProductionFirefoxCapabilities,
   createFirefoxSignedSmokeEvidence,
   persistFirefoxSignedSmokeResult,
+  readSignedXpiUpdateIdentity,
   startGeckodriver,
   validateSignedSmokeInputs,
 } from "../../scripts/lib/firefox-signed-smoke.js";
@@ -37,7 +39,7 @@ function canonicalMetadata() {
     sourceDigest: "b".repeat(40),
     sourceRepository: "solitude0429/CHZZK",
     strictMinVersion: "140.0",
-    updateManifestUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+    updateManifestUrl: "https://chzzk.home.arpa:8443/updates.json",
     version: "0.1.5",
   };
 }
@@ -77,6 +79,49 @@ function processExists(pid) {
 }
 
 describe("stock Firefox AMO-signed release smoke gate", () => {
+  it("derives the previous update identity from the signed XPI during a URL migration", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "chzzk-signed-xpi-identity-"));
+    const xpiPath = join(directory, "chzzk-0.1.4-signed.xpi");
+    const previousUpdateUrl = "https://chzzk-updates.alpha-apple.dedyn.io/updates.json";
+    const zip = new JSZip();
+    zip.file(
+      "manifest.json",
+      JSON.stringify({
+        browser_specific_settings: {
+          gecko: {
+            id: "chzzk@solitude0429.local",
+            update_url: previousUpdateUrl,
+          },
+        },
+        version: "0.1.4",
+      }),
+    );
+    writeFileSync(xpiPath, await zip.generateAsync({ type: "nodebuffer" }));
+
+    try {
+      assert.deepEqual(
+        await readSignedXpiUpdateIdentity(xpiPath, {
+          expectedAddOnId: "chzzk@solitude0429.local",
+          expectedVersion: "0.1.4",
+        }),
+        {
+          addOnId: "chzzk@solitude0429.local",
+          updateUrl: previousUpdateUrl,
+          version: "0.1.4",
+        },
+      );
+      await assert.rejects(
+        readSignedXpiUpdateIdentity(xpiPath, {
+          expectedAddOnId: "chzzk@solitude0429.local",
+          expectedVersion: "0.1.5",
+        }),
+        /identity.*expected old release/i,
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
   it("requires canonical final inputs and an older signed XPI in update mode", () => {
     const files = makeInputFiles();
     try {
@@ -206,7 +251,7 @@ setInterval(() => {}, 1000);
   it("requires the expected ID/version, permanent install, default enforcement, and AMO signed state", () => {
     const expected = {
       expectedAddOnId: "chzzk@solitude0429.local",
-      expectedUpdateUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+      expectedUpdateUrl: "https://chzzk.home.arpa:8443/updates.json",
       expectedVersion: "0.1.5",
       securityState: {
         appName: "Firefox",

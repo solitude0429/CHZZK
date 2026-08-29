@@ -31,10 +31,11 @@ const STRICT_MIN_VERSION_RE = /^\d+(?:\.\d+){1,3}$/;
 
 export const RELEASE_ADD_ON_ID = "chzzk@solitude0429.local";
 export const RELEASE_SOURCE_REPOSITORY = "solitude0429/CHZZK";
-export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk-updates.alpha-apple.dedyn.io/updates.json";
+export const RELEASE_UPDATE_MANIFEST_URL = "https://chzzk.home.arpa:8443/updates.json";
 export const RELEASE_PACKAGE_FILES = Object.freeze([
   "LICENSE",
   "NOTICE",
+  "ad-guard.css",
   "background.js",
   "diagnostics.html",
   "diagnostics.js",

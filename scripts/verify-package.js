@@ -10,6 +10,7 @@ const allowedFiles = new Set([
   "LICENSE",
   "NOTICE",
   "README.md",
+  "ad-guard.css",
   "background.js",
   "diagnostics.html",
   "diagnostics.js",

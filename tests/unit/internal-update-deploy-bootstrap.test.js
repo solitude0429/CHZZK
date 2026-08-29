@@ -67,9 +67,27 @@ function requiredProtectedExecutable(candidates, name) {
   throw new Error(`No fixed system ${name} executable is available for bootstrap tests`);
 }
 
-const trustedGit = requiredProtectedExecutable(["/usr/bin/git", "/bin/git"], "git");
-const protectedGhExecutable = firstProtectedExecutable(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"]);
-const protectedNodeExecutable = firstProtectedExecutable(["/usr/bin/node"]);
+const trustedGit = requiredProtectedExecutable(
+  ["/usr/bin/git", "/bin/git", "/run/current-system/sw/bin/git"],
+  "git",
+);
+const protectedGhExecutable = firstProtectedExecutable([
+  "/usr/local/bin/gh",
+  "/usr/bin/gh",
+  "/bin/gh",
+  "/run/current-system/sw/bin/gh",
+]);
+const protectedNodeExecutable = firstProtectedExecutable([
+  "/usr/bin/node",
+  "/run/current-system/sw/bin/node",
+]);
+const protectedBashExecutable = requiredProtectedExecutable(
+  ["/bin/bash", "/run/current-system/sw/bin/bash"],
+  "bash",
+);
+const protectedSystemPath = existsSync("/run/current-system/sw/bin/node")
+  ? "/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
+  : "/usr/local/bin:/usr/bin:/bin";
 const trustedExecutables = Object.freeze({
   // Injected command harnesses do not invoke GitHub CLI, so keep npm test portable
   // by using an already-protected fixed executable as their gh placeholder.
@@ -78,11 +96,12 @@ const trustedExecutables = Object.freeze({
   // A test-only executor uses the current runtime when the production prerequisite is absent.
   node: protectedNodeExecutable ?? trustedGit,
 });
-const cleanBootstrapFailurePattern = !existsSync("/usr/bin/node")
-  ? /\/usr\/bin\/node.*No such file or directory/i
-  : protectedGhExecutable === undefined
-    ? /No root-owned, non-writable system gh executable is available/i
-    : /pinned CHZZK repository/i;
+const cleanBootstrapFailurePattern =
+  protectedNodeExecutable === undefined
+    ? /system\/sw\/bin\/node.*No such file or directory|\/usr\/bin\/node.*No such file or directory/i
+    : protectedGhExecutable === undefined
+      ? /No root-owned, non-writable system gh executable is available/i
+      : /pinned CHZZK repository/i;
 
 function gitBlobSha(bytes) {
   const value = Buffer.from(bytes);
@@ -308,12 +327,17 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
     assert.notEqual(metadata.mode & 0o111, 0);
   });
 
-  it("keeps the pre-runtime launcher and JavaScript allowlist on exact /usr/bin/node", () => {
+  it("keeps the pre-runtime launcher and JavaScript allowlist on fixed protected Node paths", () => {
     const source = readFileSync(bootstrapSourcePath, "utf8");
-    assert.match(source, /\/usr\/bin\/node "\$0" --chzzk-clean-bootstrap/);
-    assert.match(source, /node: Object\.freeze\(\["\/usr\/bin\/node"\]\)/);
+    assert.match(source, /chzzk_node=\/usr\/bin\/node/);
+    assert.match(source, /chzzk_node=\/run\/current-system\/sw\/bin\/node/);
+    assert.match(
+      source,
+      /node: Object\.freeze\(\["\/usr\/bin\/node", "\/run\/current-system\/sw\/bin\/node"\]\)/,
+    );
     assert.doesNotMatch(source, /["']\/usr\/local\/bin\/node["']/);
     assert.doesNotMatch(source, /["']\/bin\/node["']/);
+    assert.match(source, /targetDir = "\/srv\/admin\/chzzk-updates"/);
   });
 
   it("refuses library execution in GitHub Actions before side effects", async () => {
@@ -352,7 +376,7 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
         runCommand: () => {
           commandCalls += 1;
         },
-        targetDir: "/var/www/chzzk-updates",
+        targetDir: "/srv/admin/chzzk-updates",
         trustedExecutables: {
           gh: "/usr/bin/gh",
           git: "/usr/bin/git",
@@ -660,7 +684,7 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
           encoding: "utf8",
           env: {
             CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY: "1",
-            PATH: "/usr/local/bin:/usr/bin:/bin",
+            PATH: protectedSystemPath,
           },
           input: "synthetic-deployment-token\n",
         },
@@ -693,7 +717,7 @@ describe("protected internal-update deployment bootstrap", { concurrency: false 
           env: {
             CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY: "1",
             NODE_OPTIONS: `--require=${preload}`,
-            PATH: "/usr/local/bin:/usr/bin:/bin",
+            PATH: protectedSystemPath,
           },
           input: "synthetic-deployment-token\n",
         },
@@ -723,7 +747,7 @@ chzzk_deploy_token="$CHZZK_DEPLOY_READ_TOKEN"
 unset CHZZK_DEPLOY_READ_TOKEN HOME
 printf '%s\n' "$chzzk_deploy_token" |
   /usr/bin/env -i CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY=1 \
-    LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=${protectedSystemPath} \
     "$1" "$2" "invalid repository" "$3" "$4"
 chzzk_deploy_status=$?
 unset chzzk_deploy_token
@@ -731,13 +755,13 @@ exit "$chzzk_deploy_status"
 `;
     try {
       const result = spawnSync(
-        "/bin/bash",
+        protectedBashExecutable,
         ["--noprofile", "--norc", "-s", "--", installed.path, version, repoRoot, join(sandbox, "target")],
         {
           encoding: "utf8",
           env: {
             CHZZK_DEPLOY_READ_TOKEN: token,
-            PATH: "/usr/local/bin:/usr/bin:/bin",
+            PATH: protectedSystemPath,
           },
           input: command,
         },
