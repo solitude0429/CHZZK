@@ -37,7 +37,7 @@ function canonicalMetadata() {
     sourceDigest: "b".repeat(40),
     sourceRepository: "solitude0429/CHZZK",
     strictMinVersion: "140.0",
-    updateManifestUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+    updateManifestUrl: "https://chzzk.home.arpa:8443/updates.json",
     version: "0.1.5",
   };
 }
@@ -206,7 +206,7 @@ setInterval(() => {}, 1000);
   it("requires the expected ID/version, permanent install, default enforcement, and AMO signed state", () => {
     const expected = {
       expectedAddOnId: "chzzk@solitude0429.local",
-      expectedUpdateUrl: "https://chzzk-updates.alpha-apple.dedyn.io/updates.json",
+      expectedUpdateUrl: "https://chzzk.home.arpa:8443/updates.json",
       expectedVersion: "0.1.5",
       securityState: {
         appName: "Firefox",

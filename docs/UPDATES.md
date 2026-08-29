@@ -56,7 +56,7 @@ Live update-host 변경은 별도의 승인된 operational batch로 수행합니
 
 먼저 protected exact `main`의 `scripts/internal-update-deploy-bootstrap.js` content record를 받아 Git blob SHA와 byte identity를 검증하고, checkout 밖의 owner-only 경로에 mode `0500`인 `.mjs` 파일로 설치합니다. Checkout의 deployment JavaScript나 npm script를 직접 실행하지 않습니다. 이미 실행 중인 신뢰된 관리자 셸에서 tracing을 먼저 끄고 token을 비공개 셸 변수로 복사하며, builtin `unset`으로 dynamic-loader·shell-startup·Node·proxy/CA 변수를 제거한 뒤에만 `/usr/bin/env`를 시작합니다. Bootstrap은 clean-parent marker와 stdin token만 받고 두 번째 `/usr/bin/env -i`와 absolute system Node로 다시 시작한 다음, 전달된 checkout이 trusted Git의 canonical worktree top-level 및 pinned repository origin과 정확히 일치하는지 확인합니다. 그 전체 checkout을 기준으로 자기 realpath가 밖의 `.mjs`이고 현재 operator 소유의 exact mode `0500` 파일이며 부모 디렉터리도 operator 전용인지 검증합니다. 이어서 private GitHub CLI home과 root-owned absolute Git/GitHub CLI를 사용하고, canonical 저장소 ID·protected remote default head·operator·clean local head/branch를 결박한 뒤 그 commit의 deployment entrypoint와 전체 local import graph를 API에서 받아 Git blob identity로 검증해 sealed module로 실행합니다. 다운로드 작업 디렉터리는 부모가 소유한 private execution tree 아래에 있으므로 자식의 terminal failure에도 부모가 전체를 제거합니다.
 
-이 polyglot launcher와 repository-settings launcher의 명시적 host prerequisite는 protected root-owned `/usr/bin/node` 하나뿐입니다. 다른 Node 경로나 `PATH` 검색은 지원하지 않습니다.
+배포 polyglot launcher는 fixed protected system path인 `/usr/bin/node` 또는 `/run/current-system/sw/bin/node`만 허용하며 Git/GitHub CLI도 NixOS system profile을 포함한 고정 후보만 사용합니다. Repository-settings launcher는 계속 `/usr/bin/node`만 요구합니다. 어느 launcher도 `PATH`에서 실행 파일을 검색하지 않습니다.
 
 ```bash
 (
@@ -74,12 +74,13 @@ Live update-host 변경은 별도의 승인된 operational batch로 수행합니
   export -n BASHOPTS SHELLOPTS 2>/dev/null || true
   printf '%s\n' "$chzzk_deploy_token" |
     /usr/bin/env -i CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY=1 \
-      LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+      PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin \
       "/absolute/protected/chzzk-internal-update-deploy-bootstrap.mjs" \
       "<version>" \
       "solitude0429/CHZZK" \
       "$PWD" \
-      "/var/www/chzzk-updates"
+      "/srv/admin/chzzk-updates"
   chzzk_deploy_status=$?
   unset chzzk_deploy_token
   exit "$chzzk_deploy_status"

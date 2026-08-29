@@ -1,3 +1,5 @@
+import "./ad-response-controller.js";
+
 export const PLAYER_LAYOUT_SELECTOR = "#live_player_layout > pzp-pc-layout";
 export const QUALITY_PANE_SELECTOR =
   "#live_player_layout pzp-pc-setting-quality-pane, " +

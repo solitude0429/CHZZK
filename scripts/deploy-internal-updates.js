@@ -403,7 +403,7 @@ async function main() {
   const token = process.env.GH_TOKEN;
   const version = process.env.CHZZK_VERSION;
   const sourceRepository = process.env.CHZZK_GITHUB_REPOSITORY;
-  const targetDir = process.env.CHZZK_UPDATE_DIR ?? "/var/www/chzzk-updates";
+  const targetDir = process.env.CHZZK_UPDATE_DIR ?? "/srv/admin/chzzk-updates";
   const context = readBootstrapContext();
   const environments = createTrustedChildEnvironments(token, context.ghHome);
   sanitizeDeploymentProcessEnvironment();

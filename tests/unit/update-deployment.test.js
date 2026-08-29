@@ -32,6 +32,7 @@ const STRUCTURAL_SIGNATURE_FIXTURE = Object.freeze({
   "META-INF/mozilla.rsa": Buffer.alloc(1024, "r"),
   "META-INF/mozilla.sf": Buffer.alloc(128, "s"),
 });
+const systemFlock = existsSync("/usr/bin/flock") ? "/usr/bin/flock" : "/run/current-system/sw/bin/flock";
 
 function mode(path) {
   return statSync(path).mode & 0o777;
@@ -84,8 +85,15 @@ async function makeSignedRelease(version, sourceDigest) {
 
 async function holdAdvisoryLock(lockPath) {
   const child = spawn(
-    "/usr/bin/flock",
-    ["--exclusive", "--nonblock", lockPath, "/bin/sh", "-c", 'printf "locked\\n"; cat >/dev/null'],
+    systemFlock,
+    [
+      "--exclusive",
+      "--nonblock",
+      lockPath,
+      "/bin/sh",
+      "-c",
+      'printf "locked\\n"; while IFS= read -r _line; do :; done',
+    ],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
   child.stdin.on("error", () => {});
@@ -149,7 +157,7 @@ describe("atomic internal update deployment", () => {
       const updates = JSON.parse(readFileSync(join(targetDir, "updates.json"), "utf8"));
       assert.equal(
         updates.addons["chzzk@solitude0429.local"].updates[0].update_link,
-        "https://chzzk-updates.alpha-apple.dedyn.io/releases/0.1.3/chzzk-0.1.3-signed.xpi",
+        "https://chzzk.home.arpa:8443/releases/0.1.3/chzzk-0.1.3-signed.xpi",
       );
       const index = readFileSync(join(targetDir, "index.html"), "utf8");
       const hrefs = [...index.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);

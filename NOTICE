@@ -1,9 +1,12 @@
 CHZZK
 =====
 
-Personal Firefox WebExtension for tab-scoped CHZZK HLS quality session redirects.
+Personal Firefox WebExtension for CHZZK ad removal and highest-quality playback.
 
 The extension icon uses the CHZZK favicon from:
 https://ssl.pstatic.net/static/nng/glive/icon/favicon.png
+
+CHZZK ad-response interoperability was cross-checked against Crackle:
+https://github.com/FilteringDev/crackle (MPL-2.0)
 
 Project license: MIT. See LICENSE.

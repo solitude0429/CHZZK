@@ -1,5 +1,5 @@
 #!/bin/sh
-// 2>/dev/null; if [ "${CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY-}" != 1 ] || [ "${PATH-}" != /usr/local/bin:/usr/bin:/bin ] || [ "${ALL_PROXY+x}" = x ] || [ "${BASH_ENV+x}" = x ] || [ "${CURL_CA_BUNDLE+x}" = x ] || [ "${ENV+x}" = x ] || [ "${GH_ENTERPRISE_TOKEN+x}" = x ] || [ "${GH_TOKEN+x}" = x ] || [ "${GITHUB_ACTIONS+x}" = x ] || [ "${GITHUB_ENTERPRISE_TOKEN+x}" = x ] || [ "${GITHUB_TOKEN+x}" = x ] || [ "${HTTPS_PROXY+x}" = x ] || [ "${HTTP_PROXY+x}" = x ] || [ "${LD_AUDIT+x}" = x ] || [ "${LD_LIBRARY_PATH+x}" = x ] || [ "${LD_PRELOAD+x}" = x ] || [ "${NODE_EXTRA_CA_CERTS+x}" = x ] || [ "${NODE_OPTIONS+x}" = x ] || [ "${NODE_PATH+x}" = x ] || [ "${NO_PROXY+x}" = x ] || [ "${REQUESTS_CA_BUNDLE+x}" = x ] || [ "${SSL_CERT_DIR+x}" = x ] || [ "${SSL_CERT_FILE+x}" = x ] || [ "${XDG_CONFIG_HOME+x}" = x ] || [ "${all_proxy+x}" = x ] || [ "${http_proxy+x}" = x ] || [ "${https_proxy+x}" = x ] || [ "${no_proxy+x}" = x ]; then echo "Internal update deployment bootstrap requires the documented trusted parent-shell boundary" >&2; exit 1; fi; exec /usr/bin/env -i LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/node "$0" --chzzk-clean-bootstrap "$@"; exit $?
+// 2>/dev/null; case "${PATH-}" in /usr/local/bin:/usr/bin:/bin) chzzk_node=/usr/bin/node ;; /run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin) chzzk_node=/run/current-system/sw/bin/node ;; *) echo "Internal update deployment bootstrap requires the documented trusted parent-shell boundary" >&2; exit 1 ;; esac; if [ "${CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY-}" != 1 ] || [ "${ALL_PROXY+x}" = x ] || [ "${BASH_ENV+x}" = x ] || [ "${CURL_CA_BUNDLE+x}" = x ] || [ "${ENV+x}" = x ] || [ "${GH_ENTERPRISE_TOKEN+x}" = x ] || [ "${GH_TOKEN+x}" = x ] || [ "${GITHUB_ACTIONS+x}" = x ] || [ "${GITHUB_ENTERPRISE_TOKEN+x}" = x ] || [ "${GITHUB_TOKEN+x}" = x ] || [ "${HTTPS_PROXY+x}" = x ] || [ "${HTTP_PROXY+x}" = x ] || [ "${LD_AUDIT+x}" = x ] || [ "${LD_LIBRARY_PATH+x}" = x ] || [ "${LD_PRELOAD+x}" = x ] || [ "${NODE_EXTRA_CA_CERTS+x}" = x ] || [ "${NODE_OPTIONS+x}" = x ] || [ "${NODE_PATH+x}" = x ] || [ "${NO_PROXY+x}" = x ] || [ "${REQUESTS_CA_BUNDLE+x}" = x ] || [ "${SSL_CERT_DIR+x}" = x ] || [ "${SSL_CERT_FILE+x}" = x ] || [ "${XDG_CONFIG_HOME+x}" = x ] || [ "${all_proxy+x}" = x ] || [ "${http_proxy+x}" = x ] || [ "${https_proxy+x}" = x ] || [ "${no_proxy+x}" = x ]; then echo "Internal update deployment bootstrap requires the documented trusted parent-shell boundary" >&2; exit 1; fi; exec /usr/bin/env -i LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH="$PATH" "$chzzk_node" "$0" --chzzk-clean-bootstrap "$@"; exit $?
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -42,9 +42,9 @@ const JSZIP_BUNDLE_PATH = "node_modules/jszip/dist/jszip.min.js";
 const JSZIP_BUNDLE_BYTES = 97_630;
 const JSZIP_BUNDLE_SHA256 = "acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae854de65c947d59e";
 const TRUSTED_EXECUTABLE_CANDIDATES = Object.freeze({
-  gh: Object.freeze(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh"]),
-  git: Object.freeze(["/usr/bin/git", "/bin/git"]),
-  node: Object.freeze(["/usr/bin/node"]),
+  gh: Object.freeze(["/usr/local/bin/gh", "/usr/bin/gh", "/bin/gh", "/run/current-system/sw/bin/gh"]),
+  git: Object.freeze(["/usr/bin/git", "/bin/git", "/run/current-system/sw/bin/git"]),
+  node: Object.freeze(["/usr/bin/node", "/run/current-system/sw/bin/node"]),
 });
 const TRUSTED_GIT_PREFIX = Object.freeze([
   "--no-optional-locks",
@@ -53,7 +53,13 @@ const TRUSTED_GIT_PREFIX = Object.freeze([
   "-c",
   "core.hooksPath=/dev/null",
 ]);
-const TRUSTED_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin";
+const TRUSTED_SYSTEM_PATH_CANDIDATES = Object.freeze([
+  "/usr/local/bin:/usr/bin:/bin",
+  "/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin",
+]);
+const TRUSTED_SYSTEM_PATH = TRUSTED_SYSTEM_PATH_CANDIDATES.includes(process.env.PATH)
+  ? process.env.PATH
+  : TRUSTED_SYSTEM_PATH_CANDIDATES[0];
 
 function parseJson(text, label) {
   try {
@@ -495,7 +501,7 @@ export async function runProtectedDeploymentEntrypoint({
   readJsZipBundle = readVerifiedJsZipBundle,
   repository,
   runCommand,
-  targetDir = "/var/www/chzzk-updates",
+  targetDir = "/srv/admin/chzzk-updates",
   trustedExecutables,
   trustedGhHome,
   version,
@@ -648,7 +654,7 @@ async function main() {
     process.env.GITHUB_ACTIONS !== undefined ||
     process.env.NODE_OPTIONS !== undefined ||
     process.env.NODE_PATH !== undefined ||
-    process.env.PATH !== TRUSTED_SYSTEM_PATH
+    !TRUSTED_SYSTEM_PATH_CANDIDATES.includes(process.env.PATH)
   ) {
     throw new Error(
       "Deployment bootstrap must be executed directly through its pre-runtime environment boundary",
@@ -666,7 +672,7 @@ async function main() {
   const version = process.argv[3];
   const repository = process.argv[4];
   const checkout = process.argv[5];
-  const targetDir = process.argv[6] ?? "/var/www/chzzk-updates";
+  const targetDir = process.argv[6] ?? "/srv/admin/chzzk-updates";
   const bootstrapFile = realpathSync(process.argv[1]);
   const trustedGhHome = createTrustedGhHome();
   try {
@@ -676,7 +682,7 @@ async function main() {
       node: trustedExecutable("node"),
     });
     if (realpathSync(process.execPath) !== trustedExecutables.node) {
-      throw new Error("Deployment bootstrap must be launched by the required protected /usr/bin/node");
+      throw new Error("Deployment bootstrap must use one required protected system Node executable");
     }
     const environments = createTrustedDeploymentEnvironments(token, trustedGhHome);
     const runCommand = createTrustedCommandRunner(trustedExecutables, environments);

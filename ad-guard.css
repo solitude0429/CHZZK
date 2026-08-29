@@ -1,0 +1,9 @@
+[data-nlog-area="ad_blocking_info_layer"],
+.webplayer-internal-core-dimmed {
+  display: none !important;
+}
+
+.webplayer-internal-core-ad-ui {
+  clip-path: inset(50%) !important;
+  pointer-events: none !important;
+}

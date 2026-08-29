@@ -89,6 +89,7 @@ async function makeExtensionXpi({
 
   const zip = new JSZip();
   const files = [
+    ["ad-guard.css", join(repoRoot, "ad-guard.css")],
     ["background.js", join(runtimeDir, "background.js")],
     ["diagnostics.html", join(repoRoot, "diagnostics.html")],
     ["diagnostics.js", join(runtimeDir, "diagnostics.js")],
@@ -305,6 +306,115 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
         response.end(
           '<!doctype html><meta charset="utf-8"><title>CHZZK SPA entry</title><div id="result">home</div>',
         );
+        return;
+      }
+
+      if (host === "www.chzzk.naver.com" && requestUrl.pathname === "/live/ad-response-test") {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        response.end(`<!doctype html><meta charset="utf-8"><title>CHZZK ad response E2E</title>
+<div id="ad-blocking" data-nlog-area="ad_blocking_info_layer">blocking</div>
+<div id="ad-dimmed" class="webplayer-internal-core-dimmed">dimmed</div>
+<div id="ad-ui" class="webplayer-internal-core-ad-ui">ad</div>
+<script>
+(() => {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const throughPlayerBytes = (payload) => {
+    const source = encoder.encode(JSON.stringify(payload));
+    const result = new Uint8Array(source);
+    return {
+      bytesUnchanged:
+        result.length === source.length && result.every((value, index) => value === source[index]),
+      payload: JSON.parse(decoder.decode(result)),
+    };
+  };
+  const schedule = (videoAdScheduleId, adUnitId, requestId) => ({
+    head: { description: "GFP Video Ad Schedule", version: "0.0.1" },
+    requestId,
+    videoAdScheduleId,
+    adBreaks: [
+      {
+        id: "midroll",
+        startDelay: 30,
+        preFetch: 5,
+        adUnitId,
+        adSources: [{ provider: "gfp" }, { provider: "ima" }],
+      },
+    ],
+    passthrough: { channelId: "fixture-channel" },
+  });
+  const countScheduleAds = (payload) =>
+    payload.adBreaks.reduce(
+      (total, adBreak) => total + (Array.isArray(adBreak.adSources) ? adBreak.adSources.length : 0),
+      0,
+    );
+
+  const standard = throughPlayerBytes(
+    schedule("LIVE_CHZZK_NDP_SCH", "w_live_chzzk_naver_va_mid", "standard-request"),
+  ).payload;
+  const event = throughPlayerBytes(
+    schedule(
+      "LIVE_CHZZK_NDP_SCH_EVENT",
+      "event_w_live_chzzk_naver_va_mid",
+      "event-request",
+    ),
+  ).payload;
+  const waterfall = throughPlayerBytes({
+    head: { description: "Naver SSP Waterfall List", version: "0.0.1" },
+    requestId: "waterfall-request",
+    adUnit: "w_live_chzzk_naver_va_mid",
+    eventTracking: { impression: ["https://tracker.invalid/impression"] },
+    randomNumber: 42,
+    ads: [{ provider: "gfp" }, { provider: "ima" }],
+    passthrough: { channelId: "fixture-channel" },
+  }).payload;
+  const unrelated = throughPlayerBytes(
+    schedule("UNRELATED_SCHEDULE", "w_live_chzzk_naver_va_mid", "unrelated-request"),
+  );
+
+  Object.defineProperty(window, "__chzzkAdResponseFixture", {
+    configurable: false,
+    value: Object.freeze({
+      snapshot() {
+        const blockingStyle = getComputedStyle(document.getElementById("ad-blocking"));
+        const dimmedStyle = getComputedStyle(document.getElementById("ad-dimmed"));
+        const adUiStyle = getComputedStyle(document.getElementById("ad-ui"));
+        return {
+          controllerInstalled: Boolean(window[Symbol.for("chzzk.ad-response-controller")]),
+          event: {
+            ads: countScheduleAds(event),
+            neutralBreak: event.adBreaks.length === 1 && event.adBreaks[0].adUnitId === "",
+            passthrough: event.passthrough,
+          },
+          overlay: {
+            adBlockingDisplay: blockingStyle.display,
+            adDimmedDisplay: dimmedStyle.display,
+            adUiClipPath: adUiStyle.clipPath,
+            adUiPointerEvents: adUiStyle.pointerEvents,
+          },
+          standard: {
+            ads: countScheduleAds(standard),
+            neutralBreak: standard.adBreaks.length === 1 && standard.adBreaks[0].adUnitId === "",
+            passthrough: standard.passthrough,
+          },
+          styleInstalled: Boolean(
+            document.querySelector("style[data-chzzk-extension-ad-guard]"),
+          ),
+          unrelated: {
+            ads: countScheduleAds(unrelated.payload),
+            bytesUnchanged: unrelated.bytesUnchanged,
+            scheduleId: unrelated.payload.videoAdScheduleId,
+          },
+          waterfall: {
+            ads: waterfall.ads.length,
+            passthrough: waterfall.passthrough,
+          },
+        };
+      },
+    }),
+  });
+})();
+</script>`);
         return;
       }
 
@@ -1654,6 +1764,37 @@ return tracks[tracks.selectedIndex].label;`),
     );
     assert.equal((await selectedPlayerQuality(driver)).selected.label, "1080p");
 
+    await driver.command("POST", "/url", {
+      url: `https://www.chzzk.naver.com:${state.port}/live/ad-response-test`,
+    });
+    const adResponseGuard = await poll(async () => {
+      const snapshot = await driver.execute("return window.__chzzkAdResponseFixture?.snapshot() ?? null;");
+      return snapshot?.controllerInstalled && snapshot?.styleInstalled ? snapshot : null;
+    });
+    assert.deepEqual(adResponseGuard.standard, {
+      ads: 0,
+      neutralBreak: true,
+      passthrough: { channelId: "fixture-channel" },
+    });
+    assert.deepEqual(adResponseGuard.event, {
+      ads: 0,
+      neutralBreak: true,
+      passthrough: { channelId: "fixture-channel" },
+    });
+    assert.deepEqual(adResponseGuard.waterfall, {
+      ads: 0,
+      passthrough: { channelId: "fixture-channel" },
+    });
+    assert.deepEqual(adResponseGuard.unrelated, {
+      ads: 2,
+      bytesUnchanged: true,
+      scheduleId: "UNRELATED_SCHEDULE",
+    });
+    assert.equal(adResponseGuard.overlay.adBlockingDisplay, "none");
+    assert.equal(adResponseGuard.overlay.adDimmedDisplay, "none");
+    assert.match(adResponseGuard.overlay.adUiClipPath, /^inset\(50%/);
+    assert.equal(adResponseGuard.overlay.adUiPointerEvents, "none");
+
     await driver.setContext("content");
     await driver.command("POST", "/url", {
       url: `https://www.chzzk.naver.com:${state.port}/`,
@@ -2300,6 +2441,8 @@ browser.storage.local.get("chzzkDiagnostics").then(
     console.log(
       JSON.stringify({
         asyncPlayerSelection: "one-write-per-generation",
+        adResponseSanitizer: "standard+event+waterfall",
+        adUiOverlay: "suppressed",
         cacheRevalidation: "304",
         canvasCapturePlayback: "real-media-progress-without-post-baseline-stall-events",
         clientFragmentNormalized: true,

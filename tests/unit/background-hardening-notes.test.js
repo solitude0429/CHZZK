@@ -67,8 +67,12 @@ describe("background hardening invariants", () => {
     assert.match(source, /recordRequestDiagnostics\(details, decision\)/);
   });
 
-  it("derives webRequest URL coverage from the trusted HLS domain policy", () => {
-    assert.match(source, /WEB_REQUEST_URLS = configuredWebRequestUrls\(policy\)/);
+  it("combines trusted HLS coverage with exact CHZZK ad-state API routes", () => {
+    assert.match(
+      source,
+      /WEB_REQUEST_URLS = \[\.\.\.configuredWebRequestUrls\(policy\), \.\.\.CHZZK_AD_WEB_REQUEST_URLS\]/,
+    );
+    assert.match(source, /chzzkAdRequestDecision\(details\)/);
     assert.match(source, /urls: WEB_REQUEST_URLS/);
     assert.match(source, /types: configuredResourceTypes\(policy\)/);
   });
