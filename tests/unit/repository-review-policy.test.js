@@ -15,16 +15,17 @@ function read(path) {
 function parseContract(text, name) {
   const matches = Array.from(text.matchAll(new RegExp(`<!-- contract:${name}\\s+([^>]+?)\\s*-->`, "g")));
   assert.equal(matches.length, 1, `expected one contract:${name} marker`);
-  return Object.fromEntries(
-    matches[0][1]
-      .trim()
-      .split(/\s+/)
-      .map((field) => {
-        const separator = field.indexOf("=");
-        assert.ok(separator > 0, `invalid contract:${name} field: ${field}`);
-        return [field.slice(0, separator), field.slice(separator + 1)];
-      }),
-  );
+  const entries = matches[0][1]
+    .trim()
+    .split(/\s+/)
+    .map((field) => {
+      const separator = field.indexOf("=");
+      assert.ok(separator > 0, `invalid contract:${name} field: ${field}`);
+      return [field.slice(0, separator), field.slice(separator + 1)];
+    });
+  const keys = entries.map(([key]) => key);
+  assert.equal(new Set(keys).size, keys.length, `duplicate contract:${name} field`);
+  return Object.fromEntries(entries);
 }
 
 function assertContract(text, name, expected) {
@@ -32,6 +33,13 @@ function assertContract(text, name, expected) {
 }
 
 describe("repository review policy", () => {
+  it("rejects ambiguous duplicate contract fields", () => {
+    assert.throws(
+      () => parseContract("<!-- contract:probe mode=old mode=new -->", "probe"),
+      /duplicate contract:probe field/,
+    );
+  });
+
   it("keeps only deterministic GitHub Actions checks in the local operator policy", () => {
     assert.deepEqual(REQUIRED_CHECKS, ["analyze", "dependency-review", "firefox-e2e", "verify"]);
     assert.equal(OPS_ACTIONS_APP_ID, 15368);
