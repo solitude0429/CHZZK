@@ -1,5 +1,7 @@
 # Security Policy
 
+<!-- contract:review exact-head-comment=required external-app=advisory merge=manual-squash auto-merge=disabled -->
+
 ## Threat model
 
 This extension handles narrowly identified CHZZK ad-state responses and live-page HLS playlist requests to remove video ads, redirect eligible playlist quality URLs, and keep local troubleshooting diagnostics. The main risks are:

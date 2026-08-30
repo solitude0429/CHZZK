@@ -1,111 +1,83 @@
-# CHZZK 프로젝트 상태
+# CHZZK historical project snapshot
 
-마지막 실제 readback: 2026-08-30 UTC
+Snapshot readback time: **2026-08-30 UTC**
 
-이 문서는 다음 작업의 인계 지점이다. GitHub, Firefox와 서버처럼 시간에 따라
-달라지는 상태는 `npm run chzzk -- status --json`과 실제 시스템 readback이 이
-문서보다 우선한다.
+> This entire document is a dated historical handoff snapshot, not current-state authority. Preserve its versions, hashes, and observed claims for traceability. Before acting, use `npm run chzzk -- status --json` and authoritative live readback. In particular, the `server-config` SHA and dirty-worktree claim recorded below are known historical values and may be stale.
 
-## 현재 제품과 설치본
+<!-- contract:policy read-only=no-mutation docs-only=protected-merge-no-release release-version=YY.M.D daily-release-limit=1 overflow=ship-pending -->
 
-- 저장소: `C:\Users\Alpha\CHZZK`
-- 원격: `solitude0429/CHZZK`
-- 기본 브랜치: `main`
-- 현재 배포 버전: `26.8.30`
-- v26.8.30 source commit:
-  `b1d2c413794ca61a9fb8c21fdfbeaf67344fd937`
-- Firefox 확장 ID: `chzzk@solitude0429.local`
-- 최소 Firefox: `140.0`
-- 배포 방식: Mozilla unlisted signed XPI + immutable GitHub Release + 내부 HTTPS
-  update host
+## Product and installed version at snapshot time
 
-마지막 사용자 설치 readback은 v0.1.23 active, Mozilla signed
-(`signedState = 2`) 상태다. 사용자 profile의 업데이트 버튼은 아래 내장 URL에서
-현재 v26.8.30을 받는다. 자동 검증은 사용자 profile을 바꾸지 않았다.
+- Repository: `C:\Users\Alpha\CHZZK`
+- Remote: `solitude0429/CHZZK`
+- Default branch: `main`
+- Deployed version: `26.8.30`
+- v26.8.30 source commit: `b1d2c413794ca61a9fb8c21fdfbeaf67344fd937`
+- Firefox extension ID: `chzzk@solitude0429.local`
+- Minimum Firefox: `140.0`
+- Distribution: Mozilla unlisted-signed XPI, immutable GitHub Release, and internal HTTPS update host
+
+The last user-installation readback reported v0.1.23 active and Mozilla-signed (`signedState = 2`). Its built-in update URL delivered the then-current v26.8.30. Automated verification did not modify the user's profile.
 
 ```text
 https://chzzk.home.arpa:8443/updates.json
 ```
 
-0.1.22가 사용한 과거 공개 update domain은 폐기됐다. 호환 domain이나 별도 443
-bridge를 다시 만들지 않는다. 자동 ship의 Firefox 검증은 disposable profile만
-사용하며, 사용자의 설치 profile은 명시적인 설치/업데이트 요청이 없으면 변경하지
-않는다.
+The former public update domain used by 0.1.22 had been retired. The snapshot explicitly prohibited restoring a compatibility domain or separate port-443 bridge. Automated shipping used disposable Firefox profiles; modifying the installed profile required an explicit installation or update request.
 
-Scoop Firefox ESR의 persisted distribution policy는
-`network.trr.excluded-domains = home.arpa`를 lock한다. public domain의 기존 DoH
-정책은 유지하면서 `*.home.arpa`만 PC native DNS를 사용한다. 정책 적용 뒤 새
-disposable Firefox에서 v0.1.23 → v26.8.30의 실제 `about:addons` 수동·자동 update,
-Mozilla signed state 2, `permanent-signed-active`와 최종 `none-found`를 확인했다.
-정책 작성 전에 열려 있던 사용자 Firefox에는 완전 종료 후 재시작이 한 번 필요하다.
+Scoop Firefox ESR's persisted distribution policy locked `network.trr.excluded-domains = home.arpa`. That retained the existing DoH policy for public domains while sending only `*.home.arpa` through PC-native DNS. A new disposable Firefox verified a real v0.1.23 to v26.8.30 manual and automatic `about:addons` update, Mozilla signed state 2, `permanent-signed-active`, and final `none-found`. A user Firefox process already open before the policy change needed one full exit and restart.
 
-## 현재 GitHub Release
+## GitHub Release at snapshot time
 
-- tag: `v26.8.30`
-- 공개·immutable
-- canonical asset 세 개와 build provenance 확인
-- signed XPI SHA-256:
-  `688124ec05938332c1929cd7d6fb13eab18c45fd9a1f6cd1445b60c96ffa2715`
-- source ZIP SHA-256:
-  `6b4921211ec36d14fa4fbef27f31f786a066cf9cda87ecdd08003ebfb6724648`
-- release metadata SHA-256:
-  `782ad7a2f47d1e906730c07c41a32164bfb77505e2e5d6dd8012c049faa0341b`
-- `gh release verify v26.8.30 --repo solitude0429/CHZZK` 성공 확인
+- Tag: `v26.8.30`
+- State: public and immutable
+- Canonical assets: three, with build provenance verified
+- Signed XPI SHA-256: `688124ec05938332c1929cd7d6fb13eab18c45fd9a1f6cd1445b60c96ffa2715`
+- Source ZIP SHA-256: `6b4921211ec36d14fa4fbef27f31f786a066cf9cda87ecdd08003ebfb6724648`
+- Release metadata SHA-256: `782ad7a2f47d1e906730c07c41a32164bfb77505e2e5d6dd8012c049faa0341b`
+- `gh release verify v26.8.30 --repo solitude0429/CHZZK`: verified successfully
 
-v0.1.23은 기존 sequential version의 마지막 배포본이고 v26.8.30부터 UTC 날짜의
-`YY.M.D` version을 사용한다. UTC 하루에 하나만 게시한다.
+v0.1.23 was the last sequential version. Beginning with v26.8.30, production versions used the UTC date as `YY.M.D`, with one immutable Release per UTC day.
 
-## GitHub 운영 상태
+## GitHub operating state at snapshot time
 
-- GitHub CLI `2.98.0`이 이 PC keyring의 `solitude0429` 계정으로 인증돼 있고
-  repository ADMIN readback이 가능하다.
-- `main`은 native PR, strict required checks `verify`, `firefox-e2e`,
-  `dependency-review`, `analyze`, administrator enforcement와 conversation
-  resolution을 요구한다.
-- required approval count는 0, squash merge만 허용, auto-merge는 비활성이다.
-- 활성 Actions는 CI, CodeQL, Dependency review, Build signed Firefox release
-  네 개다.
-- AMO credential pair는 Actions secret에 있고 `firefox-signing` environment는
-  protected branches로 제한돼 있다.
+- GitHub CLI `2.98.0` was authenticated as `solitude0429` through this PC's keyring, with repository ADMIN readback.
+- Protected `main` required native PRs, strict checks `verify`, `firefox-e2e`, `dependency-review`, and `analyze`, administrator enforcement, and conversation resolution.
+- Required approval count was 0; only squash merge was allowed; auto-merge was disabled.
+- Exactly four Actions were active: CI, CodeQL, Dependency review, and Build signed Firefox release.
+- The AMO credential pair was stored in Actions secrets, and the `firefox-signing` environment was limited to protected branches.
 
-새 흐름은 외부 comment-triggered review나 GitHub App review에 의존하지 않는다. 운영
-agent가 마지막 source push의 exact head를 직접 검토하고 `gh` COMMENT review를
-기록한다. 외부 Codex GitHub App은 사용자가 웹 GPT Pro의 GitHub 연동을 위해 유지하며,
-App review는 보조 신호로만 취급한다. App이 만든 unresolved conversation은 내용을
-검토하고 응답·해결한 뒤 병합한다.
+The operator did not depend on an external comment-triggered review or GitHub App review. After the final source push, the operator reviewed the exact head and recorded a COMMENT review through `gh`. The external Codex GitHub App remained connected for the user's web integration, but its review was only advisory. Any unresolved conversation created by the App had to be reviewed, answered, and resolved before merge.
 
-## 서버 실제 상태
+## Server state at snapshot time
 
-2026-08-30 UTC readback에서 정상 운영 경로는 건강하다.
+The production path was healthy in the 2026-08-30 UTC readback:
 
 - PC DNS: `chzzk.home.arpa -> 100.64.0.1`
 - PC PowerShell HTTPS `/health`: 200
-- Router→Server WireGuard reachability: 정상
-- 내부 `ssh server` ProxyJump: 정상
+- Router-to-server WireGuard reachability: healthy
+- Internal `ssh server` ProxyJump: healthy
 - `protected-services.target`, `chzzk-updates.service`, `caddy.service`: active
-- backend: `127.0.0.1:18082`
+- Backend: `127.0.0.1:18082`
 - Caddy SNI: `chzzk.home.arpa:8443`
-- update tree: `/srv/admin/chzzk-updates`
+- Update tree: `/srv/admin/chzzk-updates`
 - `current -> releases/26.8.30`
-- stable `updates.json`, `index.html`, `provenance.json` links: current generation
-- live `updates.json`: 200, JSON, version 26.8.30
-- live signed XPI SHA-256: GitHub immutable Release와 일치
-- unresolved deployment journal: 없음
+- Stable `updates.json`, `index.html`, and `provenance.json` links: current generation
+- Live `updates.json`: HTTP 200, JSON, version 26.8.30
+- Live signed XPI SHA-256: matched the immutable GitHub Release
+- Unresolved deployment journal: none
 
-서버 public SSH listener는 존재하지만 PC에서 public `server-recovery` 접속은
-timeout이다. 내부 `ssh server` 경로가 정상이라 CHZZK 운영 blocker나 OCI 긴급
-복구 조건이 아니다. 정상 status, release, deploy와 rollback은 OCI에 접근하지
-않는다.
+The server had a public SSH listener, but PC access through `server-recovery` timed out. Because internal `ssh server` worked, this was neither a CHZZK operations blocker nor an OCI break-glass condition. Normal status, release, deployment, and rollback did not access OCI.
 
-현재 NixOS 설정 source는 `C:\Users\Alpha\server-config`이며 HEAD는 `be54e6a`다.
-`deployment-identities.nix`에 Router WireGuard public key 변경이 미커밋 상태로
-남아 있다. 이는 현재 연결에 관련된 별도 서버 작업이므로 CHZZK content 배포가
-덮어쓰거나 정리하지 않는다. 날짜가 붙은 `server-chzzk-*` 폴더는 배포 source가
-아니다.
+Historical `server-config` observation, retained verbatim as snapshot data:
 
-## 새 운영 흐름
+- Source path: `C:\Users\Alpha\server-config`
+- Recorded HEAD: `be54e6a`
+- Recorded dirty claim: `deployment-identities.nix` contained an uncommitted Router WireGuard public-key change.
 
-공개 operator command는 다음과 같다.
+Those two `server-config` state claims belong only to the 2026-08-30 snapshot and are explicitly not a current checkout assertion. The CHZZK content deployment was not authorized to overwrite or clean that separate server work. Date-stamped `server-chzzk-*` directories were not deployment sources.
+
+## Operating flow captured by the snapshot
 
 ```powershell
 npm run chzzk -- status --json
@@ -115,19 +87,11 @@ npm run chzzk -- deploy [version] --json
 npm run chzzk -- rollback <version> --json
 ```
 
-- 읽기 전용 요청은 `status`와 readback만 하고 아무것도 변경하지 않는다.
-- 제품 변경 요청은 clean `agent/*` branch에서 검증, 보호 PR, exact-head COMMENT
-  review, squash merge, 서명 Release, SCP 배포와 disposable Firefox update
-  verification까지 자동 ship한다.
-- 문서·운영 도구·workflow pin 변경은 merge까지만 하고 Release하지 않는다.
-- 그 UTC 날짜의 Release가 이미 있으면 새 제품 변경은 version bump나 merge 없이
-  정확히 하나의 `ship-pending` PR에 합친다. 다음 UTC 날짜의 mutating 제품
-  요청이 이어서 ship한다.
-- server에는 GitHub credential, checkout이나 `node_modules`를 두지 않는다. 로컬
-  `gh`가 Release/attestation을 검증하고 import graph와 `jszip`을 포함한
-  self-contained ESM activator 및 세 asset의 unique bounded bundle만 내부 SSH/SCP로
-  보낸다.
-- rollback은 사용자가 대상 version과 의도를 명시한 경우에만 실행한다.
+- Read-only requests ran only `status` and necessary readbacks.
+- Product changes moved from a clean `agent/*` branch through verification, protected PR, exact-head COMMENT review, squash merge, signed Release, SCP deployment, and disposable Firefox update verification.
+- Documentation, operator-tool, test-infrastructure, and workflow-pin changes stopped after merge and did not create a Release.
+- A second product change on a UTC date with an existing Release stayed in exactly one `ship-pending` PR and shipped on the next UTC date's mutating request.
+- The server received no GitHub credential, checkout, or `node_modules`. Local `gh` verified the Release and attestation before sending a unique, bounded bundle containing a self-contained ESM activator and exactly three assets through internal SSH/SCP.
+- Rollback ran only after the user explicitly named the version and requested it.
 
-상세 계약은 `docs/OPERATIONS.md`, `docs/SIGNING.md`와 `docs/UPDATES.md`를
-기준으로 한다.
+For the current contracts, use `docs/OPERATIONS.md`, `docs/SIGNING.md`, and `docs/UPDATES.md`.
