@@ -318,6 +318,40 @@ describe("atomic internal update deployment", () => {
     }
   });
 
+  it("keeps the transaction open through external activation validation and rolls back on failure", async () => {
+    const targetDir = mkdtempSync(join(tmpdir(), "chzzk-update-root-"));
+    const firstRelease = await makeSignedRelease("0.1.3", "2".repeat(40));
+    const secondRelease = await makeSignedRelease("0.1.4", "3".repeat(40));
+    try {
+      await deployUpdateRelease({ targetDir, ...firstRelease });
+      let validationObservedNewLinks = false;
+      await assert.rejects(
+        deployUpdateRelease({
+          targetDir,
+          ...secondRelease,
+          async validateActivation({ version }) {
+            assert.equal(version, "0.1.4");
+            assert.equal(readlinkSync(join(targetDir, "current")), "releases/0.1.4");
+            assert.equal(existsSync(join(targetDir, ".deploy-state/transaction.json")), true);
+            validationObservedNewLinks = true;
+            throw new Error("synthetic HTTPS validation failure");
+          },
+        }),
+        /synthetic HTTPS validation failure/,
+      );
+
+      assert.equal(validationObservedNewLinks, true);
+      assert.equal(readlinkSync(join(targetDir, "current")), "releases/0.1.3");
+      assert.equal(readlinkSync(join(targetDir, "updates.json")), "current/updates.json");
+      assert.equal(existsSync(join(targetDir, "releases/0.1.4")), false);
+      assert.equal(existsSync(join(targetDir, ".deploy-state/transaction.json")), false);
+    } finally {
+      firstRelease.cleanup();
+      secondRelease.cleanup();
+      rmSync(targetDir, { force: true, recursive: true });
+    }
+  });
+
   it("rolls back activation when post-commit release verification fails", async () => {
     const targetDir = mkdtempSync(join(tmpdir(), "chzzk-update-root-"));
     const firstRelease = await makeSignedRelease("0.1.3", "5".repeat(40));

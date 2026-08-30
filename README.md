@@ -2,6 +2,8 @@
 
 Personal Firefox WebExtension that removes CHZZK video ads and keeps playback on the highest concrete manual quality exposed by the player.
 
+Project handoff and current deployment context: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md).
+
 ## What it does
 
 - Cancels only the exact CHZZK ad-state API routes used for live midroll polling and removes the detector token from exact live/video-detail requests; unrelated API traffic fails open.
@@ -84,7 +86,7 @@ https://chzzk.home.arpa:8443/updates.json
 
 The router resolves `chzzk.home.arpa` to the server's WireGuard address and permits the same PC-to-server HTTPS path used by Ente and Vault. Caddy terminates TLS on the server and proxies to the isolated update backend. The landing page exposes the current immutable signed XPI as a manual install/update fallback. Firefox's `about:addons` check installs automatically when the extension uses its default automatic-update policy; with automatic updates disabled, Firefox leaves the result pending until the user chooses the available update.
 
-Mozilla unlisted signing and the immutable release pipeline are documented in `docs/SIGNING.md` and `docs/UPDATES.md`. One out-of-band `release` operation verifies the protected exact head and immutable-release setting, dispatches the separated build/sign/stock-Firefox/attestation/draft-staging chain, waits for its exact nonce-bound run, and then performs a fresh just-in-time administrator preflight before immutable publication. The administrator token never enters Actions, and published assets are never overwritten. Mozilla signing only means the XPI is installable in Firefox; it is not NAVER approval.
+Mozilla unlisted signing and the immutable release pipeline are documented in `docs/SIGNING.md`, `docs/UPDATES.md`, and `docs/OPERATIONS.md`. Product-changing requests ship through the protected PR, exact-head checks and local `gh` operator flow; release versions use UTC `YY.M.D` with at most one immutable release per UTC day. The four retained Actions perform deterministic CI, CodeQL, dependency review, and isolated AMO signing/attestation, while the local operator publishes and verifies the Release and deploys a credential-free SCP bundle through the internal `ssh server` path. Read-only requests do not mutate GitHub, the server, or Firefox. Mozilla signing only means the XPI is installable in Firefox; it is not NAVER approval.
 
 ## Diagnostics
 

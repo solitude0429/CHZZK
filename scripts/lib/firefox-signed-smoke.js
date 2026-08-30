@@ -201,7 +201,7 @@ export function buildProductionFirefoxCapabilities({ firefoxBinary, profileDir }
       browserName: "firefox",
       pageLoadStrategy: "normal",
       "moz:firefoxOptions": {
-        args: ["-headless", "--no-remote", "-remote-allow-system-access", "-profile", profileDir],
+        args: ["-headless", "--no-remote", "-profile", profileDir],
         binary: firefoxBinary,
       },
     },
@@ -701,7 +701,7 @@ function waitForGeckodriverExit(child, timeoutMs) {
 export async function startGeckodriver(binary, { readinessTimeoutMs = 10_000 } = {}) {
   const port = await reservePort();
   const logs = [];
-  const child = spawn(binary, ["--host", "127.0.0.1", "--port", String(port)], {
+  const child = spawn(binary, ["--allow-system-access", "--host", "127.0.0.1", "--port", String(port)], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let processError = null;

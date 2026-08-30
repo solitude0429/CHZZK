@@ -27,8 +27,8 @@ const PROJECT_WORKFLOW_EVENTS = new Set([
   "pull_request",
   "pull_request_target",
   "push",
-  "repository_dispatch",
   "schedule",
+  "workflow_dispatch",
 ]);
 const PROJECT_EXECUTION_RE =
   /(?:^|[;&|\n]\s*)(?:npm\s+(?:ci|install|run)|npx\b|pnpm\b|yarn\b|node\s+scripts\/)/i;

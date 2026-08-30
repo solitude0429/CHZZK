@@ -667,8 +667,16 @@ export async function deployUpdateRelease({
   signedXpiPath,
   sourceArchivePath,
   targetDir,
+  validateActivation = async () => {},
+  validateTransition = async () => {},
 }) {
   if (!targetDir) throw new Error("targetDir is required");
+  if (typeof validateActivation !== "function") {
+    throw new Error("validateActivation must be a function");
+  }
+  if (typeof validateTransition !== "function") {
+    throw new Error("validateTransition must be a function");
+  }
   const deploymentUid = process.geteuid?.();
   if (!Number.isSafeInteger(deploymentUid) || deploymentUid < 0) {
     throw new Error("Unable to determine deployment owner identity");
@@ -702,6 +710,9 @@ export async function deployUpdateRelease({
     if (verified.sourceDigest !== metadata.sourceDigest || verified.version !== metadata.version) {
       throw new Error("Verified signed release identity differs from release metadata");
     }
+    await validateTransition({ metadata, targetDir, version: metadata.version });
+    releaseDeploymentLock.assertHeld();
+    onTransactionStep("transition-validated");
 
     const names = canonicalReleaseAssetNames(metadata.version);
     const returnedDigests = {
@@ -768,6 +779,14 @@ export async function deployUpdateRelease({
       ([name, expectedTarget]) => snapshots.get(name).exists && snapshots.get(name).target === expectedTarget,
     );
     if (releaseExists && linksAlreadyExact) {
+      await validateActivation({
+        metadata,
+        releaseDir,
+        signedXpiSha256,
+        targetDir,
+        version: metadata.version,
+      });
+      onTransactionStep("activation-validated");
       return { releaseDir, reusedRelease: true, signedXpiSha256, version: metadata.version };
     }
 
@@ -812,6 +831,14 @@ export async function deployUpdateRelease({
           throw new Error(`Activated live link failed verification: ${name}`);
         }
       }
+      await validateActivation({
+        metadata,
+        releaseDir,
+        signedXpiSha256,
+        targetDir,
+        version: metadata.version,
+      });
+      onTransactionStep("activation-validated");
       removeTransaction(releaseDeploymentLock.stateDir, deploymentUid);
       return { releaseDir, reusedRelease: releaseExists, signedXpiSha256, version: metadata.version };
     } catch (activationError) {
