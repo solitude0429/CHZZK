@@ -70,8 +70,9 @@ v0.1.23은 기존 sequential version의 마지막 배포본이고 v26.8.30부터
 
 새 흐름은 외부 comment-triggered review나 GitHub App review에 의존하지 않는다. 운영
 agent가 마지막 source push의 exact head를 직접 검토하고 `gh` COMMENT review를
-기록한다. 새 local-`gh` 흐름이 보호 `main`에 병합된 뒤 사용자가 기존 외부 Codex
-GitHub App을 한 번 disable하는 수동 정리가 남아 있다.
+기록한다. 외부 Codex GitHub App은 사용자가 웹 GPT Pro의 GitHub 연동을 위해 유지하며,
+App review는 보조 신호로만 취급한다. App이 만든 unresolved conversation은 내용을
+검토하고 응답·해결한 뒤 병합한다.
 
 ## 서버 실제 상태
 

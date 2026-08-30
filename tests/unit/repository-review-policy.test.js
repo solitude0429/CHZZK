@@ -51,7 +51,9 @@ describe("repository review policy", () => {
         /exact-head COMMENT|exact head SHA[\s\S]{0,120}COMMENT|exact current head[\s\S]{0,120}COMMENT|현재 head SHA[\s\S]{0,120}COMMENT/i,
       );
     }
-    assert.match(operations, /GitHub App[\s\S]{0,100}disable/);
+    assert.match(operations, /GitHub App[\s\S]{0,100}유지/);
+    assert.match(operations, /App[\s\S]{0,120}보조 신호[\s\S]{0,100}merge\s+gate/);
+    assert.doesNotMatch(operations, /GitHub App[\s\S]{0,100}disable/);
     assert.match(docs, /Build signed Firefox release/);
     assert.doesNotMatch(docs, /@codex review|Stage unlisted Firefox release/);
     assert.doesNotMatch(docs, /owner-only external [`]?[.]mjs|external protected bootstrap|\/usr\/bin\/node/);
