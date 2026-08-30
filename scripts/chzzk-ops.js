@@ -784,6 +784,35 @@ export async function shipCurrentBranch({ context, run }) {
   let pullRequest = pullRequests.find(
     (candidate) => candidate?.headRefOid?.toLowerCase() === context.headSha,
   );
+  if (!pullRequest) {
+    const openCandidates = pullRequests.filter(
+      (candidate) => candidate?.state === "OPEN" && candidate?.baseRefName === OPS_DEFAULT_BRANCH,
+    );
+    if (openCandidates.length > 1) {
+      throw new Error("multiple open pull requests exist for the current branch");
+    }
+    if (openCandidates.length === 1) {
+      const refreshed = await jsonCommand(
+        run,
+        "gh",
+        [
+          "pr",
+          "view",
+          String(openCandidates[0].number),
+          "--repo",
+          OPS_REPOSITORY,
+          "--json",
+          "number,state,isDraft,headRefOid,baseRefName,url",
+        ],
+        "refreshed pull request head",
+        { cwd: context.root },
+      );
+      if (refreshed?.headRefOid?.toLowerCase() !== context.headSha) {
+        throw new Error("pull request head has not reached the exact pushed source SHA");
+      }
+      pullRequest = refreshed;
+    }
+  }
   if (pullRequest?.state === "MERGED") {
     return { command: "ship", headSha: context.headSha, pullRequest: pullRequest.number, reused: true };
   }
