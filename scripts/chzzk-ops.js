@@ -737,7 +737,7 @@ async function queueShipPending({ context, run, version }) {
   };
 }
 
-export async function shipCurrentBranch({ context, run }) {
+export async function shipCurrentBranch({ context, run, sleep = defaultSleep }) {
   requireClean(context);
   if (context.branch === OPS_DEFAULT_BRANCH) {
     if (context.headSha === context.remoteMainSha) {
@@ -874,21 +874,33 @@ export async function shipCurrentBranch({ context, run }) {
       cwd: context.root,
     });
   }
-  await invoke(
-    run,
-    "gh",
-    [
-      "pr",
-      "checks",
-      String(pullRequest.number),
-      "--repo",
-      OPS_REPOSITORY,
-      "--required",
-      "--watch",
-      "--fail-fast",
-    ],
-    { cwd: context.root },
-  );
+  const checkArguments = [
+    "pr",
+    "checks",
+    String(pullRequest.number),
+    "--repo",
+    OPS_REPOSITORY,
+    "--required",
+    "--watch",
+    "--fail-fast",
+  ];
+  let checksReady = false;
+  for (let attempt = 0; attempt < RUN_DISCOVERY_ATTEMPTS; attempt += 1) {
+    const result = await invoke(run, "gh", checkArguments, {
+      allowFailure: true,
+      cwd: context.root,
+    });
+    if (result.status === 0) {
+      checksReady = true;
+      break;
+    }
+    const detail = `${result.stderr}\n${result.stdout}`;
+    if (!/no checks reported/i.test(detail)) {
+      throw new Error(`required pull request checks failed: ${redactSensitive(detail.trim())}`);
+    }
+    if (attempt + 1 < RUN_DISCOVERY_ATTEMPTS) await sleep(RUN_DISCOVERY_DELAY_MS);
+  }
+  if (!checksReady) throw new Error("timed out waiting for required pull request checks to appear");
   const finalState = await jsonCommand(
     run,
     "gh",
@@ -1931,7 +1943,7 @@ export async function shipWithOperator({
     if (productChange) {
       context = await ensureUtcProjectVersion({ context, run, version: daily.version });
     }
-    const merged = await shipCurrentBranch({ context, run });
+    const merged = await shipCurrentBranch({ context, run, sleep });
     const mainContext = await synchronizeProtectedMain({ root: context.root, run });
     if (merged.mergeSha && mainContext.headSha !== merged.mergeSha) {
       throw new Error("local protected main differs from the exact squash merge readback");
