@@ -175,9 +175,11 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 conversation resolution을 요구한다. squash merge만 허용하며 Actions 기본 권한은
 read-only다.
 
-새 local-`gh` 운영 흐름이 병합된 뒤 사용자는 GitHub 설정에서 기존 외부 Codex
-GitHub App을 한 번 disable한다. 그 뒤 PR comment trigger, external review bot, bot
-approval이나 별도 review workflow는 사용하지 않는다.
+외부 Codex GitHub App은 사용자가 웹 GPT Pro의 GitHub 연동을 위해 유지한다. App이
+작성하는 PR review나 comment는 보조 신호일 뿐 required check, approval 또는 merge
+gate가 아니다. App이 unresolved conversation을 만들면 운영 agent가 내용을 검토하고
+응답·해결한 뒤 병합한다. PR comment trigger, bot approval이나 별도 review workflow는
+사용하지 않는다.
 
 ## 장애 경계
 
