@@ -242,6 +242,7 @@ setInterval(() => {}, 1000);
     assert.equal(Object.hasOwn(firefoxOptions, "prefs"), false);
     assert.equal(firefoxOptions.args.includes("-profile"), true);
     assert.equal(firefoxOptions.args.includes("/tmp/disposable-profile"), true);
+    assert.equal(firefoxOptions.args.includes("-remote-allow-system-access"), false);
     assert.doesNotMatch(
       JSON.stringify(capabilities),
       /xpinstall\.signatures|requiredBuiltInCerts|requireBuiltInCerts/i,

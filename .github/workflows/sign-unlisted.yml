@@ -1,15 +1,27 @@
-name: Stage unlisted Firefox release
-run-name: Release staging ${{ github.event.client_payload.dispatch_nonce || 'invalid' }}
+name: Build signed Firefox release
+run-name: Release assets ${{ inputs.nonce || 'invalid' }}
 
 on:
-  repository_dispatch:
-    types: [chzzk-release-preflight-v1]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact protected main commit to release
+        required: true
+        type: string
+      version:
+        description: Canonical release version
+        required: true
+        type: string
+      nonce:
+        description: Unique operator correlation nonce
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: sign-unlisted-${{ github.event.client_payload.source_sha }}
+  group: sign-unlisted-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
@@ -28,80 +40,49 @@ jobs:
           node <<'NODE'
           const fs = require("node:fs");
           const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-          const payload = event.client_payload;
-          const expectedKeys = [
-            "default_branch",
-            "dispatch_nonce",
-            "immutable_releases_verified",
-            "operator_login",
-            "source_sha",
-            "verified_at",
-            "version",
-          ];
-          const actualKeys = Object.keys(payload ?? {}).sort();
+          const inputs = event.inputs;
+          const expectedKeys = ["nonce", "source_sha", "version"];
+          const actualKeys = Object.keys(inputs ?? {}).sort();
           if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
-            throw new Error("release dispatch payload keys are invalid");
+            throw new Error("release workflow inputs are invalid");
           }
-          if (
-            process.env.GITHUB_EVENT_NAME !== "repository_dispatch" ||
-            event.action !== "chzzk-release-preflight-v1"
-          ) {
+          if (process.env.GITHUB_EVENT_NAME !== "workflow_dispatch") {
             throw new Error("release dispatch event type is invalid");
           }
           if (!process.env.EXPECTED_OPERATOR || event.sender?.login !== process.env.EXPECTED_OPERATOR) {
             throw new Error("release dispatch sender is not the configured operator");
           }
-          if (
-            payload.operator_login !== process.env.EXPECTED_OPERATOR ||
-            process.env.GITHUB_ACTOR !== process.env.EXPECTED_OPERATOR
-          ) {
+          if (process.env.GITHUB_ACTOR !== process.env.EXPECTED_OPERATOR) {
             throw new Error("release dispatch operator identity is inconsistent");
           }
           if (event.repository?.full_name !== process.env.GITHUB_REPOSITORY) {
             throw new Error("release dispatch repository is invalid");
           }
-          if (payload.default_branch !== event.repository?.default_branch) {
-            throw new Error("release dispatch default branch is invalid");
-          }
+          const defaultBranch = event.repository?.default_branch;
+          if (typeof defaultBranch !== "string" || !defaultBranch) throw new Error("release default branch is invalid");
           if (
-            process.env.GITHUB_REF !== `refs/heads/${payload.default_branch}` ||
+            process.env.GITHUB_REF !== `refs/heads/${defaultBranch}` ||
             process.env.REF_PROTECTED !== "true"
           ) {
             throw new Error("release dispatch ref is not the protected default branch");
           }
           if (
-            !/^[a-f0-9]{40}$/.test(payload.source_sha) ||
-            payload.source_sha !== process.env.GITHUB_SHA
+            !/^[a-f0-9]{40}$/.test(inputs.source_sha) ||
+            inputs.source_sha !== process.env.GITHUB_SHA
           ) {
             throw new Error("release dispatch source commit is not the exact default-branch head");
           }
-          if (!/^[a-f0-9]{32}$/.test(payload.dispatch_nonce)) {
+          if (!/^[a-f0-9]{32}$/.test(inputs.nonce)) {
             throw new Error("release dispatch nonce is invalid");
           }
-          if (!/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(payload.version)) {
+          if (!/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(inputs.version)) {
             throw new Error("release dispatch version is not canonical");
-          }
-          if (payload.immutable_releases_verified !== true) {
-            throw new Error("release dispatch did not prove immutable releases were enabled");
-          }
-          if (typeof payload.verified_at !== "string") {
-            throw new Error("release dispatch administrator preflight timestamp is not a string");
-          }
-          const verifiedAt = Date.parse(payload.verified_at);
-          const ageMs = Date.now() - verifiedAt;
-          if (
-            !Number.isFinite(verifiedAt) ||
-            new Date(verifiedAt).toISOString() !== payload.verified_at ||
-            ageMs < -60_000 ||
-            ageMs > 30 * 60_000
-          ) {
-            throw new Error("release dispatch administrator preflight is stale or invalid");
           }
           NODE
 
   prepare:
     needs: authorize
-    if: github.ref == format('refs/heads/{0}', github.event.client_payload.default_branch) && github.ref_protected == true
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.ref_protected == true
     permissions:
       attestations: read
       contents: read
@@ -149,18 +130,18 @@ jobs:
       - id: release
         name: Verify prepared input and inspect all existing release state before signing
         env:
-          CHZZK_RELEASE_METADATA: dist/release/chzzk-${{ github.event.client_payload.version }}-release-metadata.json
-          CHZZK_SIGNED_XPI: dist/release/chzzk-${{ github.event.client_payload.version }}-signed.xpi
-          CHZZK_SOURCE_ARCHIVE: dist/release/chzzk-${{ github.event.client_payload.version }}.zip
+          CHZZK_RELEASE_METADATA: dist/release/chzzk-${{ inputs.version }}-release-metadata.json
+          CHZZK_SIGNED_XPI: dist/release/chzzk-${{ inputs.version }}-signed.xpi
+          CHZZK_SOURCE_ARCHIVE: dist/release/chzzk-${{ inputs.version }}.zip
           CHZZK_SOURCE_DIGEST: ${{ github.sha }}
-          CHZZK_VERSION: ${{ github.event.client_payload.version }}
+          CHZZK_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
           SOURCE="dist/release/chzzk-${VERSION}.zip"
           METADATA="dist/release/chzzk-${VERSION}-release-metadata.json"
-          test "$VERSION" = "${{ github.event.client_payload.version }}"
+          test "$VERSION" = "${{ inputs.version }}"
           SOURCE_SHA=$(sha256sum "$SOURCE" | cut -d ' ' -f1)
           METADATA_SHA=$(sha256sum "$METADATA" | cut -d ' ' -f1)
           SIGNER_SHA=$(git show "$GITHUB_SHA:scripts/sign-unlisted.js" | sha256sum | cut -d ' ' -f1)
@@ -319,160 +300,6 @@ jobs:
           test "$(sha256sum "release-assets/chzzk-${VERSION}.zip" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.source_sha256 }}"
           test "$(sha256sum "release-assets/chzzk-${VERSION}-release-metadata.json" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.metadata_sha256 }}"
           test "$(sha256sum "release-assets/chzzk-${VERSION}-signed.xpi" | cut -d ' ' -f1)" = "${{ needs.verify-signed.outputs.signed_sha256 }}"
-      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: release-assets/*
-
-  stage:
-    needs: [attest, prepare, verify-signed]
-    if: needs.prepare.outputs.reuse_existing != 'true'
-    permissions:
-      actions: read
-      contents: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: chzzk-release-assets-${{ github.sha }}
-          path: release-assets
-      - name: Stage exact attested release draft assets
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -Eeuo pipefail
-          VERSION="${{ needs.prepare.outputs.version }}"
-          TAG="v${VERSION}"
-          SOURCE="release-assets/chzzk-${VERSION}.zip"
-          METADATA="release-assets/chzzk-${VERSION}-release-metadata.json"
-          SIGNED="release-assets/chzzk-${VERSION}-signed.xpi"
-          test "$(sha256sum "$SOURCE" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.source_sha256 }}"
-          test "$(sha256sum "$METADATA" | cut -d ' ' -f1)" = "${{ needs.prepare.outputs.metadata_sha256 }}"
-          test "$(sha256sum "$SIGNED" | cut -d ' ' -f1)" = "${{ needs.verify-signed.outputs.signed_sha256 }}"
-
-          verify_release_identity() {
-            EXPECTED_DRAFT="$1"
-            EXPECTED_IMMUTABLE="$2"
-            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "$EXPECTED_DRAFT"
-            test "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = "false"
-            if [ "$EXPECTED_DRAFT" = "true" ]; then
-              if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-                TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
-                TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
-                if [ "$TYPE" = "tag" ]; then
-                  TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
-                fi
-                test "$TAG_SHA" = "$GITHUB_SHA"
-              else
-                test "$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
-              fi
-            else
-              TYPE=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)
-              TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)
-              if [ "$TYPE" = "tag" ]; then
-                TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG_SHA}" --jq .object.sha)
-              fi
-              test "$TAG_SHA" = "$GITHUB_SHA"
-            fi
-            test "$(gh release view "$TAG" --json isImmutable --jq .isImmutable)" = "$EXPECTED_IMMUTABLE"
-          }
-
-          verify_exact_assets() {
-            test "$(gh release view "$TAG" --json assets --jq '.assets | length')" = "3"
-            VERIFY_DIR=$(mktemp -d)
-            gh release download "$TAG" --dir "$VERIFY_DIR" \
-              --pattern "chzzk-${VERSION}.zip" \
-              --pattern "chzzk-${VERSION}-release-metadata.json" \
-              --pattern "chzzk-${VERSION}-signed.xpi"
-            cmp "$SOURCE" "$VERIFY_DIR/chzzk-${VERSION}.zip"
-            cmp "$METADATA" "$VERIFY_DIR/chzzk-${VERSION}-release-metadata.json"
-            cmp "$SIGNED" "$VERIFY_DIR/chzzk-${VERSION}-signed.xpi"
-            rm -rf "$VERIFY_DIR"
-          }
-
-          sync_draft_assets() {
-            REMOTE_ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-            while IFS= read -r REMOTE_ASSET; do
-              case "$REMOTE_ASSET" in
-                ""|"$(basename "$SOURCE")"|"$(basename "$METADATA")"|"$(basename "$SIGNED")") ;;
-                *) echo "Refusing unexpected draft asset: ${REMOTE_ASSET}" >&2; return 1 ;;
-              esac
-            done <<< "$REMOTE_ASSETS"
-
-            VERIFY_DIR=$(mktemp -d)
-            for ASSET in "$SOURCE" "$METADATA" "$SIGNED"; do
-              NAME=$(basename "$ASSET")
-              FOUND=false
-              while IFS= read -r REMOTE_ASSET; do
-                if [ "$REMOTE_ASSET" = "$NAME" ]; then
-                  FOUND=true
-                  break
-                fi
-              done <<< "$REMOTE_ASSETS"
-              if [ "$FOUND" = "true" ]; then
-                rm -rf "$VERIFY_DIR"
-                VERIFY_DIR=$(mktemp -d)
-                gh release download "$TAG" --dir "$VERIFY_DIR" --pattern "$NAME"
-                cmp "$ASSET" "$VERIFY_DIR/$NAME"
-              else
-                gh release upload "$TAG" "$ASSET"
-              fi
-            done
-            rm -rf "$VERIFY_DIR"
-          }
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            DRAFT_STATE=$(gh release view "$TAG" --json isDraft --jq .isDraft)
-            if [ "$DRAFT_STATE" = "false" ]; then
-              verify_release_identity false true
-              verify_exact_assets
-              exit 0
-            fi
-            test "$DRAFT_STATE" = "true"
-            verify_release_identity true false
-          else
-            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-              echo "Refusing to publish over an orphaned existing tag: ${TAG}" >&2
-              exit 1
-            fi
-            if ! gh release create "$TAG" \
-              --draft \
-              --generate-notes \
-              --target "$GITHUB_SHA" \
-              --title "CHZZK ${VERSION}"; then
-              gh release view "$TAG" >/dev/null
-            fi
-            verify_release_identity true false
-          fi
-
-          sync_draft_assets
-          verify_release_identity true false
-          verify_exact_assets
-
-  complete:
-    needs: [attest, prepare, sign, stage, verify-signed]
-    if: always()
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require either verified reuse or the full sign-attest-stage chain
-        run: |
-          set -euo pipefail
-          test "${{ needs.prepare.result }}" = "success"
-          test "${{ needs.verify-signed.result }}" = "success"
-          if [ "${{ needs.prepare.outputs.reuse_existing }}" = "true" ]; then
-            test "${{ needs.sign.result }}" = "skipped"
-            test "${{ needs.attest.result }}" = "skipped"
-            test "${{ needs.stage.result }}" = "skipped"
-          elif [ "${{ needs.prepare.outputs.draft_signed_ready }}" = "true" ]; then
-            test "${{ needs.sign.result }}" = "skipped"
-            test "${{ needs.attest.result }}" = "success"
-            test "${{ needs.stage.result }}" = "success"
-          else
-            test "${{ needs.sign.result }}" = "success"
-            test "${{ needs.attest.result }}" = "success"
-            test "${{ needs.stage.result }}" = "success"
-          fi

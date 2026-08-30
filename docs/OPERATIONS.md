@@ -1,166 +1,192 @@
-# CHZZK Operations Runbook
+# CHZZK 운영
 
-## Release checklist
+## 단일 운영 인터페이스
 
-1. Start from a clean branch based on the exact remote `main`.
-2. Choose one canonical SemVer change and update `package.json`, `package-lock.json`, `manifest.json`, and the `RELEASE_VERSION` constant in `scripts/lib/release-finalize-state.js` together.
-3. Run the complete local gate:
+GitHub와 내부 업데이트 서버의 공개 운영 인터페이스는 다음 명령뿐이다.
+
+```powershell
+npm run chzzk -- status --json
+npm run chzzk -- ship --json
+npm run chzzk -- release --json
+npm run chzzk -- deploy [version] --json
+npm run chzzk -- rollback <version> --json
+```
+
+- `status`는 GitHub, 로컬 checkout, Release와 서버를 읽기만 한다.
+- `ship`은 제품 변경의 PR부터 검증, merge, Release, 서버 배포와 disposable
+  Firefox 업데이트 검증까지 수행한다.
+- `release`는 이미 보호된 `main`에 병합된 canonical version을 서명하고 immutable
+  GitHub Release로 게시한다.
+- `deploy`는 생략한 경우 현재 canonical Release를, 지정한 경우 해당 immutable
+  Release를 내부 서버에 배포한다.
+- `rollback`은 사용자가 명시한 이전 immutable version으로 stable link를 되돌린다.
+
+모든 GitHub 호출은 이 PC의 GitHub CLI keyring 인증을 사용한다. raw token을 환경
+변수, argv, 파일, log, artifact 또는 서버에 전달하지 않는다. 서버는 GitHub에
+인증하지 않으며, 로컬에서 검증한 고유 SCP bundle만 받는다.
+
+## 요청 분류
+
+- 설명, 조사, 상태 확인, 검토 등 읽기 전용 요청은 `status`와 필요한 readback만
+  수행한다. branch, commit, PR, Actions run, Release, 서버와 Firefox를 변경하지
+  않는다.
+- 확장 동작, manifest, 권한 또는 배포 산출물이 바뀌는 제품 변경은 사용자의 변경
+  요청 자체가 전체 `ship`을 승인한다. checks가 통과하면 단계별 재승인 없이
+  squash merge, 서명, 게시와 서버 배포까지 끝낸다.
+- 문서, 운영 도구, 테스트 인프라와 workflow pin처럼 제품 산출물을 바꾸지 않는
+  변경은 보호 PR merge까지만 진행한다. 버전, Release와 서버는 바꾸지 않는다.
+- rollback은 자동 판단하지 않는다. 사용자가 대상 version과 rollback 의도를
+  명시한 경우에만 수행한다.
+
+사용자의 설치된 Firefox profile은 별도 경계다. 자동 ship은 새 disposable
+profile만 사용하고, 사용자가 설치 또는 실제 profile 업데이트를 명시하지 않으면
+실행 중인 Firefox를 닫거나 설치 XPI를 덮어쓰거나 업데이트 버튼을 누르지 않는다.
+
+## UTC 일일 Release queue
+
+운영 version은 UTC 날짜를 zero padding 없이 `YY.M.D`로 표현한다. 예를 들어
+2026-08-30 UTC의 version은 `26.8.30`이다.
+
+- UTC 하루에 immutable Release는 하나만 게시한다.
+- 그날 slot이 비어 있으면 `ship`이 `manifest.json`, `package.json`과
+  `package-lock.json`의 top-level/root package version을 같은 날짜로 맞춘다.
+- 그날 Release가 이미 게시됐다면 새 제품 변경은 version을 올리거나 merge하지
+  않는다. 정확히 하나의 `ship-pending` PR을 생성하거나 기존 PR에 합친다.
+- UTC 날짜가 바뀐 뒤 들어온 다음 mutating 제품 요청이 `ship-pending`을 이어받아
+  새 날짜 version으로 검증하고 ship한다. 별도 scheduler나 다섯 번째 Action은
+  두지 않는다.
+- 같은 tag, source SHA와 asset이 이미 정확하면 release와 deploy는 idempotent
+  no-op이다. 같은 SHA의 진행 중 workflow run이나 compatible draft는 resume한다.
+  다른 SHA의 같은 tag, 예상 밖 asset 또는 중복 run은 변경 전에 fail-closed한다.
+
+## 제품 변경과 merge
+
+1. remote `main`을 readback하고 현재 작업이 clean `agent/*` branch인지 확인한다.
+2. 실제 제품 결함에는 회귀 테스트를 추가하고 생성 runtime을 갱신한다.
+3. 가장 좁은 관련 테스트를 먼저 실행한 뒤 `npm run verify`와 적용 가능한 실제
+   Firefox E2E를 실행한다.
+4. 당일 slot이 비어 있으면 `manifest.json`, `package.json`, `package-lock.json`
+   top-level과 root package의 네 version field를 함께 맞추고 다시 검증한 뒤 source
+   변경을 commit한다.
+5. `gh`로 PR을 만들고 마지막 source push 뒤 PR body와 고위험 권한, 개인정보,
+   릴리스 및 배포 영향을 확정한다.
+6. exact PR head에서 `verify`, `firefox-e2e`, `dependency-review`, `analyze`가
+   모두 성공하고 unresolved conversation이 0개인지 확인한다.
+7. operating agent가 최종 diff를 직접 검토하고 현재 head SHA를 식별하는 COMMENT
+   review를 `gh`로 기록한다. approval이나 외부 comment-triggered review는 요구하지
+   않는다.
+   이후 source push가 생기면 네 checks와 exact-head COMMENT review를 반복한다.
+8. base와 head를 다시 읽고 squash merge한다. GitHub auto-merge나 generic
+   unattended merge는 사용하지 않는다.
+9. 제품 변경이면 이어서 `release`와 `deploy`를 실행하고 배포 검증까지 끝낸다.
+
+sole-owner 저장소이므로 required approval count는 0이다. 대신 native PR, strict
+required checks, administrator enforcement와 conversation resolution은 유지한다.
+
+## Release
+
+`npm run chzzk -- release --json`은 다음 순서를 한 작업으로 수행한다.
+
+1. local `gh` identity, repository ID, protected remote `main`, canonical UTC version,
+   immutable-release 설정과 tag/Release 충돌을 확인한다.
+2. 예측 불가능한 nonce와 exact `source_sha`, `version`으로
+   `Build signed Firefox release`의 `workflow_dispatch`를 호출한다.
+3. exact workflow ID, source SHA와 nonce의 run 하나만 bounded polling한다.
+4. 성공 run의 `chzzk-release-assets-<source_sha>` artifact를 private local
+   temporary directory에 내려받는다.
+5. canonical source ZIP, metadata와 AMO-signed XPI의 byte identity, add-on ID,
+   version, update URL, stock-Firefox signed state와 build provenance를 검증한다.
+6. exact tag와 세 asset으로 Release를 게시하고 immutable post-state를 readback한다.
+7. `gh release verify`로 Release attestation과 asset digest를 다시 확인한다.
+
+Actions는 Release를 draft로 만들거나 게시하지 않는다. 관리자 권한은 로컬 `gh`
+process에만 있고, Actions는 AMO secret을 사용하는 서명 job과 secret 없는
+검증·attestation job을 분리한다.
+
+## 내부 서버 배포
+
+정상 운영 경로는 Router를 경유하는 `ssh server`다. `deploy`는 로컬 `gh`로
+immutable Release와 attestation을 검증하고 세 canonical asset을 private temporary
+directory에 받은 뒤, exact protected source의 activator와 전체 import graph 및
+`jszip`을 esbuild로 하나의 self-contained ESM file로 묶는다. 이 activator와 세
+asset을 고유 이름의 bounded bundle로 SCP 전송한다. 서버에는 checkout,
+`node_modules`나 GitHub token이 필요 없다. 서버의 hidden activation은 다음을
+강제한다.
+
+- 고정 target `/srv/admin/chzzk-updates`와 예상 owner/mode;
+- symlink ancestor, foreign ownership와 group/world-writable managed path 거부;
+- process-bound lock과 fsync된 rollback journal;
+- immutable version directory 작성 후 `current`와 stable link의 원자적 전환;
+- backend와 Caddy의 version, MIME, JSON, link와 SHA-256 readback;
+- activation 실패나 중단 시 이전 link 복구.
+
+성공 후 로컬 operator는 PowerShell HTTPS 경로로 `updates.json`과 XPI를 다시
+검증한다. Router gate를 통과하지 못할 수 있는 `curl.exe` 실패만으로 장애를
+판정하지 않는다.
+
+`rollback <version>`도 대상 immutable Release와 서버 generation을 검증한 뒤 같은
+lock/journal/link 전환을 사용한다. release directory를 자동 삭제하지 않는다.
+이전 generation은 rollback과 old-signed-to-new-signed smoke를 위해 유지한다.
+
+## 배포 후 Firefox 검증
+
+Release 이전 signed XPI, 새 metadata와 signed XPI를 GitHub에서 검증해 내려받고
+실제 Windows PC의 Firefox ESR, 정상 DNS/TLS와 새 disposable profile로 update
+mode를 실행한다.
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File .\scripts\firefox-signed-smoke.windows.ps1 `
+  -NodeBinary "<absolute-node.exe>" `
+  -FirefoxBinary "<absolute-firefox.exe>" `
+  -GeckodriverBinary "<absolute-geckodriver.exe>" `
+  -ReleaseMetadata "<absolute-chzzk-YY.M.D-release-metadata.json>" `
+  -SignedXpi "<absolute-chzzk-YY.M.D-signed.xpi>" `
+  -OldSignedXpi "<absolute-previous-signed.xpi>" `
+  -ResultPath "<new-private-result.json>"
+```
+
+결과는 exact Firefox/extension version, `permanent-signed-active`와
+`none-found`를 요구한다. task가 만든 input, result, profile과 process만 제거하며
+사용자 profile은 열지 않는다.
+
+## GitHub 설정
+
+활성 workflow는 다음 네 개만 유지한다.
+
+- CI
+- CodeQL
+- Dependency review
+- Build signed Firefox release
+
+`main`은 strict required checks `verify`, `firefox-e2e`,
+`dependency-review`, `analyze`, native PR, administrator enforcement와
+conversation resolution을 요구한다. squash merge만 허용하며 Actions 기본 권한은
+read-only다.
+
+새 local-`gh` 운영 흐름이 병합된 뒤 사용자는 GitHub 설정에서 기존 외부 Codex
+GitHub App을 한 번 disable한다. 그 뒤 PR comment trigger, external review bot, bot
+approval이나 별도 review workflow는 사용하지 않는다.
+
+## 장애 경계
+
+- 내부 `ssh server`가 실패하면 먼저 PC→Router와 Router→Server 경로, DNS, VPN,
+  key와 client 설정을 readback한다.
+- 공개 SSH timeout은 내부 경로가 정상인 동안 CHZZK 배포 blocker가 아니다.
+- OCI는 PC와 Router 양쪽에서 기존 서버 SSH가 불가능한 긴급 복구에만 사용한다.
+  자동 status, release, deploy 또는 rollback command는 OCI에 접근하지 않는다.
+- AMO, GitHub, SCP, activation 또는 readback이 불완전하면 성공으로 보고하지 않고
+  재실행 가능한 exact state를 남긴다.
+
+## CHZZK 변경 대응
+
+NAVER 변경으로 playback이 깨지면 redacted diagnostics를 분석하고 실제 결함을
+재현하는 fixture를 먼저 추가한다.
 
 ```bash
-npm ci
+npm run diagnostics:analyze -- diagnostics.json
 npm run verify
-npm run setup:firefox-e2e
-FIREFOX_BINARY="$PWD/dist/e2e-tools/firefox/firefox" \
-GECKODRIVER_BINARY="$PWD/dist/e2e-tools/geckodriver" \
-npm run test:firefox-functional-e2e
 ```
 
-4. Open a draft PR. The protected branch requires the four GitHub-Actions-bound checks `verify`, `firefox-e2e`, `dependency-review`, and `analyze` (CodeQL), plus zero unresolved review threads.
-5. Finalize the PR body and every high-risk release, permissions, deployment, or security-policy note after the last source push. Then mark the PR ready for review and request the final direct Codex review:
-
-```text
-@codex review
-```
-
-Wait for the resulting review record and confirm that its reviewed commit is the current full PR head SHA. Resolve every actionable finding. Any source push after that review requires all four checks and a new final direct Codex review on the Ready PR. Immediately before the authorized squash merge, the acting operator confirms that the reviewed commit still equals the PR head, the finalized high-risk notes remain unchanged, the base is current, all four protected checks pass, and GitHub reports zero unresolved conversations. A self-approval, approval-count gate, custom bot-review workflow, or commit-scoped review-completion status is not used for this sole-owner repository.
-
-6. The owner or an operating agent explicitly authorized by the owner squash-merges through protected `main` only after step 5 is complete. An owner instruction to finish or merge the scoped task is sufficient authorization, so the agent does not request a second merge confirmation after the gates pass. GitHub auto-merge and unattended generic merge automation must not be enabled or used.
-
-7. Refresh the external operator bootstrap from the protected exact `main` blob as described in `docs/SIGNING.md`.
-
-8. From the clean exact-`main` checkout, run the fully sanitized, bounded `release` command in `docs/SIGNING.md` once. Do not replace it with a checkout script, npm command, or ambient `gh workflow run`.
-
-9. Require the administrator preflight → nonce-bound dispatch/wait → authorize → prepare → sign → signed-XPI verification → stock-Firefox install → attest → draft stage → fresh administrator preflight → immutable publication chain. Do not waive a missing artifact or smoke.
-10. Confirm the published Release is immutable and contains exactly the source ZIP, release metadata, and signed XPI:
-
-```bash
-gh release verify "v$VERSION" --repo solitude0429/CHZZK
-```
-
-11. Refresh `scripts/internal-update-deploy-bootstrap.js` from the protected exact `main` blob using the same Git-blob verification procedure as the release bootstrap, and install it outside the checkout as an owner-only mode `0500` `.mjs` file. From an already-running trusted administrator shell and the exact clean `main` checkout, deploy the immutable release only through that external bootstrap:
-
-```bash
-(
-  if [ -n "${GITHUB_ACTIONS-}" ]; then exit 1; fi
-  trap - DEBUG 2>/dev/null || true
-  set +x
-  set +v
-  chzzk_deploy_token="$CHZZK_DEPLOY_READ_TOKEN"
-  unset ALL_PROXY BASH_ENV CDPATH CHZZK_DEPLOY_READ_TOKEN CURL_CA_BUNDLE ENV \
-    GH_ENTERPRISE_TOKEN GH_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN GLOBIGNORE HOME \
-    HTTPS_PROXY HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD \
-    NODE_EXTRA_CA_CERTS NODE_OPTIONS NODE_PATH NO_PROXY PS4 \
-    REQUESTS_CA_BUNDLE SSL_CERT_DIR SSL_CERT_FILE XDG_CONFIG_HOME \
-    all_proxy http_proxy https_proxy no_proxy
-  export -n BASHOPTS SHELLOPTS 2>/dev/null || true
-  printf '%s\n' "$chzzk_deploy_token" |
-    /usr/bin/env -i CHZZK_UPDATE_DEPLOY_PARENT_BOUNDARY=1 \
-      LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-      PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin \
-      "/absolute/protected/chzzk-internal-update-deploy-bootstrap.mjs" \
-      "<canonical published version>" \
-      "solitude0429/CHZZK" \
-      "$PWD" \
-      "/srv/admin/chzzk-updates"
-  chzzk_deploy_status=$?
-  unset chzzk_deploy_token
-  exit "$chzzk_deploy_status"
-)
-```
-
-The trusted parent shell disables command/input tracing before copying the token, then removes dynamic-loader, shell-startup, Node, proxy, and CA injection variables before starting even `/usr/bin/env`; do not replace that boundary with a one-line `GH_TOKEN=...` invocation. The bootstrap then requires the clean-parent marker and token on stdin, starts absolute system Node under a second empty environment, and requires the supplied checkout to equal trusted Git's canonical worktree root with the pinned repository origin. Only then does it verify that its own canonical `.mjs` path is outside that complete checkout, operator-owned with exact mode `0500`, and contained by a private operator-owned directory. It discovers only protected absolute system tools, creates a private GitHub CLI home, binds the canonical repository, clean checkout, and release to the protected remote head, Git-blob-verifies the deployment entrypoint and its complete local import graph, and executes those sealed bytes. It owns the artifact-download directory under its private execution tree so terminal child failure is cleaned by the parent. The checkout-local deployment entrypoint and an npm script are not public operational interfaces.
-
-The deployment polyglot bootstrap accepts only the fixed protected system paths `/usr/bin/node` or `/run/current-system/sw/bin/node`; its Git and GitHub CLI candidates are likewise fixed, including the NixOS system profile. The repository-settings bootstrap continues to require `/usr/bin/node`. Neither launcher searches `PATH` for an executable.
-
-12. Verify live `updates.json` and XPI MIME type, SHA-256, version, add-on ID, minimum Firefox version, source commit, and stable symlink targets.
-13. Run the old-signed-to-new-signed stock-Firefox update smoke from `docs/TESTING.md`.
-14. From the actual current Windows client, run the checked-in `scripts/firefox-signed-smoke.windows.ps1` command in `docs/TESTING.md` through its installed Firefox ESR, normal DNS, and production TLS path. Require the bounded result to report the Firefox and extension versions, `permanent-signed-active`, and final `none-found`; transfer it to protected release evidence and remove every task-created Windows input, result, profile, and process. Do not ask the user to perform this gate, stop their Firefox, or overwrite an installed profile XPI.
-
-## Repository settings
-
-Repository protection is managed out of band so a pull-request workflow cannot weaken its own controls. The source of truth requires a native pull request for every `main` change with zero required approvals, keeps only squash merge, disables GitHub auto-merge, deletes merged branches, restricts Actions to GitHub-owned actions, grants workflows read-only permissions by default, requires the four source-bound deterministic checks `analyze`, `dependency-review`, `firefox-e2e`, and `verify`, enforces protection for administrators, and requires resolved conversations without a self-approval rule. The final direct Codex review is the single qualitative layer: its review record must name the current PR head after the body and high-risk notes are final and the PR is Ready, any later source push requires a new review, and the acting owner or explicitly authorized operating agent verifies that identity immediately before the squash merge. No custom review-completion workflow or required status represents that procedural review because GitHub check runs are commit-scoped, can be reused by another PR with the same commit, and can only react asynchronously to PR or comment metadata changes. Native pull-request and required-conversation protection remain independent merge gates. Do not replace these controls with an unbound status context, duplicate bot review, approval-count gate, GitHub auto-merge, or unattended generic merge automation.
-
-Refresh `scripts/repository-settings-bootstrap.js` from the protected exact `main` blob, verify its Git-blob identity, and install it outside the checkout at one recorded canonical absolute `.mjs` path with an owner-only parent and mode `0500`. From an already-running trusted administrator shell, run the value-free dry-run through that exact external bootstrap:
-
-```bash
-(
-  if [ -n "${GITHUB_ACTIONS-}" ]; then exit 1; fi
-  trap - DEBUG 2>/dev/null || true
-  set +x
-  set +v
-  chzzk_settings_token="$CHZZK_REPOSITORY_ADMIN_TOKEN"
-  unset ALL_PROXY BASH_ENV CDPATH CHZZK_RELEASE_ADMIN_TOKEN \
-    CHZZK_REPOSITORY_ADMIN_TOKEN CURL_CA_BUNDLE ENV GH_ENTERPRISE_TOKEN \
-    GH_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN GLOBIGNORE HOME HTTPS_PROXY \
-    HTTP_PROXY LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD NODE_EXTRA_CA_CERTS \
-    NODE_OPTIONS NODE_PATH NO_PROXY PS4 REQUESTS_CA_BUNDLE SSL_CERT_DIR \
-    SSL_CERT_FILE XDG_CONFIG_HOME all_proxy http_proxy https_proxy no_proxy
-  export -n BASHOPTS SHELLOPTS 2>/dev/null || true
-  printf '%s\n' "$chzzk_settings_token" |
-    /usr/bin/env -i CHZZK_REPOSITORY_SETTINGS_PARENT_BOUNDARY=1 \
-      LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin \
-      "/absolute/protected/chzzk-repository-settings-bootstrap.mjs" \
-      "solitude0429/CHZZK" \
-      "$PWD"
-  chzzk_settings_status=$?
-  unset chzzk_settings_token
-  exit "$chzzk_settings_status"
-)
-```
-
-Append `--apply` only after reviewing the dry-run JSON. The same no-trace trusted-parent boundary applies to this token. The bootstrap pins the canonical repository name and numeric ID, verifies the clean exact protected-head checkout and protected source blob, and executes the sealed configurator with protected absolute tools and a private tool home. Apply is sequential and fail-closed, not atomic: a mid-apply API failure emits a bounded value-free recovery report, and a fresh dry-run is used to converge safely. Before every mutation, any payload-preparation read completes first and the protected-branch head GET is then repeated as the final external read. The checkout configurator and an npm script are not public operational interfaces. Version-only dependency bot PRs are disabled; the operating agent consolidates current tooling updates into one tested maintenance PR while `npm audit`, dependency review, CodeQL, and GitHub vulnerability alerts remain active.
-
-The configurator also inventories only the names and scopes of the two AMO signing secrets. It requires the protected-branch-only `firefox-signing` environment plus one complete credential pair at Repository Actions or environment scope. A complete existing Repository pair remains valid and is not copied or deleted. A complete environment pair is also valid and takes precedence by GitHub's name-resolution rules; a partial pair at either scope, no complete pair, or an incorrect environment policy rejects `--apply` before any mutation. The configurator never reads, writes, migrates, or deletes secret values.
-
-When a workflow is retired, merge its file removal first, disable only that workflow's remaining server-side record where GitHub supports it, and verify the Actions API inventory contains exactly `ci.yml`, `codeql.yml`, `dependency-review.yml`, and `sign-unlisted.yml`. Preserve current release, verification, and provenance run evidence.
-
-## Patch response
-
-When CHZZK/NAVER changes break playback:
-
-1. Export diagnostics JSON from the popup.
-2. Confirm it contains no query/hash values, cookies, headers, account/session identifiers, keys, UUIDs, or connection identifiers.
-3. Run `npm run diagnostics:analyze -- diagnostics.json`.
-4. Add a failing redacted fixture before changing URL-shape handling.
-5. Fix the smallest shared policy/runtime boundary.
-6. Run `npm run verify` and the Firefox E2E before opening a PR.
-
-## Local diagnostics
-
-- Diagnostics stay in the browser extension's local storage.
-- The extension runtime does not send diagnostics to an external collector.
-- Local samples are schema-normalized and redacted before storage/export; host labels discard subdomains and ports.
-- Manually review any export again before sharing it.
-
-## Incident response
-
-### Unrelated CDN traffic appears in diagnostics
-
-1. Stop sharing the affected export.
-2. Add a `shouldRecordDiagnostics` regression.
-3. Harden context gates.
-4. Run the full verification suite.
-5. Add a privacy caveat to the next release note if exposure occurred.
-
-### Playback fails completely
-
-1. Disable the extension to confirm rollback behavior.
-2. Check popup `lastDecision`.
-3. Record only a redacted DevTools Network URL shape.
-4. Add a parser fixture for `unknown-quality-shape`.
-5. Expand domains only after proving the request is a CHZZK live playlist.
-
-### A higher quality appears later
-
-1. Run the diagnostics analyzer.
-2. If `needsPolicyUpdate` is true, use `--apply`.
-3. Review the generated candidate and tests before release.
-
-## Operational boundaries
-
-- Do not reintroduce DOM-selector fake menu labels or a global static DNR ruleset.
-- Do not seed a fixed startup quality; resolve the highest actually available playlist per tab.
-- Do not validate a release by closing Firefox or overwriting a profile XPI.
-- Do not store unrelated CDN traffic or signed media URL query/hash values.
-- Do not reintroduce external telemetry without explicit consent and Firefox data-consent UI.
-- Do not describe Mozilla unlisted signing as NAVER approval.
+query/hash, cookie, header, account/session identifier, key, UUID와 complete signed
+media URL은 issue, PR, fixture와 log에 남기지 않는다.

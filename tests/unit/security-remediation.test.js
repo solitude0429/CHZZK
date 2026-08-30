@@ -32,7 +32,7 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(signer, /authorizedFetch\(downloadUrl/);
   });
 
-  it("pins every action and separates build, secret, attestation, and write authority", () => {
+  it("pins every action and separates build, secret, and attestation authority", () => {
     const workflowDir = join(rootDir, ".github/workflows");
     for (const name of readdirSync(workflowDir).filter((entry) => /\.ya?ml$/.test(entry))) {
       const text = read(`.github/workflows/${name}`);
@@ -81,37 +81,34 @@ describe("release and repository security guardrails", () => {
       contents: "read",
       "id-token": "write",
     });
-    assert.deepEqual(release.jobs.stage.permissions, { actions: "read", contents: "write" });
+    assert.equal(
+      Object.values(release.jobs).some((job) => job.permissions?.contents === "write"),
+      false,
+    );
 
     const signText = JSON.stringify(release.jobs.sign);
     const attestText = JSON.stringify(release.jobs.attest);
-    const stageText = JSON.stringify(release.jobs.stage);
     assert.match(signText, /secrets\.AMO_JWT_ISSUER/);
     assert.doesNotMatch(signText, /actions\/checkout|npm ci|npm install/);
     assert.doesNotMatch(attestText, /secrets\.|actions\/checkout|npm ci|npm install|node scripts/);
-    assert.doesNotMatch(stageText, /secrets\.|actions\/checkout|npm ci|npm install|node scripts/);
   });
 
-  it("keeps publication nonce-bound, immutable, and outside GitHub Actions", () => {
+  it("keeps dispatch nonce-bound and immutable publication outside GitHub Actions", () => {
     const release = workflow("sign-unlisted.yml");
     const text = read(".github/workflows/sign-unlisted.yml");
-    const bootstrap = read("scripts/admin-release-bootstrap.js");
     const finalizer = read("scripts/lib/release-finalize.js");
     const updateRunbook = read("docs/UPDATES.md");
-    assert.deepEqual(release.on, {
-      repository_dispatch: { types: ["chzzk-release-preflight-v1"] },
-    });
-    assert.match(String(release["run-name"]), /dispatch_nonce/);
+    assert.deepEqual(Object.keys(release.on), ["workflow_dispatch"]);
+    assert.deepEqual(Object.keys(release.on.workflow_dispatch.inputs).sort(), [
+      "nonce",
+      "source_sha",
+      "version",
+    ]);
+    assert.match(String(release["run-name"]), /inputs\.nonce/);
     assert.match(JSON.stringify(release.jobs.authorize), /RELEASE_OPERATOR_LOGIN|EXPECTED_OPERATOR/);
     assert.match(text, /reuse_existing/);
     assert.match(text, /draft_signed_ready/);
-    assert.match(text, /gh release upload "\$TAG" "\$ASSET"/);
-    assert.doesNotMatch(text, /--clobber|gh release edit "\$TAG" --target/);
-    assert.match(bootstrap, /repos\/\$\{repository\}\/immutable-releases/);
-    assert.match(bootstrap, /randomBytes\(16\)/);
-    assert.match(bootstrap, /run\.display_title === expectedTitle/);
-    assert.match(bootstrap, /run\?\.workflow_id !== workflowId/);
-    assert.doesNotMatch(bootstrap, /run\.name === "Stage unlisted Firefox release"/);
+    assert.doesNotMatch(text, /contents:\s*write|gh release (?:create|edit|upload)|--clobber/);
     assert.match(finalizer, /immutableReleasesEnabled/);
     assert.match(finalizer, /"draft=false"/);
     assert.doesNotMatch(finalizer, /GITHUB_TOKEN/);
@@ -121,7 +118,7 @@ describe("release and repository security guardrails", () => {
     assert.doesNotMatch(updateRunbook, /CHZZK_PREVIOUS_SIGNED_XPI|CHZZK_UPDATE_BASE_URL/);
   });
 
-  it("runs the final signed XPI in stock Firefox before attestation and staging", () => {
+  it("runs the final signed XPI in stock Firefox before attestation and artifact output", () => {
     const release = workflow("sign-unlisted.yml");
     const steps = release.jobs["verify-signed"].steps;
     const structural = steps.findIndex(
@@ -137,7 +134,6 @@ describe("release and repository security guardrails", () => {
     assert.equal(smoke > setup, true);
     assert.equal(upload > smoke, true);
     assert.match(JSON.stringify(release.jobs.attest.needs), /verify-signed/);
-    assert.match(JSON.stringify(release.jobs.stage.needs), /verify-signed/);
   });
 
   it("removes retired, duplicate, and signal-poor automation", () => {

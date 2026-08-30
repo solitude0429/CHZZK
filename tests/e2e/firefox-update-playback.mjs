@@ -1168,7 +1168,7 @@ class WebDriver {
           browserName: "firefox",
           pageLoadStrategy: "normal",
           "moz:firefoxOptions": {
-            args: ["-headless", "--no-remote", "-remote-allow-system-access"],
+            args: ["-headless", "--no-remote"],
             binary: firefoxBinary,
             prefs: {
               "app.update.auto": false,
@@ -1605,9 +1605,11 @@ async function main() {
       },
     };
 
-    geckodriverProcess = spawn(geckodriverBinary, ["--host", "127.0.0.1", "--port", String(driverPort)], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    geckodriverProcess = spawn(
+      geckodriverBinary,
+      ["--allow-system-access", "--host", "127.0.0.1", "--port", String(driverPort)],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
     for (const stream of [geckodriverProcess.stdout, geckodriverProcess.stderr]) {
       stream.setEncoding("utf8");
       stream.on("data", (chunk) => logs.push(chunk));
