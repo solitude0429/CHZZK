@@ -58,6 +58,8 @@ const MAX_COMMAND_OUTPUT = 16 * 1024 * 1024;
 const RUN_DISCOVERY_ATTEMPTS = 60;
 const RUN_DISCOVERY_DELAY_MS = 2_000;
 
+class UtcReleaseSlotRolloverError extends Error {}
+
 function exactKeys(value, keys, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -129,6 +131,16 @@ export function formatUtcVersion(date = new Date()) {
 
 export function compareUtcVersions(left, right) {
   return parseUtcVersion(left).date.getTime() - parseUtcVersion(right).date.getTime();
+}
+
+export function assertUtcReleaseSlot(expectedVersion, date = new Date()) {
+  const expected = parseUtcVersion(expectedVersion).canonical;
+  if (formatUtcVersion(date) !== expected) {
+    throw new UtcReleaseSlotRolloverError(
+      "UTC release slot rolled over before merge; the operator must update the version and repeat checks",
+    );
+  }
+  return expected;
 }
 
 function tagFor(version) {
@@ -540,12 +552,12 @@ function assertRequiredChecks(pullRequest) {
   }
 }
 
-async function branchChangesProduct(run, context) {
+export async function branchChangesProduct(run, context) {
   if (context.branch === OPS_DEFAULT_BRANCH) return false;
   const output = await textCommand(
     run,
     "git",
-    ["diff", "--name-only", "--diff-filter=ACMRT", `${context.remoteMainSha}...${context.headSha}`],
+    ["diff", "--name-only", "--diff-filter=ACDMRT", `${context.remoteMainSha}...${context.headSha}`],
     { cwd: context.root },
   );
   const paths = output ? output.split(/\r?\n/).filter(Boolean) : [];
@@ -616,10 +628,23 @@ async function ensureUtcProjectVersion({ context, run, version }) {
   return refreshed;
 }
 
-async function queueShipPending({ context, run, version }) {
+export async function queueShipPending({ context, run, version }) {
   requireClean(context);
   if (context.branch === OPS_DEFAULT_BRANCH || !context.branch.startsWith("agent/")) {
     throw new Error("same-day product changes must be queued from a clean agent/* branch");
+  }
+  await invoke(run, "git", ["push", "-u", OPS_REMOTE, `${context.headSha}:refs/heads/${context.branch}`], {
+    cwd: context.root,
+  });
+  const sourceBranch = await jsonCommand(
+    run,
+    "gh",
+    apiArgs(`repos/${OPS_REPOSITORY}/branches/${encodeRef(context.branch)}`),
+    "queued source branch",
+    { cwd: context.root },
+  );
+  if (validateSha(sourceBranch?.commit?.sha, "queued source branch HEAD") !== context.headSha) {
+    throw new Error("queued source branch does not match the exact local source SHA");
   }
   const existing = await jsonCommand(
     run,
@@ -636,7 +661,7 @@ async function queueShipPending({ context, run, version }) {
       "--limit",
       "10",
       "--json",
-      "number,headRefName,headRefOid,url",
+      "number,state,isDraft,baseRefName,headRefName,headRefOid,url",
     ],
     "ship-pending pull requests",
     { cwd: context.root },
@@ -645,23 +670,91 @@ async function queueShipPending({ context, run, version }) {
     throw new Error("unable to prove there is at most one ship-pending pull request");
   }
   if (existing.length === 1) {
+    const pending = existing[0];
     if (
-      existing[0].headRefName === context.branch &&
-      existing[0].headRefOid?.toLowerCase() === context.headSha
+      !Number.isSafeInteger(pending.number) ||
+      pending.state !== "OPEN" ||
+      pending.isDraft !== true ||
+      pending.baseRefName !== OPS_DEFAULT_BRANCH ||
+      !String(pending.headRefName ?? "").startsWith("agent/")
     ) {
+      throw new Error("the existing ship-pending pull request is not one canonical draft");
+    }
+    const pendingHeadSha = validateSha(pending.headRefOid, "previous ship-pending HEAD");
+    if (pending.headRefName === context.branch && pendingHeadSha === context.headSha) {
       return {
         command: "ship",
-        pullRequest: existing[0].number,
+        pullRequest: pending.number,
         queued: true,
         reason: `UTC release ${version} is already published`,
-        url: existing[0].url,
+        url: pending.url,
       };
     }
-    throw new Error(`product release is queued in the existing ship-pending PR: ${existing[0].url}`);
+    const pendingBranch = validateBranch(pending.headRefName);
+    await invoke(run, "gh", apiArgs(`repos/${OPS_REPOSITORY}/merges`, { method: "POST" }), {
+      cwd: context.root,
+      input: `${JSON.stringify({
+        base: pendingBranch,
+        commit_message: `chore: queue CHZZK changes from ${context.branch}`,
+        head: context.headSha,
+      })}\n`,
+    });
+    const mergedBranch = await jsonCommand(
+      run,
+      "gh",
+      apiArgs(`repos/${OPS_REPOSITORY}/branches/${encodeRef(pendingBranch)}`),
+      "merged ship-pending branch",
+      { cwd: context.root },
+    );
+    const queuedHeadSha = validateSha(mergedBranch?.commit?.sha, "merged ship-pending branch HEAD");
+    for (const ancestor of [pendingHeadSha, context.headSha]) {
+      const comparison = await jsonCommand(
+        run,
+        "gh",
+        apiArgs(
+          `repos/${OPS_REPOSITORY}/compare/${encodeURIComponent(ancestor)}...${encodeURIComponent(queuedHeadSha)}`,
+        ),
+        "ship-pending ancestry",
+        { cwd: context.root },
+      );
+      if (!new Set(["ahead", "identical"]).has(comparison?.status) || comparison?.behind_by !== 0) {
+        throw new Error("merged ship-pending head does not contain every queued source");
+      }
+    }
+    const mergedPending = await jsonCommand(
+      run,
+      "gh",
+      [
+        "pr",
+        "view",
+        String(pending.number),
+        "--repo",
+        OPS_REPOSITORY,
+        "--json",
+        "number,state,isDraft,baseRefName,headRefName,headRefOid,url",
+      ],
+      "merged ship-pending pull request",
+      { cwd: context.root },
+    );
+    if (
+      mergedPending?.number !== pending.number ||
+      mergedPending?.state !== "OPEN" ||
+      mergedPending?.isDraft !== true ||
+      mergedPending?.baseRefName !== OPS_DEFAULT_BRANCH ||
+      mergedPending?.headRefName !== pendingBranch ||
+      mergedPending?.headRefOid?.toLowerCase() !== queuedHeadSha
+    ) {
+      throw new Error("GitHub did not bind the merged changes to the existing ship-pending PR");
+    }
+    return {
+      command: "ship",
+      headSha: queuedHeadSha,
+      pullRequest: pending.number,
+      queued: true,
+      reason: `UTC release ${version} is already published`,
+      url: pending.url,
+    };
   }
-  await invoke(run, "git", ["push", "-u", OPS_REMOTE, `${context.headSha}:refs/heads/${context.branch}`], {
-    cwd: context.root,
-  });
   await invoke(
     run,
     "gh",
@@ -716,13 +809,16 @@ async function queueShipPending({ context, run, version }) {
       "--limit",
       "10",
       "--json",
-      "number,headRefName,headRefOid,url",
+      "number,state,isDraft,baseRefName,headRefName,headRefOid,url",
     ],
     "created ship-pending pull request",
     { cwd: context.root },
   );
   if (
     created.length !== 1 ||
+    created[0].state !== "OPEN" ||
+    created[0].isDraft !== true ||
+    created[0].baseRefName !== OPS_DEFAULT_BRANCH ||
     created[0].headRefName !== context.branch ||
     created[0].headRefOid?.toLowerCase() !== context.headSha
   ) {
@@ -737,7 +833,34 @@ async function queueShipPending({ context, run, version }) {
   };
 }
 
-export async function shipCurrentBranch({ context, run, sleep = defaultSleep }) {
+export async function mergeExactHead({ context, expectedUtcVersion, now, pullRequestNumber, run }) {
+  if (expectedUtcVersion !== null) assertUtcReleaseSlot(expectedUtcVersion, now());
+  if (!Number.isSafeInteger(pullRequestNumber)) throw new Error("pull request number is invalid");
+  await invoke(
+    run,
+    "gh",
+    [
+      "pr",
+      "merge",
+      String(pullRequestNumber),
+      "--repo",
+      OPS_REPOSITORY,
+      "--squash",
+      "--delete-branch",
+      "--match-head-commit",
+      context.headSha,
+    ],
+    { cwd: context.root },
+  );
+}
+
+export async function shipCurrentBranch({
+  context,
+  expectedUtcVersion = null,
+  now = () => new Date(),
+  run,
+  sleep = defaultSleep,
+}) {
   requireClean(context);
   if (context.branch === OPS_DEFAULT_BRANCH) {
     if (context.headSha === context.remoteMainSha) {
@@ -960,22 +1083,13 @@ export async function shipCurrentBranch({ context, run, sleep = defaultSleep }) 
   if (headAfterReview?.state !== "OPEN" || headAfterReview?.headRefOid?.toLowerCase() !== context.headSha) {
     throw new Error("pull request head changed after the final exact-head review");
   }
-  await invoke(
+  await mergeExactHead({
+    context,
+    expectedUtcVersion,
+    now,
+    pullRequestNumber: pullRequest.number,
     run,
-    "gh",
-    [
-      "pr",
-      "merge",
-      String(pullRequest.number),
-      "--repo",
-      OPS_REPOSITORY,
-      "--squash",
-      "--delete-branch",
-      "--match-head-commit",
-      context.headSha,
-    ],
-    { cwd: context.root },
-  );
+  });
   const merged = await jsonCommand(
     run,
     "gh",
@@ -1116,6 +1230,62 @@ async function verifyPublishedRelease(run, context, version) {
   });
 }
 
+export function validateCompatibleDraftAssets(existing, verified) {
+  if (!Array.isArray(existing)) throw new Error("draft release asset list is malformed");
+  const canonicalNames = new Set(Object.values(verified.names));
+  if (existing.some((asset) => !canonicalNames.has(asset?.name))) {
+    throw new Error("draft contains an unexpected asset and will not be mutated");
+  }
+  const missing = [];
+  for (const [kind, name] of Object.entries(verified.names)) {
+    const matches = existing.filter((asset) => asset?.name === name);
+    if (matches.length > 1) throw new Error(`draft contains duplicate asset: ${name}`);
+    if (
+      matches.length === 1 &&
+      (matches[0].state !== "uploaded" || matches[0].digest !== `sha256:${verified.digests[kind]}`)
+    ) {
+      throw new Error(`draft asset differs and will not be overwritten: ${name}`);
+    }
+    if (matches.length === 0) missing.push([kind, name]);
+  }
+  return Object.freeze(missing.map((entry) => Object.freeze(entry)));
+}
+
+export async function publishPreparedDraft({
+  context,
+  readContext = readRepositoryContext,
+  releaseId,
+  run,
+  sourceSha,
+}) {
+  const immutableSetting = await jsonCommand(
+    run,
+    "gh",
+    apiArgs(`repos/${OPS_REPOSITORY}/immutable-releases`),
+    "pre-publication immutable release setting",
+    { cwd: context.root },
+  );
+  if (immutableSetting?.enabled !== true) {
+    throw new Error("immutable GitHub releases must remain enabled before publication");
+  }
+  const publicationContext = await readContext({ cwd: context.root, run });
+  requireExactMain(publicationContext);
+  if (publicationContext.headSha !== sourceSha) {
+    throw new Error("protected main changed before immutable release publication");
+  }
+  const published = await jsonCommand(
+    run,
+    "gh",
+    apiArgs(`repos/${OPS_REPOSITORY}/releases/${releaseId}`, { method: "PATCH" }),
+    "release publication",
+    { cwd: context.root, input: '{"draft":false}\n' },
+  );
+  if (published?.id !== releaseId || published?.draft === true) {
+    throw new Error("GitHub did not publish the exact prepared draft release");
+  }
+  return published;
+}
+
 async function uploadDraftRelease({ context, run, sourceSha, verified, version }) {
   let release = await releaseByTagIfPresent(run, context, version);
   if (!release) {
@@ -1143,16 +1313,7 @@ async function uploadDraftRelease({ context, run, sourceSha, verified, version }
   ) {
     throw new Error("existing daily release is not the exact compatible draft");
   }
-  const existing = Array.isArray(release.assets) ? release.assets : [];
-  for (const [kind, name] of Object.entries(verified.names)) {
-    const matches = existing.filter((asset) => asset?.name === name);
-    if (matches.length > 1) throw new Error(`draft contains duplicate asset: ${name}`);
-    if (matches.length === 1) {
-      if (matches[0].digest !== `sha256:${verified.digests[kind]}`) {
-        throw new Error(`draft asset differs and will not be overwritten: ${name}`);
-      }
-      continue;
-    }
+  for (const [kind, name] of validateCompatibleDraftAssets(release.assets, verified)) {
     const endpoint = `https://uploads.github.com/repos/${OPS_REPOSITORY}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`;
     await invoke(
       run,
@@ -1200,26 +1361,7 @@ async function uploadDraftRelease({ context, run, sourceSha, verified, version }
       throw new Error(`draft release asset failed pre-publication readback: ${name}`);
     }
   }
-  const immutableSetting = await jsonCommand(
-    run,
-    "gh",
-    apiArgs(`repos/${OPS_REPOSITORY}/immutable-releases`),
-    "pre-publication immutable release setting",
-    { cwd: context.root },
-  );
-  if (immutableSetting?.enabled !== true) {
-    throw new Error("immutable GitHub releases must remain enabled before publication");
-  }
-  const published = await jsonCommand(
-    run,
-    "gh",
-    apiArgs(`repos/${OPS_REPOSITORY}/releases/${release.id}`, { method: "PATCH" }),
-    "release publication",
-    { cwd: context.root, input: '{"draft":false}\n' },
-  );
-  if (published?.id !== release.id || published?.draft === true) {
-    throw new Error("GitHub did not publish the exact prepared draft release");
-  }
+  await publishPreparedDraft({ context, releaseId: release.id, run, sourceSha });
   return jsonCommand(
     run,
     "gh",
@@ -1577,6 +1719,31 @@ export function verifyLiveUpdateReadback(
   return evidence;
 }
 
+export function selectPreviousSignedRelease(releases, targetVersion) {
+  parseExtensionVersion(targetVersion);
+  if (!Array.isArray(releases)) throw new Error("previous signed release list is malformed");
+  const candidates = releases
+    .map((release) => {
+      const tag = String(release?.tagName ?? "");
+      try {
+        return {
+          ...release,
+          version: tag.startsWith("v") ? parseExtensionVersion(tag.slice(1)).canonical : null,
+        };
+      } catch {
+        return { ...release, version: null };
+      }
+    })
+    .filter(
+      (release) =>
+        release.version &&
+        compareExtensionVersions(release.version, targetVersion) < 0 &&
+        release.isImmutable === true,
+    )
+    .sort((left, right) => compareExtensionVersions(right.version, left.version));
+  return candidates[0] ?? null;
+}
+
 async function downloadPreviousSignedXpi({ context, directory, run, targetVersion }) {
   const releases = await jsonCommand(
     run,
@@ -1595,22 +1762,8 @@ async function downloadPreviousSignedXpi({ context, directory, run, targetVersio
     "previous signed release list",
     { cwd: context.root },
   );
-  const candidates = releases
-    .map((release) => {
-      const tag = String(release?.tagName ?? "");
-      try {
-        return {
-          ...release,
-          version: tag.startsWith("v") ? parseExtensionVersion(tag.slice(1)).canonical : null,
-        };
-      } catch {
-        return { ...release, version: null };
-      }
-    })
-    .filter((release) => release.version && release.version !== targetVersion && release.isImmutable === true)
-    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)));
-  if (candidates.length === 0) return null;
-  const previous = candidates[0];
+  const previous = selectPreviousSignedRelease(releases, targetVersion);
+  if (!previous) return null;
   const release = await releaseByTag(run, context, previous.version);
   const sourceSha = validateSha(release?.target_commitish, "previous release source SHA");
   if (release?.draft === true || release?.immutable !== true) {
@@ -1714,6 +1867,18 @@ async function writeDeploymentBundle({ bundleActivator, directory, nonce, root, 
   return bundleActivator({ directory, root });
 }
 
+export function finalizeDeploymentResult({ cleanupFailure, deploymentResult, operationError }) {
+  if (operationError && cleanupFailure) {
+    throw new Error(
+      `${operationError instanceof Error ? operationError.message : String(operationError)}; ${cleanupFailure}`,
+    );
+  }
+  if (operationError) throw operationError;
+  if (cleanupFailure) throw new Error(cleanupFailure);
+  if (!deploymentResult) throw new Error("deployment completed without an authoritative result");
+  return deploymentResult;
+}
+
 export async function deployVersion({
   bundleActivator,
   context,
@@ -1806,6 +1971,9 @@ export async function deployVersion({
     });
     const remoteDir = `/srv/admin/chzzk-ops-${nonce}`;
     let remoteCreated = false;
+    let deploymentResult = null;
+    let operationError = null;
+    let cleanupFailure = null;
     try {
       await invoke(
         run,
@@ -1873,7 +2041,7 @@ export async function deployVersion({
           throw new Error("Firefox update smoke installed an unexpected extension version");
         }
       }
-      return {
+      deploymentResult = {
         command: mode === "rollback" ? "rollback" : "deploy",
         firefoxSmoke,
         liveReadback,
@@ -1882,6 +2050,8 @@ export async function deployVersion({
         sourceSha,
         version,
       };
+    } catch (error) {
+      operationError = error;
     } finally {
       if (remoteCreated) {
         const remoteFiles = [
@@ -1890,16 +2060,36 @@ export async function deployVersion({
           `${remoteDir}/${verified.names.signed}`,
           `${remoteDir}/${verified.names.source}`,
         ];
-        await invoke(run, "ssh", [OPS_SERVER, "/run/current-system/sw/bin/rm", "-f", "--", ...remoteFiles], {
-          allowFailure: true,
-          cwd: context.root,
-        });
-        await invoke(run, "ssh", [OPS_SERVER, "/run/current-system/sw/bin/rmdir", "--", remoteDir], {
-          allowFailure: true,
-          cwd: context.root,
-        });
+        const removedFiles = await invoke(
+          run,
+          "ssh",
+          [OPS_SERVER, "/run/current-system/sw/bin/rm", "-f", "--", ...remoteFiles],
+          {
+            allowFailure: true,
+            cwd: context.root,
+          },
+        );
+        const removedDirectory = await invoke(
+          run,
+          "ssh",
+          [OPS_SERVER, "/run/current-system/sw/bin/rmdir", "--", remoteDir],
+          {
+            allowFailure: true,
+            cwd: context.root,
+          },
+        );
+        if (removedFiles.status !== 0 || removedDirectory.status !== 0) {
+          const detail = redactSensitive(
+            [removedFiles.stderr, removedFiles.stdout, removedDirectory.stderr, removedDirectory.stdout]
+              .filter(Boolean)
+              .join("; ")
+              .slice(0, 1024),
+          );
+          cleanupFailure = `remote staging cleanup failed for ${remoteDir}${detail ? `: ${detail}` : ""}`;
+        }
       }
     }
+    return finalizeDeploymentResult({ cleanupFailure, deploymentResult, operationError });
   } finally {
     rmSync(workRoot, { force: true, recursive: true });
   }
@@ -1943,7 +2133,29 @@ export async function shipWithOperator({
     if (productChange) {
       context = await ensureUtcProjectVersion({ context, run, version: daily.version });
     }
-    const merged = await shipCurrentBranch({ context, run, sleep });
+    let merged = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        merged = await shipCurrentBranch({
+          context,
+          expectedUtcVersion: productChange ? daily.version : null,
+          now,
+          run,
+          sleep,
+        });
+        break;
+      } catch (error) {
+        if (!(error instanceof UtcReleaseSlotRolloverError) || !productChange || attempt !== 0) {
+          throw error;
+        }
+        daily = await listReleaseState(run, context, now());
+        if (daily.state.kind !== "ready") {
+          throw new Error("the new UTC release slot is not available after rollover");
+        }
+        context = await ensureUtcProjectVersion({ context, run, version: daily.version });
+      }
+    }
+    if (!merged) throw new Error("ship did not produce an exact merge result");
     const mainContext = await synchronizeProtectedMain({ root: context.root, run });
     if (merged.mergeSha && mainContext.headSha !== merged.mergeSha) {
       throw new Error("local protected main differs from the exact squash merge readback");
@@ -2005,7 +2217,37 @@ function defaultSleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
-async function readServerStatus({ context, run, verifyLiveReadback }) {
+export function validateServerProvenanceAgainstRelease({ provenance, release, version }) {
+  const signedName = `chzzk-${version}-signed.xpi`;
+  const signedXpiSha256 = provenance?.assets?.[signedName];
+  if (
+    provenance?.schemaVersion !== 1 ||
+    provenance?.version !== version ||
+    provenance?.sourceRepository !== OPS_REPOSITORY ||
+    !FULL_SHA_RE.test(String(provenance?.sourceDigest ?? "")) ||
+    !/^[a-f0-9]{64}$/.test(String(signedXpiSha256 ?? ""))
+  ) {
+    throw new Error("server provenance is not canonical");
+  }
+  const releaseNames = assertReleaseAssetSummary(release, version);
+  const releaseSourceSha = validateSha(release?.target_commitish, "active release source SHA");
+  const provenanceNames = Object.keys(provenance.assets ?? {}).sort();
+  if (
+    releaseSourceSha !== provenance.sourceDigest ||
+    JSON.stringify(provenanceNames) !== JSON.stringify(Object.values(releaseNames).sort())
+  ) {
+    throw new Error("server provenance differs from the immutable GitHub release identity");
+  }
+  for (const name of Object.values(releaseNames)) {
+    const asset = release.assets.find((candidate) => candidate?.name === name);
+    if (asset.digest !== `sha256:${provenance.assets[name]}`) {
+      throw new Error(`server provenance differs from immutable release asset: ${name}`);
+    }
+  }
+  return Object.freeze({ releaseNames, releaseSourceSha, signedXpiSha256 });
+}
+
+export async function readServerStatus({ context, run, verifyLiveReadback }) {
   const currentTarget = await textCommand(
     run,
     "ssh",
@@ -2022,17 +2264,13 @@ async function readServerStatus({ context, run, verifyLiveReadback }) {
     "server provenance",
     { cwd: context.root },
   );
-  const signedName = `chzzk-${version}-signed.xpi`;
-  const signedXpiSha256 = provenance?.assets?.[signedName];
-  if (
-    provenance?.schemaVersion !== 1 ||
-    provenance?.version !== version ||
-    provenance?.sourceRepository !== OPS_REPOSITORY ||
-    !FULL_SHA_RE.test(String(provenance?.sourceDigest ?? "")) ||
-    !/^[a-f0-9]{64}$/.test(String(signedXpiSha256 ?? ""))
-  ) {
-    throw new Error("server provenance is not canonical");
-  }
+  const release = await releaseByTag(run, context, version);
+  const { releaseSourceSha, signedXpiSha256 } = validateServerProvenanceAgainstRelease({
+    provenance,
+    release,
+    version,
+  });
+  await verifyPublishedRelease(run, context, version);
   const serviceOutput = await textCommand(
     run,
     "ssh",
@@ -2056,13 +2294,13 @@ async function readServerStatus({ context, run, verifyLiveReadback }) {
   const liveReadback = await verifyLiveReadback({
     root: context.root,
     signedXpiSha256,
-    sourceSha: provenance.sourceDigest,
+    sourceSha: releaseSourceSha,
     version,
   });
   return Object.freeze({
     caddy: "active",
     liveReadback,
-    sourceSha: provenance.sourceDigest,
+    sourceSha: releaseSourceSha,
     updateBackend: "active",
     version,
   });

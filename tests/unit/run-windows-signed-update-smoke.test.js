@@ -5,13 +5,22 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  MAX_SUBPROCESS_OUTPUT_BYTES,
   buildPowerShellArguments,
+  createSanitizedChildEnvironment,
   parseArguments,
   parseBoundedEvidence,
   parseScoopPrefix,
   resolveCanonicalRegularFile,
   runWindowsSignedUpdateSmoke,
 } from "../../scripts/run-windows-signed-update-smoke.js";
+
+const GITHUB_CREDENTIAL_NAMES = [
+  "GH_ENTERPRISE_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+  "GITHUB_TOKEN",
+];
 
 function passedEvidence() {
   return {
@@ -111,6 +120,21 @@ describe("Windows signed-update smoke orchestrator", () => {
     assert.throws(() => parseScoopPrefix("x".repeat(4097), "firefox-esr"), /invalid output/i);
   });
 
+  it("removes GitHub credentials from child environments without mutating the caller", () => {
+    const env = {
+      GH_ENTERPRISE_TOKEN: "enterprise-gh-secret",
+      GH_TOKEN: "gh-secret",
+      GITHUB_ENTERPRISE_TOKEN: "enterprise-github-secret",
+      GITHUB_TOKEN: "github-secret",
+      Path: "C:\\trusted-tools",
+      gh_token: "case-insensitive-shadow",
+    };
+
+    assert.deepEqual(createSanitizedChildEnvironment(env), { Path: env.Path });
+    assert.equal(env.GH_TOKEN, "gh-secret");
+    assert.equal(env.gh_token, "case-insensitive-shadow");
+  });
+
   it("rejects a reparse-point executable before resolving it", () => {
     const regular = {
       isDirectory: () => false,
@@ -174,6 +198,14 @@ describe("Windows signed-update smoke orchestrator", () => {
     const fixture = makeFixture();
     const calls = [];
     const evidence = passedEvidence();
+    const env = {
+      GH_ENTERPRISE_TOKEN: "enterprise-gh-secret",
+      GH_TOKEN: "gh-secret",
+      GITHUB_ENTERPRISE_TOKEN: "enterprise-github-secret",
+      GITHUB_TOKEN: "github-secret",
+      PRESERVED_VALUE: "preserved",
+      SystemRoot: fixture.systemRoot,
+    };
     try {
       const actual = runWindowsSignedUpdateSmoke(
         {
@@ -183,7 +215,7 @@ describe("Windows signed-update smoke orchestrator", () => {
           resultPath: fixture.paths.resultPath,
         },
         {
-          env: { SystemRoot: fixture.systemRoot },
+          env,
           platform: "win32",
           processPath: fixture.paths.nodeBinary,
           runner(command, args, options) {
@@ -213,8 +245,18 @@ describe("Windows signed-update smoke orchestrator", () => {
       );
       assert.equal(calls[0].command, fixture.paths.powershellBinary);
       assert.equal(calls[1].command, fixture.paths.powershellBinary);
+      for (const { options } of calls) {
+        assert.equal(options.env.PRESERVED_VALUE, "preserved");
+        for (const name of GITHUB_CREDENTIAL_NAMES) {
+          assert.equal(Object.hasOwn(options.env, name), false);
+        }
+      }
+      assert.equal(calls[0].options.maxBuffer, 4096);
+      assert.equal(calls[1].options.maxBuffer, 4096);
+      assert.equal(env.GH_TOKEN, "gh-secret");
       const invocation = calls[2];
       assert.equal(invocation.command, fixture.paths.powershellBinary);
+      assert.equal(invocation.options.maxBuffer, MAX_SUBPROCESS_OUTPUT_BYTES);
       assert.deepEqual(invocation.args.slice(0, 5), [
         "-NoProfile",
         "-NonInteractive",
@@ -237,6 +279,106 @@ describe("Windows signed-update smoke orchestrator", () => {
       for (const [name, expected] of expectedPaths) {
         assert.equal(invocation.args[invocation.args.indexOf(name) + 1], expected);
       }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("preserves bounded phase diagnostics beyond the evidence limit", () => {
+    const fixture = makeFixture();
+    const phaseError = "manual-update-discovery phase failed: home.arpa did not resolve";
+    const longContext = "x".repeat(8192);
+    const stdoutDiagnostic = "child stdout diagnostic";
+    try {
+      assert.throws(
+        () =>
+          runWindowsSignedUpdateSmoke(
+            {
+              metadataPath: fixture.paths.metadataPath,
+              newXpiPath: fixture.paths.newXpiPath,
+              oldXpiPath: fixture.paths.oldXpiPath,
+              resultPath: fixture.paths.resultPath,
+            },
+            {
+              env: { SystemRoot: fixture.systemRoot },
+              platform: "win32",
+              processPath: fixture.paths.nodeBinary,
+              runner(command, args, options) {
+                if (args.includes("-Command")) {
+                  const prefix = args.at(-1).endsWith("firefox-esr")
+                    ? fixture.firefoxPrefix
+                    : fixture.geckodriverPrefix;
+                  return { status: 0, stderr: "", stdout: `${prefix}\r\n` };
+                }
+                assert.equal(command, fixture.paths.powershellBinary);
+                assert.equal(options.maxBuffer, MAX_SUBPROCESS_OUTPUT_BYTES);
+                return {
+                  status: 1,
+                  stderr: `${phaseError}\n${longContext}`,
+                  stdout: stdoutDiagnostic,
+                };
+              },
+              systemRoot: fixture.systemRoot,
+              wrapperPath: fixture.paths.wrapperPath,
+            },
+          ),
+        (error) => {
+          assert.match(error.message, /manual-update-discovery phase failed/);
+          assert.match(error.message, new RegExp(`x{${longContext.length}}`));
+          assert.match(error.message, /child stdout diagnostic/);
+          assert.ok(
+            Buffer.byteLength(error.message, "utf8") <= MAX_SUBPROCESS_OUTPUT_BYTES + 128,
+            "the operator error must remain bounded after adding its fixed prefix",
+          );
+          return true;
+        },
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("truncates oversized subprocess diagnostics at a UTF-8 byte boundary", () => {
+    const fixture = makeFixture();
+    const omittedMarker = "must-not-survive-the-bound";
+    try {
+      assert.throws(
+        () =>
+          runWindowsSignedUpdateSmoke(
+            {
+              metadataPath: fixture.paths.metadataPath,
+              newXpiPath: fixture.paths.newXpiPath,
+              oldXpiPath: fixture.paths.oldXpiPath,
+              resultPath: fixture.paths.resultPath,
+            },
+            {
+              env: { SystemRoot: fixture.systemRoot },
+              platform: "win32",
+              processPath: fixture.paths.nodeBinary,
+              runner(_command, args) {
+                if (args.includes("-Command")) {
+                  const prefix = args.at(-1).endsWith("firefox-esr")
+                    ? fixture.firefoxPrefix
+                    : fixture.geckodriverPrefix;
+                  return { status: 0, stderr: "", stdout: `${prefix}\r\n` };
+                }
+                return {
+                  status: 1,
+                  stderr: `phase failed\n${"한".repeat(MAX_SUBPROCESS_OUTPUT_BYTES)}${omittedMarker}`,
+                  stdout: "",
+                };
+              },
+              systemRoot: fixture.systemRoot,
+              wrapperPath: fixture.paths.wrapperPath,
+            },
+          ),
+        (error) => {
+          assert.match(error.message, /phase failed/);
+          assert.doesNotMatch(error.message, new RegExp(omittedMarker));
+          assert.ok(Buffer.byteLength(error.message, "utf8") <= MAX_SUBPROCESS_OUTPUT_BYTES + 128);
+          return true;
+        },
+      );
     } finally {
       fixture.cleanup();
     }

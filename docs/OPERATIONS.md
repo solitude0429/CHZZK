@@ -134,6 +134,17 @@ Release 이전 signed XPI, 새 metadata와 signed XPI를 GitHub에서 검증해 
 실제 Windows PC의 Firefox ESR, 정상 DNS/TLS와 새 disposable profile로 update
 mode를 실행한다.
 
+이 PC의 Firefox는 public name에는 기존 locked DoH 정책을 유지하고, RFC 8375
+내부 이름인 `*.home.arpa`만 native DNS로 보낸다. Scoop이 유지하는
+`C:\Users\Alpha\scoop\persist\firefox-esr\distribution\policies.json`의
+`Preferences` 정책은 `network.trr.excluded-domains`에 `home.arpa`를 포함하고 해당
+preference를 lock해야 한다. signed update smoke는 파일 존재가 아니라 disposable
+Firefox에서 이 effective 값과 lock 상태를 직접 확인한다. 정책을 새로 쓰거나
+바꾼 뒤에는 실행 중인 Firefox를 완전히 종료하고 다시 시작해야 실제 사용자
+profile에도 적용된다. `scoop update`와 `scoop reset`에는 이 distribution 설정이
+유지되지만 `scoop uninstall -p firefox-esr` 또는 persist directory 삭제 시에는
+다시 설정해야 한다.
+
 ```powershell
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -File .\scripts\firefox-signed-smoke.windows.ps1 `

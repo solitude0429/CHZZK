@@ -244,6 +244,27 @@ export function assertTrustedPermanentAddon({
   return { ...addon, firefoxVersion };
 }
 
+export function assertUpdateHostUsesLockedNativeDns({ excludedDomains, locked, updateUrl }) {
+  let hostname;
+  try {
+    hostname = new URL(updateUrl).hostname.toLowerCase();
+  } catch {
+    throw new Error("Firefox update URL is invalid for DNS policy verification");
+  }
+  if (hostname !== "home.arpa" && !hostname.endsWith(".home.arpa")) {
+    return Object.freeze({ hostname, matchedDomain: null });
+  }
+  const domains = String(excludedDomains ?? "")
+    .split(",")
+    .map((domain) => domain.trim().toLowerCase().replace(/^\./, ""))
+    .filter(Boolean);
+  const matchedDomain = domains.find((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+  if (locked !== true || !matchedDomain) {
+    throw new Error("Firefox must lock home.arpa to native DNS before signed update verification");
+  }
+  return Object.freeze({ hostname, matchedDomain });
+}
+
 export function createFirefoxSignedSmokeEvidence(result) {
   if (!result || typeof result !== "object" || Array.isArray(result)) {
     throw new Error("Firefox signed-smoke result is invalid");
@@ -445,6 +466,18 @@ async function installAndInspect(driver, xpiPath, expected) {
     return inspected?.addon ? inspected : null;
   });
   return assertTrustedPermanentAddon({ ...expected, ...result });
+}
+
+async function inspectUpdateDnsPolicy(driver, updateUrl) {
+  await driver.setContext("chrome");
+  const policy = await driver.execute(
+    `const preference = "network.trr.excluded-domains";
+return {
+  excludedDomains: Services.prefs.getStringPref(preference, ""),
+  locked: Services.prefs.prefIsLocked(preference),
+};`,
+  );
+  return assertUpdateHostUsesLockedNativeDns({ ...policy, updateUrl });
 }
 
 async function setAddonAutomaticUpdates(driver, addOnId, enabled) {
@@ -784,9 +817,14 @@ export async function runFirefoxSignedSmoke(rawInput) {
       }
     : null;
   try {
-    const finalInstall = await withDisposableFirefox(firefoxInput, (driver) =>
-      installAndInspect(driver, input.newSignedXpiPath, expectedFinal),
-    );
+    let updateDnsPolicy = null;
+    const finalInstall = await withDisposableFirefox(firefoxInput, async (driver) => {
+      const installed = await installAndInspect(driver, input.newSignedXpiPath, expectedFinal);
+      if (input.mode === "update") {
+        updateDnsPolicy = await inspectUpdateDnsPolicy(driver, installed.updateURL);
+      }
+      return installed;
+    });
     let update = null;
     if (input.mode === "update") {
       const manual = await withDisposableFirefox(firefoxInput, async (driver) => {
@@ -867,6 +905,7 @@ export async function runFirefoxSignedSmoke(rawInput) {
       permanent: !finalInstall.temporarilyInstalled,
       signedState: finalInstall.signedState,
       update,
+      updateDnsPolicy,
     };
   } catch (error) {
     const safeLogTail = service.logs.join("").split("\n").slice(-80).join("\n");

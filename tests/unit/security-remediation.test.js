@@ -96,7 +96,7 @@ describe("release and repository security guardrails", () => {
   it("keeps dispatch nonce-bound and immutable publication outside GitHub Actions", () => {
     const release = workflow("sign-unlisted.yml");
     const text = read(".github/workflows/sign-unlisted.yml");
-    const finalizer = read("scripts/lib/release-finalize.js");
+    const operator = read("scripts/chzzk-ops.js");
     const updateRunbook = read("docs/UPDATES.md");
     assert.deepEqual(Object.keys(release.on), ["workflow_dispatch"]);
     assert.deepEqual(Object.keys(release.on.workflow_dispatch.inputs).sort(), [
@@ -109,9 +109,10 @@ describe("release and repository security guardrails", () => {
     assert.match(text, /reuse_existing/);
     assert.match(text, /draft_signed_ready/);
     assert.doesNotMatch(text, /contents:\s*write|gh release (?:create|edit|upload)|--clobber/);
-    assert.match(finalizer, /immutableReleasesEnabled/);
-    assert.match(finalizer, /"draft=false"/);
-    assert.doesNotMatch(finalizer, /GITHUB_TOKEN/);
+    assert.match(operator, /immutable-releases/);
+    assert.match(operator, /"draft":false/);
+    assert.match(operator, /\["release", "verify"/);
+    assert.doesNotMatch(operator, /process\.env\.(?:GH_TOKEN|GITHUB_TOKEN)/);
     assert.match(updateRunbook, /CHZZK_OLD_SIGNED_XPI=/);
     assert.match(updateRunbook, /^ {6}provenance\.json$/m);
     assert.match(updateRunbook, /^ {2}provenance\.json -> current\/provenance\.json$/m);
@@ -156,7 +157,15 @@ describe("release and repository security guardrails", () => {
       "ops/chzzk-telemetry-summary.py",
       "scripts/check-review-gate.js",
       "scripts/configure-review-gate.js",
+      "scripts/admin-release-bootstrap.js",
+      "scripts/configure-repository.js",
+      "scripts/deploy-internal-updates.js",
+      "scripts/finalize-release.js",
+      "scripts/internal-update-deploy-bootstrap.js",
+      "scripts/lib/release-finalize-state.js",
+      "scripts/lib/release-finalize.js",
       "scripts/lib/review-gate.js",
+      "scripts/repository-settings-bootstrap.js",
       "scripts/verify-exact-head-review.js",
     ]) {
       assert.equal(existsSync(join(rootDir, path)), false, path);
@@ -179,17 +188,22 @@ describe("release and repository security guardrails", () => {
   });
 
   it("deploys only an attested exact release through the protected transactional boundary", () => {
-    const bootstrap = read("scripts/internal-update-deploy-bootstrap.js");
-    const cli = read("scripts/deploy-internal-updates.js");
+    const operator = read("scripts/chzzk-ops.js");
+    const activator = read("scripts/server-update-activator.js");
     const packageJson = JSON.parse(read("package.json"));
     const transaction = read("scripts/lib/update-deployment.js");
     assert.equal(Object.hasOwn(packageJson.scripts, "deploy:updates:internal"), false);
-    assert.match(bootstrap, /\/usr\/bin\/env -i/);
-    assert.match(bootstrap, /decodeProtectedDeploymentSource/);
-    assert.match(cli, /not memory-sealed by the bootstrap/);
-    assert.match(cli, /"attestation",\s*"verify"/);
-    assert.match(cli, /--source-digest/);
-    assert.match(cli, /isImmutable/);
+    assert.match(operator, /entryPoints: \[join\(root, "scripts", "server-update-activator\.js"\)\]/);
+    assert.match(operator, /"attestation",\s*"verify"/);
+    assert.match(operator, /const remoteDir = `\/srv\/admin\/chzzk-ops-\$\{nonce\}`/);
+    assert.match(operator, /"scp"/);
+    assert.match(operator, /"ssh"/);
+    assert.match(operator, /\/run\/current-system\/sw\/bin\/rm/);
+    assert.match(activator, /deployUpdateRelease/);
+    assert.match(activator, /--metadata/);
+    assert.match(activator, /--signed/);
+    assert.match(activator, /--source/);
+    assert.doesNotMatch(activator, /GH_TOKEN|GITHUB_TOKEN|\bgh\b/);
     assert.match(transaction, /snapshotLink/);
     assert.match(transaction, /restoreLink/);
     assert.match(transaction, /fsyncDirectory/);

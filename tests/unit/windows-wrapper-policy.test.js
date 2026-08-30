@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 function read(path) {
@@ -19,4 +30,111 @@ describe("Windows signed-smoke policy", () => {
     assert.match(wrapper, /& \$node -p/);
     assert.match(wrapper, /& \$node \$runner/);
   });
+
+  it("removes GitHub credentials and preserves bounded child failure output", () => {
+    const wrapper = read("scripts/firefox-signed-smoke.windows.ps1");
+    for (const name of ["GH_ENTERPRISE_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_TOKEN"]) {
+      assert.match(wrapper, new RegExp(`"${name}"`));
+    }
+    assert.doesNotMatch(wrapper, /& \$node \$runner\s*\|\s*Out-Null/);
+    assert.match(wrapper, /& \$node \$runner 2>&1 \| ForEach-Object/);
+    assert.match(wrapper, /\$runnerOutput\.Append\(\$boundedCandidate\)/);
+    assert.match(wrapper, /ConvertTo-BoundedUtf8Text/);
+    assert.match(wrapper, /64 \* 1024/);
+    assert.match(wrapper, /\[Console\]::Error\.Write\(\$runnerFailureOutput\)/);
+  });
+
+  it(
+    "forwards both bounded native streams without credentials on Windows",
+    { skip: process.platform !== "win32" },
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), "chzzk-windows-wrapper-failure-"));
+      const wrapperPath = join(directory, "firefox-signed-smoke.windows.ps1");
+      const runnerPath = join(directory, "firefox-signed-smoke.js");
+      const resultPath = join(directory, "result.json");
+      const inputPaths = {
+        firefox: join(directory, "firefox.exe"),
+        geckodriver: join(directory, "geckodriver.exe"),
+        metadata: join(directory, "metadata.json"),
+        newXpi: join(directory, "new.xpi"),
+        oldXpi: join(directory, "old.xpi"),
+      };
+      try {
+        copyFileSync(new URL("../../scripts/firefox-signed-smoke.windows.ps1", import.meta.url), wrapperPath);
+        for (const path of Object.values(inputPaths)) writeFileSync(path, "nonempty fixture");
+        writeFileSync(
+          runnerPath,
+          `const names = ${JSON.stringify([
+            "GH_ENTERPRISE_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "GITHUB_TOKEN",
+          ])};
+const leaked = names.filter((name) => process.env[name] !== undefined);
+console.log("stdout-phase-marker");
+console.error("stderr-phase-marker");
+console.error(\`credential-leaks=\${leaked.length === 0 ? "none" : leaked.join(",")}\`);
+console.error("x".repeat(70 * 1024));
+console.error("must-not-survive-the-bound");
+process.exitCode = 17;
+`,
+        );
+        const powershell = join(
+          process.env.SystemRoot,
+          "System32",
+          "WindowsPowerShell",
+          "v1.0",
+          "powershell.exe",
+        );
+        const result = spawnSync(
+          powershell,
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            wrapperPath,
+            "-NodeBinary",
+            realpathSync.native(process.execPath),
+            "-FirefoxBinary",
+            inputPaths.firefox,
+            "-GeckodriverBinary",
+            inputPaths.geckodriver,
+            "-ReleaseMetadata",
+            inputPaths.metadata,
+            "-SignedXpi",
+            inputPaths.newXpi,
+            "-OldSignedXpi",
+            inputPaths.oldXpi,
+            "-ResultPath",
+            resultPath,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GH_ENTERPRISE_TOKEN: "enterprise-gh-secret",
+              GH_TOKEN: "gh-secret",
+              GITHUB_ENTERPRISE_TOKEN: "enterprise-github-secret",
+              GITHUB_TOKEN: "github-secret",
+            },
+            maxBuffer: 128 * 1024,
+          },
+        );
+
+        assert.equal(result.status, 17);
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, /stdout-phase-marker/);
+        assert.match(result.stderr, /stderr-phase-marker/);
+        assert.match(result.stderr, /credential-leaks=none/);
+        assert.doesNotMatch(result.stderr, /(?:enterprise-)?(?:gh|github)-secret/);
+        assert.doesNotMatch(result.stderr, /must-not-survive-the-bound/);
+        assert.ok(Buffer.byteLength(result.stderr, "utf8") <= 64 * 1024);
+        assert.equal(existsSync(resultPath), false);
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+  );
 });

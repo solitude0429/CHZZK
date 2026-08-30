@@ -4,104 +4,24 @@ import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  REQUIRED_GITHUB_ACTIONS_CHECKS,
-  REQUIRED_SIGNING_SECRET_NAMES,
-  planRepositorySettings,
-} from "../../scripts/configure-repository.js";
+import { OPS_ACTIONS_APP_ID, REQUIRED_CHECKS } from "../../scripts/chzzk-ops.js";
 
-const githubActionsAppId = 15368;
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-
-function repositoryState(checks) {
-  return {
-    actionsPermissions: { allowed_actions: "selected", enabled: true },
-    branchProtection: {
-      enforce_admins: { enabled: true },
-      required_conversation_resolution: { enabled: true },
-      required_pull_request_reviews: {
-        dismiss_stale_reviews: false,
-        require_code_owner_reviews: false,
-        required_approving_review_count: 0,
-        require_last_push_approval: false,
-      },
-    },
-    immutableReleases: { enabled: true },
-    labels: [],
-    repository: {
-      allow_auto_merge: false,
-      allow_merge_commit: false,
-      allow_rebase_merge: false,
-      allow_squash_merge: true,
-      delete_branch_on_merge: true,
-    },
-    repositorySecrets: [],
-    selectedActions: {
-      github_owned_allowed: true,
-      patterns_allowed: [],
-      verified_allowed: false,
-    },
-    signingEnvironment: {
-      deployment_branch_policy: {
-        custom_branch_policies: false,
-        protected_branches: true,
-      },
-      name: "firefox-signing",
-    },
-    signingEnvironmentSecrets: REQUIRED_SIGNING_SECRET_NAMES.map((name) => ({ name })),
-    statusProtection: { checks, strict: true },
-    variables: [{ name: "RELEASE_OPERATOR_LOGIN", value: "release-operator" }],
-    workflowPermissions: {
-      can_approve_pull_request_reviews: false,
-      default_workflow_permissions: "read",
-    },
-  };
-}
-
-function desiredChecks() {
-  return REQUIRED_GITHUB_ACTIONS_CHECKS.map((context) => ({
-    app_id: githubActionsAppId,
-    context,
-  }));
-}
 
 function read(path) {
   return readFileSync(join(rootDir, path), "utf8");
 }
 
 describe("repository review policy", () => {
-  it("keeps only deterministic GitHub Actions checks in branch protection", () => {
-    assert.deepEqual(REQUIRED_GITHUB_ACTIONS_CHECKS, [
-      "analyze",
-      "dependency-review",
-      "firefox-e2e",
-      "verify",
-    ]);
-    const state = repositoryState([
-      ...desiredChecks(),
-      { app_id: githubActionsAppId, context: "exact-head-review" },
-    ]);
-    const changes = planRepositorySettings(state, githubActionsAppId, "release-operator");
-    assert.deepEqual(changes, [
-      {
-        checks: desiredChecks(),
-        kind: "status-checks",
-        strict: true,
-      },
-    ]);
+  it("keeps only deterministic GitHub Actions checks in the local operator policy", () => {
+    assert.deepEqual(REQUIRED_CHECKS, ["analyze", "dependency-review", "firefox-e2e", "verify"]);
+    assert.equal(OPS_ACTIONS_APP_ID, 15368);
   });
 
   it("retires the asynchronous commit-scoped review gate", () => {
     for (const path of [".github/workflows/exact-head-review.yml", "scripts/verify-exact-head-review.js"]) {
       assert.equal(existsSync(join(rootDir, path)), false, path);
     }
-  });
-
-  it("is idempotent when the deterministic check set is installed", () => {
-    assert.deepEqual(
-      planRepositorySettings(repositoryState(desiredChecks()), githubActionsAppId, "release-operator"),
-      [],
-    );
   });
 
   it("documents read-only operation and the one-release-per-UTC-day queue", () => {
