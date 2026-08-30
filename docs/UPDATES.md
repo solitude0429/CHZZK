@@ -1,40 +1,33 @@
-# Firefox 자동 업데이트
+# Firefox automatic updates
 
-CHZZK는 Mozilla 서명된 unlisted XPI를 자체 HTTPS update host에서 배포한다.
-Firefox는 `manifest.json`의 고정 `update_url`에서 `updates.json`을 읽는다.
+<!-- contract:release actions-publish=false local-release-verify=required server-credentials=forbidden rollback-journal=required -->
+
+CHZZK distributes its Mozilla-signed unlisted XPI from a private HTTPS update host. Firefox reads `updates.json` from the fixed `update_url` in `manifest.json`:
 
 ```text
 https://chzzk.home.arpa:8443/updates.json
 ```
 
-## Release에서 update host까지
+## From Release to update host
 
-1. 로컬 operator가 `gh` keyring으로 exact protected `main`과 immutable Release를
-   확인한다.
-2. `gh release verify`와 canonical metadata 검증으로 tag, source SHA, 세 asset과
-   build provenance를 결박한다.
-3. asset을 private local temporary directory에 받고 activator의 전체 import
-   graph와 `jszip`을 esbuild로 self-contained ESM file에 묶어 고유 SCP deployment
-   bundle을 만든다.
-4. Router를 경유하는 내부 `ssh server` 경로로 bundle을 보내 hidden transactional
-   activation을 실행한다. GitHub credential은 서버로 보내지 않는다.
-5. 서버 filesystem, loopback backend, Caddy와 PC production HTTPS에서 version,
-   MIME, JSON, links와 SHA-256을 readback한다.
-6. 실제 Windows PC의 disposable Firefox profile에서 이전 signed XPI가 고정
-   `update_url`을 통해 새 signed XPI로 업데이트되는지 확인한다.
+1. The local operator uses the `gh` keyring to verify the exact protected `main` and immutable Release.
+2. `gh release verify` and canonical metadata bind the tag, source SHA, three assets, and build provenance.
+3. The operator downloads assets into a private local temporary directory and bundles the activator's complete import graph plus `jszip` into one self-contained ESM file. It creates a uniquely named SCP deployment bundle.
+4. The bundle travels through internal `ssh server` via the router and runs hidden transactional activation. No GitHub credential is sent to the server.
+5. The operator reads back the version, MIME types, JSON, links, and SHA-256 from the server filesystem, loopback backend, Caddy, and PC production HTTPS path.
+6. On the real Windows PC, a disposable Firefox profile updates from the previous signed XPI to the new signed XPI through the fixed `update_url`.
 
-일반 제품 변경에서는 `ship`이 이 전체 과정을 수행한다.
+For a normal product change, `ship` performs the entire sequence. To deploy an already published immutable Release:
 
 ```powershell
 npm run chzzk -- deploy [version] --json
 ```
 
-version을 생략하면 현재 canonical immutable Release를 사용한다. 이미 같은
-generation과 stable links가 정확하면 성공한 idempotent no-op으로 끝난다.
+Without `version`, the operator selects the current canonical immutable Release. If the exact generation and stable links are already active, deployment completes as an idempotent no-op.
 
-## 배포 구조
+## Deployment layout
 
-각 version은 immutable directory에 배치한다.
+Each version occupies an immutable directory:
 
 ```text
 <target>/
@@ -52,52 +45,42 @@ generation과 stable links가 정확하면 성공한 idempotent no-op으로 끝�
   provenance.json -> current/provenance.json
 ```
 
-`updates.json`과 landing-page link는 root-absolute immutable version path를
-사용한다. `current`와 stable links를 journal 아래에서 원자적으로 바꾸므로
-manifest와 XPI가 서로 다른 generation을 가리키지 않는다.
+`updates.json` and landing-page links use root-absolute immutable version paths. The activator changes `current` and all stable links atomically under the rollback journal, so the manifest and XPI cannot point to different generations.
 
-## 로컬 검증과 전송
+## Local verification and transfer
 
-`deploy`는 쓰기 전에 다음을 강제한다.
+Before any write, `deploy` requires:
 
-- 로그인한 `gh` identity와 pinned repository ID;
-- exact tag가 가리키는 source commit과 release metadata source commit 일치;
-- published Release의 `isImmutable: true`;
-- 정확히 세 canonical asset과 valid GitHub build provenance;
-- signed XPI structure, add-on ID, version, update URL, minimum Firefox와 signed state;
-- private temporary directory, bounded file sizes와 exact SHA-256;
-- bare import가 없는 self-contained bundled activator와 정확히 세 asset;
-- 내부 SSH alias가 정확히 `server`이고 remote target이
-  `/srv/admin/chzzk-updates`인지 확인.
+- the authenticated `gh` identity and pinned repository ID;
+- the exact tag's source commit to match release metadata;
+- `isImmutable: true` on the published Release;
+- exactly three canonical assets with valid GitHub build provenance;
+- signed-XPI structure, add-on ID, version, update URL, minimum Firefox, and signed state;
+- a private temporary directory, bounded sizes, and exact SHA-256 values;
+- a self-contained bundled activator with no bare imports and exactly three assets;
+- SSH alias exactly `server` and remote target exactly `/srv/admin/chzzk-updates`.
 
-전송 파일명에는 예측 불가능한 nonce를 포함한다. 기존 remote path를 덮어쓰지
-않고, server activation이 성공·실패한 뒤에도 해당 작업이 만든 exact staging
-path만 제거한다. 서버 Node는 bundled activator만 실행하므로 CHZZK checkout,
-`node_modules`, `gh` login이나 GitHub token을 요구하지 않는다.
+Transfer filenames contain an unpredictable nonce and never overwrite an existing remote path. After success or failure, remove only the exact staging path created by that operation. The server executes only the bundled activator and needs no CHZZK checkout, `node_modules`, `gh` login, or GitHub token.
 
-## 서버 activation
+## Server activation
 
-서버-side hidden operation은 bundle 안의 metadata와 artifact를 다시 검증하고
-다음을 강제한다.
+The hidden server-side operation verifies bundle metadata and artifacts again, then enforces:
 
-- symlink ancestor, foreign ownership와 group/world-writable managed path 거부;
-- 고정 `admin` owner와 target boundary;
-- process-bound advisory lock과 bounded wait;
-- mutation 전에 fsync된 private rollback journal;
-- file data와 parent directory fsync;
-- 새 immutable release directory를 완성한 뒤 stable links 전환;
-- backend와 Caddy에서 exact `updates.json`, XPI MIME/hash와 link readback;
-- post-activation 검증 실패 시 이전 link snapshot 복구;
-- SIGKILL/reboot 뒤 다음 실행에서 미완료 journal 복구 후 재시도.
+- rejection of symlink ancestors, foreign ownership, and group/world-writable managed paths;
+- fixed `admin` ownership and target boundary;
+- a process-bound advisory lock with bounded wait;
+- a private fsynced rollback journal before mutation;
+- fsync of file data and parent directories;
+- completion of a new immutable release directory before stable-link changes;
+- exact `updates.json`, XPI MIME/hash, and link readback from the backend and Caddy;
+- restoration of the previous link snapshot after post-activation failure;
+- recovery of an incomplete journal after SIGKILL or reboot before retry.
 
-Server release directory는 자동 삭제하지 않는다. 이전 generation은 명시적
-rollback과 old-to-new Firefox update 검증에 필요하다.
+Never delete server release directories automatically. Previous generations are required for explicit rollback and old-to-new signed Firefox update verification.
 
 ## PC production-path readback
 
-PC의 허용된 직접 통신은 Windows QoS DSCP 3 policy를 사용한다. Firefox와
-PowerShell은 허용되지만 `curl.exe`는 Router gate에서 timeout될 수 있으므로
-PowerShell HTTPS 결과를 기준으로 한다.
+Allowed direct PC traffic uses Windows QoS DSCP 3 policy. Firefox and PowerShell are permitted, while the router gate may time out `curl.exe`; use PowerShell HTTPS as authority.
 
 ```powershell
 $manifest = Invoke-WebRequest `
@@ -109,20 +92,18 @@ $manifest.Headers["Content-Type"]
 $manifest.Content | ConvertFrom-Json
 ```
 
-다음을 exact Release와 비교한다.
+Compare the response to the exact Release:
 
-- `updates.json` status 200, JSON MIME와 canonical schema;
-- version, add-on ID, minimum Firefox와 immutable update link;
-- XPI status 200, `application/x-xpinstall` MIME, size와 SHA-256;
-- `current`, `updates.json`, `index.html`, `provenance.json` symlink targets;
-- metadata source repository/SHA와 provenance asset digests;
-- landing page의 모든 local link.
+- `updates.json` is HTTP 200 with JSON MIME and canonical schema;
+- version, add-on ID, minimum Firefox, and immutable update link match;
+- the XPI is HTTP 200 with `application/x-xpinstall` MIME, expected size, and SHA-256;
+- `current`, `updates.json`, `index.html`, and `provenance.json` link targets match;
+- metadata repository/SHA and provenance asset digests match;
+- every local landing-page link is valid.
 
 ## Disposable Firefox update gate
 
-Update mode는 이전 signed XPI에 이미 고정된 production `update_url`을 사용한다.
-별도 base-URL override를 받지 않으며 signature 또는 update trust preference를
-낮추지 않는다.
+Update mode uses the production `update_url` already embedded in the previous signed XPI. It accepts no base-URL override and never lowers signature or update trust preferences.
 
 ```bash
 CHZZK_OLD_SIGNED_XPI="/absolute/path/to/previous-signed.xpi" \
@@ -134,29 +115,18 @@ GECKODRIVER_BINARY="/absolute/path/to/geckodriver" \
 npm run test:firefox-signed-smoke
 ```
 
-실제 운영 gate는 checked-in Windows wrapper를 사용하며 exact
-`permanent-signed-active`와 final `none-found`를 요구한다. 새 disposable
-profile만 만들고 task-created input, result, process와 profile만 제거한다. 사용자의
-설치 profile, cookies, identifiers와 complete signed media URLs은 읽거나
-artifact/log에 남기지 않는다.
+The production gate uses the checked-in Windows wrapper and requires exact `permanent-signed-active` plus final `none-found`. It creates a fresh disposable profile and removes only task-created inputs, results, processes, and profiles. Never read the user's installed profile, cookies, identifiers, or complete signed media URLs.
 
 ## Rollback
 
-Rollback은 사용자가 대상 version을 명시했을 때만 수행한다.
+Run rollback only after the user explicitly names the target version and requests it:
 
 ```powershell
 npm run chzzk -- rollback <version> --json
 ```
 
-Operator는 대상 GitHub Release와 server generation의 metadata, provenance와
-digests를 다시 검증한다. 새 배포와 같은 lock, journal, atomic stable-link 전환과
-readback을 사용한다. 대상 generation이 없거나 byte identity가 다르면 수동 symlink
-명령으로 우회하지 않고 fail-closed한다.
+The operator verifies target GitHub Release and server-generation metadata, provenance, and digests. It uses the same lock, rollback journal, atomic stable-link switch, and readback as a deployment. If the generation is absent or its bytes differ, fail closed instead of using a manual symlink command.
 
-## 네트워크 장애
+## Network failures
 
-정상 운영 경로는 PC→Router→Server의 내부 WireGuard/SSH와 HTTPS다. 이 경로가
-실패하면 PC와 Router에서 DNS, route, VPN, key와 SSH를 먼저 확인한다. 공개 SSH
-timeout은 내부 경로가 정상인 동안 blocker가 아니다. 자동 배포와 rollback은 OCI에
-접근하지 않으며, OCI는 두 정상 SSH 경로가 모두 불가능한 별도 승인 긴급 복구
-절차에만 사용한다.
+The normal path is PC to router to server over internal WireGuard/SSH and HTTPS. If it fails, inspect DNS, routes, VPN, keys, and SSH from both PC and router first. A public-SSH timeout is not a blocker while the internal path works. Automated deployment and rollback never access OCI; OCI requires separate approval and is reserved for emergencies where both normal server-SSH paths are unavailable.
