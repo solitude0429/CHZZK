@@ -91,6 +91,10 @@ if (Test-Path -LiteralPath $result) {
 }
 
 $nodeStartupEnvironmentNames = @(
+    "GH_ENTERPRISE_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GITHUB_TOKEN",
     "NODE_EXTRA_CA_CERTS",
     "NODE_OPTIONS",
     "NODE_PATH",
@@ -110,6 +114,37 @@ $environmentValues = [ordered]@{
 $previousEnvironment = @{}
 $completed = $false
 $resultCreated = $false
+$maxRunnerFailureOutputBytes = 64 * 1024
+
+function ConvertTo-BoundedUtf8Text {
+    param(
+        [AllowEmptyString()]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxBytes
+    )
+
+    $encoding = [Text.UTF8Encoding]::new($false)
+    if ($encoding.GetByteCount($Text) -le $MaxBytes) {
+        return $Text
+    }
+
+    $low = 0
+    $high = $Text.Length
+    while ($low -lt $high) {
+        $middle = [int][Math]::Ceiling(($low + $high) / 2.0)
+        if ($encoding.GetByteCount($Text.Substring(0, $middle)) -le $MaxBytes) {
+            $low = $middle
+        } else {
+            $high = $middle - 1
+        }
+    }
+    if ($low -gt 0 -and [char]::IsHighSurrogate($Text[$low - 1])) {
+        $low--
+    }
+    return $Text.Substring(0, $low)
+}
 
 foreach ($name in $nodeStartupEnvironmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -142,11 +177,39 @@ try {
         )
     }
 
-    & $node $runner | Out-Null
-    $runnerExitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 promotes redirected native stderr to an
+        # ErrorRecord. Keep it non-terminating so both native streams can be
+        # retained and surfaced if the smoke fails.
+        $ErrorActionPreference = "Continue"
+        $runnerOutput = [Text.StringBuilder]::new()
+        $runnerOutputBytes = 0
+        $runnerOutputEncoding = [Text.UTF8Encoding]::new($false)
+        & $node $runner 2>&1 | ForEach-Object {
+            if ($runnerOutputBytes -lt $maxRunnerFailureOutputBytes) {
+                $separator = if ($runnerOutput.Length -eq 0) { "" } else { [Environment]::NewLine }
+                $candidate = "$separator$([string]$_)"
+                $boundedCandidate = ConvertTo-BoundedUtf8Text `
+                    -Text $candidate `
+                    -MaxBytes ($maxRunnerFailureOutputBytes - $runnerOutputBytes)
+                [void]$runnerOutput.Append($boundedCandidate)
+                $runnerOutputBytes += $runnerOutputEncoding.GetByteCount($boundedCandidate)
+            }
+        } | Out-Null
+        $runnerExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $resultCreated = Test-Path -LiteralPath $result -PathType Leaf
     if ($runnerExitCode -ne 0) {
-        throw "The native signed-update smoke failed."
+        $runnerFailureOutput = $runnerOutput.ToString()
+        if ([string]::IsNullOrWhiteSpace($runnerFailureOutput)) {
+            $runnerFailureOutput = "The native signed-update smoke failed without child output."
+        }
+        [Console]::Error.Write($runnerFailureOutput)
+        exit $runnerExitCode
     }
     if (-not $resultCreated) {
         throw "The native signed-update smoke did not persist its result."

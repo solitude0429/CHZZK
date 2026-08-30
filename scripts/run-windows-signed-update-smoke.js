@@ -6,7 +6,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MAX_DISCOVERY_OUTPUT_BYTES = 4096;
 const MAX_EVIDENCE_BYTES = 4096;
-const MAX_FAILURE_DETAIL_CHARACTERS = 512;
+export const MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024;
+const GITHUB_CREDENTIAL_ENVIRONMENT_NAMES = new Set([
+  "GH_ENTERPRISE_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+  "GITHUB_TOKEN",
+]);
 const EXPECTED_EVIDENCE_KEYS = Object.freeze([
   "extensionVersion",
   "finalUpdateState",
@@ -35,6 +41,16 @@ function requireText(value, label) {
     throw new Error(`${label} must be one nonempty path`);
   }
   return value;
+}
+
+export function createSanitizedChildEnvironment(env) {
+  const sanitized = {};
+  for (const [name, value] of Object.entries(env ?? {})) {
+    if (!GITHUB_CREDENTIAL_ENVIRONMENT_NAMES.has(name.toUpperCase())) {
+      sanitized[name] = value;
+    }
+  }
+  return sanitized;
 }
 
 export function parseArguments(argv) {
@@ -119,9 +135,28 @@ export function parseScoopPrefix(stdout, packageName) {
   return lines[0];
 }
 
+function truncateUtf8(text, maxBytes) {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(text.slice(0, middle), "utf8") <= maxBytes) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (low > 0 && /[\uD800-\uDBFF]/u.test(text[low - 1])) low -= 1;
+  return text.slice(0, low);
+}
+
 function failureDetail(result) {
-  const raw = String(result?.stderr || result?.stdout || result?.error?.message || "command failed");
-  return raw.replace(/\s+/gu, " ").trim().slice(0, MAX_FAILURE_DETAIL_CHARACTERS);
+  const detail = [result?.stderr, result?.stdout, result?.error?.message]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .join("\n");
+  return truncateUtf8(detail || "command failed", MAX_SUBPROCESS_OUTPUT_BYTES);
 }
 
 export function discoverScoopExecutable(
@@ -135,12 +170,13 @@ export function discoverScoopExecutable(
   } = {},
 ) {
   const powershell = requireText(powershellBinary, "Windows PowerShell");
+  const childEnv = createSanitizedChildEnvironment(env);
   const result = runner(
     powershell,
     ["-NoProfile", "-NonInteractive", "-Command", `scoop prefix ${packageName}`],
     {
       encoding: "utf8",
-      env,
+      env: childEnv,
       maxBuffer: MAX_DISCOVERY_OUTPUT_BYTES,
       shell: false,
       windowsHide: true,
@@ -284,7 +320,8 @@ export function runWindowsSignedUpdateSmoke(
   } = {},
 ) {
   if (platform !== "win32") throw new Error("The Windows signed-update smoke requires Windows");
-  const dependencies = { env, lstat, realpath, runner };
+  const childEnv = createSanitizedChildEnvironment(env);
+  const dependencies = { env: childEnv, lstat, realpath, runner };
   const root = requireText(systemRoot, "SystemRoot");
   const powershellBinary = resolveCanonicalRegularFile(
     join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -305,8 +342,8 @@ export function runWindowsSignedUpdateSmoke(
   const args = buildPowerShellArguments(paths);
   const result = runner(powershellBinary, args, {
     encoding: "utf8",
-    env,
-    maxBuffer: MAX_EVIDENCE_BYTES,
+    env: childEnv,
+    maxBuffer: MAX_SUBPROCESS_OUTPUT_BYTES,
     shell: false,
     windowsHide: true,
   });

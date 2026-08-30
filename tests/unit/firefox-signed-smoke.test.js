@@ -10,6 +10,7 @@ import JSZip from "jszip";
 import {
   MAX_SIGNED_SMOKE_RESULT_BYTES,
   assertTrustedPermanentAddon,
+  assertUpdateHostUsesLockedNativeDns,
   bindGeckodriverService,
   buildProductionFirefoxCapabilities,
   createFirefoxSignedSmokeEvidence,
@@ -297,6 +298,43 @@ setInterval(() => {}, 1000);
     }
   });
 
+  it("requires a locked native-DNS exclusion for the internal update host", () => {
+    assert.deepEqual(
+      assertUpdateHostUsesLockedNativeDns({
+        excludedDomains: "example.test, home.arpa",
+        locked: true,
+        updateUrl: "https://chzzk.home.arpa:8443/updates.json",
+      }),
+      { hostname: "chzzk.home.arpa", matchedDomain: "home.arpa" },
+    );
+    assert.throws(
+      () =>
+        assertUpdateHostUsesLockedNativeDns({
+          excludedDomains: "example.test",
+          locked: true,
+          updateUrl: "https://chzzk.home.arpa:8443/updates.json",
+        }),
+      /native DNS/i,
+    );
+    assert.throws(
+      () =>
+        assertUpdateHostUsesLockedNativeDns({
+          excludedDomains: "home.arpa",
+          locked: false,
+          updateUrl: "https://chzzk.home.arpa:8443/updates.json",
+        }),
+      /lock/i,
+    );
+    assert.deepEqual(
+      assertUpdateHostUsesLockedNativeDns({
+        excludedDomains: "",
+        locked: false,
+        updateUrl: "https://updates.example.test/updates.json",
+      }),
+      { hostname: "updates.example.test", matchedDomain: null },
+    );
+  });
+
   it("persists only bounded fixed-schema signed-smoke evidence without overwriting", () => {
     const directory = mkdtempSync(join(tmpdir(), "chzzk-signed-smoke-result-"));
     const resultPath = join(directory, "signed-smoke-result.json");
@@ -328,7 +366,7 @@ setInterval(() => {}, 1000);
       assert.deepEqual(persistFirefoxSignedSmokeResult(rawResult, resultPath), expected);
       assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), expected);
       assert.equal(statSync(resultPath).size <= MAX_SIGNED_SMOKE_RESULT_BYTES, true);
-      assert.equal(statSync(resultPath).mode & 0o777, 0o600);
+      if (process.platform !== "win32") assert.equal(statSync(resultPath).mode & 0o777, 0o600);
       assert.throws(() => persistFirefoxSignedSmokeResult(rawResult, resultPath), /exist|EEXIST/i);
       assert.throws(
         () =>
@@ -388,7 +426,7 @@ setInterval(() => {}, 1000);
       assert.match(wrapper, new RegExp(`"${name}"`));
     }
     const environmentClear = wrapper.indexOf(
-      'foreach ($name in $nodeStartupEnvironmentNames) {\n        [Environment]::SetEnvironmentVariable($name, $null, "Process")',
+      '[Environment]::SetEnvironmentVariable($name, $null, "Process")',
     );
     const versionProbe = wrapper.indexOf("$nodeMajorOutput = & $node -p");
     const smokeRun = wrapper.indexOf("& $node $runner");

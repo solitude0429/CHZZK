@@ -11,17 +11,17 @@
 - 저장소: `C:\Users\Alpha\CHZZK`
 - 원격: `solitude0429/CHZZK`
 - 기본 브랜치: `main`
-- 현재 배포 버전: `0.1.23`
-- v0.1.23 source commit:
-  `3998471fd5dcd2d29e8940427d084dc68a20aa53`
+- 현재 배포 버전: `26.8.30`
+- v26.8.30 source commit:
+  `b1d2c413794ca61a9fb8c21fdfbeaf67344fd937`
 - Firefox 확장 ID: `chzzk@solitude0429.local`
 - 최소 Firefox: `140.0`
 - 배포 방식: Mozilla unlisted signed XPI + immutable GitHub Release + 내부 HTTPS
   update host
 
-사용자 Firefox에는 v0.1.23이 active, Mozilla signed
-(`signedState = 2`) 상태로 설치돼 있다. 내장 update URL은 다음과 같고 기본
-background update policy가 활성화돼 있다.
+마지막 사용자 설치 readback은 v0.1.23 active, Mozilla signed
+(`signedState = 2`) 상태다. 사용자 profile의 업데이트 버튼은 아래 내장 URL에서
+현재 v26.8.30을 받는다. 자동 검증은 사용자 profile을 바꾸지 않았다.
 
 ```text
 https://chzzk.home.arpa:8443/updates.json
@@ -32,18 +32,28 @@ bridge를 다시 만들지 않는다. 자동 ship의 Firefox 검증은 disposabl
 사용하며, 사용자의 설치 profile은 명시적인 설치/업데이트 요청이 없으면 변경하지
 않는다.
 
+Scoop Firefox ESR의 persisted distribution policy는
+`network.trr.excluded-domains = home.arpa`를 lock한다. public domain의 기존 DoH
+정책은 유지하면서 `*.home.arpa`만 PC native DNS를 사용한다. 정책 적용 뒤 새
+disposable Firefox에서 v0.1.23 → v26.8.30의 실제 `about:addons` 수동·자동 update,
+Mozilla signed state 2, `permanent-signed-active`와 최종 `none-found`를 확인했다.
+정책 작성 전에 열려 있던 사용자 Firefox에는 완전 종료 후 재시작이 한 번 필요하다.
+
 ## 현재 GitHub Release
 
-- tag: `v0.1.23`
+- tag: `v26.8.30`
 - 공개·immutable
 - canonical asset 세 개와 build provenance 확인
-- signed XPI size: `73753` bytes
 - signed XPI SHA-256:
-  `2a2af2b8487ecee615c3f6bfc87308fd47aa05fa1b0623332e95972d69fd38f9`
-- `gh release verify v0.1.23 --repo solitude0429/CHZZK` 성공 확인
+  `688124ec05938332c1929cd7d6fb13eab18c45fd9a1f6cd1445b60c96ffa2715`
+- source ZIP SHA-256:
+  `6b4921211ec36d14fa4fbef27f31f786a066cf9cda87ecdd08003ebfb6724648`
+- release metadata SHA-256:
+  `782ad7a2f47d1e906730c07c41a32164bfb77505e2e5d6dd8012c049faa0341b`
+- `gh release verify v26.8.30 --repo solitude0429/CHZZK` 성공 확인
 
-v0.1.23은 기존 sequential version의 마지막 배포본이다. 다음 제품 Release부터
-UTC 날짜의 `YY.M.D` version을 사용하며 UTC 하루에 하나만 게시한다.
+v0.1.23은 기존 sequential version의 마지막 배포본이고 v26.8.30부터 UTC 날짜의
+`YY.M.D` version을 사용한다. UTC 하루에 하나만 게시한다.
 
 ## GitHub 운영 상태
 
@@ -75,9 +85,9 @@ GitHub App을 한 번 disable하는 수동 정리가 남아 있다.
 - backend: `127.0.0.1:18082`
 - Caddy SNI: `chzzk.home.arpa:8443`
 - update tree: `/srv/admin/chzzk-updates`
-- `current -> releases/0.1.23`
+- `current -> releases/26.8.30`
 - stable `updates.json`, `index.html`, `provenance.json` links: current generation
-- live `updates.json`: 200, JSON, version 0.1.23
+- live `updates.json`: 200, JSON, version 26.8.30
 - live signed XPI SHA-256: GitHub immutable Release와 일치
 - unresolved deployment journal: 없음
 
