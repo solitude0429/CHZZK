@@ -228,8 +228,14 @@ describe("Windows signed-update smoke orchestrator", () => {
         invocation.args.some((argument) => /Firefox\\Profiles/i.test(argument)),
         false,
       );
-      for (const name of ["-ReleaseMetadata", "-SignedXpi", "-OldSignedXpi", "-ResultPath"]) {
-        assert.match(invocation.args[invocation.args.indexOf(name) + 1], /^[A-Z]:\\/i);
+      const expectedPaths = new Map([
+        ["-ReleaseMetadata", fixture.paths.metadataPath],
+        ["-SignedXpi", fixture.paths.newXpiPath],
+        ["-OldSignedXpi", fixture.paths.oldXpiPath],
+        ["-ResultPath", fixture.paths.resultPath],
+      ]);
+      for (const [name, expected] of expectedPaths) {
+        assert.equal(invocation.args[invocation.args.indexOf(name) + 1], expected);
       }
     } finally {
       fixture.cleanup();

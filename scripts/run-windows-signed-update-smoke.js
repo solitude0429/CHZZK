@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MAX_DISCOVERY_OUTPUT_BYTES = 4096;
@@ -188,7 +188,9 @@ function prepareResultPath(path, dependencies) {
 }
 
 function assertAbsoluteInvocationPath(path, label) {
-  if (!isAbsolute(path)) throw new Error(`${label} must be absolute`);
+  if (!isAbsolute(path) && !win32.isAbsolute(path)) {
+    throw new Error(`${label} must be absolute`);
+  }
   return path;
 }
 
