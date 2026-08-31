@@ -42,12 +42,13 @@ function hasRecognizedChzzkScheduleBreak(videoAdScheduleId, adBreaks) {
 
   return (
     videoAdScheduleId === CHZZK_VOD_VIDEO_SCHEDULE_ID &&
-    adBreaks.some(
+    adBreaks.every(
       (adBreak) =>
         isRecord(adBreak) &&
         isChzzkVodAdUnit(adBreak.adUnitId) &&
         Array.isArray(adBreak.adSources) &&
-        adBreak.adSources.length > 0,
+        adBreak.adSources.length > 0 &&
+        adBreak.adSources.every(isRecord),
     )
   );
 }

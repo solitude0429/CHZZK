@@ -214,6 +214,27 @@ describe("CHZZK ad response controller", () => {
     const unobservedVodPostWaterfall = currentMidrollFixture();
     unobservedVodPostWaterfall.adUnit = "w_chzzk_naver_va_post";
     assert.equal(sanitizeChzzkAdResponse(unobservedVodPostWaterfall), null);
+
+    const populatedVodBreak = {
+      adUnitId: "w_chzzk_naver_va",
+      adSources: [{}],
+    };
+    const invalidMixedVodBreaks = [
+      { adUnitId: "w_chzzk_naver_va_post", adSources: [{}] },
+      { adUnitId: "w_live_chzzk_naver_va_mid", adSources: [{}] },
+      { adUnitId: "w_chzzk_naver_va_mid", adSources: [] },
+      null,
+      { adUnitId: "w_chzzk_naver_va_mid", adSources: [null] },
+    ];
+    for (const invalidBreak of invalidMixedVodBreaks) {
+      assert.equal(
+        sanitizeChzzkAdResponse({
+          ...emptyVodSchedule,
+          adBreaks: [populatedVodBreak, invalidBreak],
+        }),
+        null,
+      );
+    }
   });
 
   it("rewrites a BOM-prefixed current response without requiring the retired siape trackers", () => {
