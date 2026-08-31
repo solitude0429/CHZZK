@@ -25,6 +25,8 @@ npm run audit:package
 
 The player unit suite covers the current DIV-layout React bridge, live-layout precedence over preview videos, bounded ancestor fallback, remounts with new fibers and track objects, class/custom quality panes, filter-vetoed cold starts, every same-site player route, and highest-bitrate tie breaking. It proves that repeated ABR/lower setter attempts never reach the page setter or reassign an already selected high track, same-object descriptor replacement is re-guarded, exact track/filter descriptors are restored on stop, and no continuous `timeupdate` listener is installed. Asynchronous setter confirmation, a controller-wide four-write limit, one-per-five-second refill, storage high-water protection, silent late-track/demotion watchdog recovery, and full timer/listener cleanup are also covered. The broader suite includes direct library-boundary misuse tests for canonical release basenames, verifier-buffer deployment, exact remote draft/tag recovery, immutable deployment checks, bounded lock cleanup, canonical SemVer, administrator dispatch ordering, and idempotent sole-owner repository protection. Workflow tests require SHA-pinned actions and separated secret/write authority.
 
+The ad-response unit suite covers exact live, event-live, and VOD GFP schedule identities; live/VOD NAVER waterfalls; response-envelope preservation; and neutral-shell idempotence. Five mixed live cases and five mixed VOD cases require fail-open behavior for crossed or unobserved units, empty sources, malformed breaks, and malformed source entries.
+
 ## Functional-only Firefox E2E
 
 The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts. Its runtime policy is loaded from the production policy file; only the idle evidence TTL is shortened to keep the bounded expiry scenario practical.
@@ -49,6 +51,7 @@ The test exercises real Firefox rather than a VM mock:
 9. Keeps Firefox's observed original-live `documentUrl` after the background-acknowledged in-flight-master `history.pushState`, changes mini-player routes repeatedly, and confirms the observed master still selects `1080p` without numeric fallback scans across playlist cycles.
 10. Revalidates the selected playlist with an empty HTTP 304 and confirms the cached target remains usable.
 11. Serves strict `updates.json` and the candidate XPI over HTTPS, verifies their requests and hash-bound version, and confirms the legacy-controller 0.1.21 fixture reaches the current production-manifest version.
+12. Opens a CHZZK-shaped ad-response page and sends live, event-live, and VOD GFP schedules plus live/VOD NAVER waterfalls through the packaged MAIN-world controller. It requires every recognized ad collection to be neutralized with relevant passthrough context preserved, leaves an unrelated schedule byte-for-byte unchanged, hides the known ad/ad-blocking UI and exact live/VOD banners with zero layout, and keeps an unrelated banner rendered.
 
 The fixture XPIs are unsigned and exist only in the disposable Developer Edition profile, so signature/update certificate checks are disabled only for this functional test. This test makes no authenticity claim about a Release artifact.
 
