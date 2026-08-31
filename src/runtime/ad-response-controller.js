@@ -36,20 +36,22 @@ function isChzzkVodAdUnit(value) {
 }
 
 function hasRecognizedChzzkScheduleBreak(videoAdScheduleId, adBreaks) {
+  let recognizesAdUnit;
   if (CHZZK_LIVE_VIDEO_SCHEDULE_IDS.has(videoAdScheduleId)) {
-    return adBreaks.some((adBreak) => isRecord(adBreak) && isChzzkLiveAdUnit(adBreak.adUnitId));
+    recognizesAdUnit = isChzzkLiveAdUnit;
+  } else if (videoAdScheduleId === CHZZK_VOD_VIDEO_SCHEDULE_ID) {
+    recognizesAdUnit = isChzzkVodAdUnit;
+  } else {
+    return false;
   }
 
-  return (
-    videoAdScheduleId === CHZZK_VOD_VIDEO_SCHEDULE_ID &&
-    adBreaks.every(
-      (adBreak) =>
-        isRecord(adBreak) &&
-        isChzzkVodAdUnit(adBreak.adUnitId) &&
-        Array.isArray(adBreak.adSources) &&
-        adBreak.adSources.length > 0 &&
-        adBreak.adSources.every(isRecord),
-    )
+  return adBreaks.every(
+    (adBreak) =>
+      isRecord(adBreak) &&
+      recognizesAdUnit(adBreak.adUnitId) &&
+      Array.isArray(adBreak.adSources) &&
+      adBreak.adSources.length > 0 &&
+      adBreak.adSources.every(isRecord),
   );
 }
 

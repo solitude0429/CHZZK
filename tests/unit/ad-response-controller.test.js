@@ -235,6 +235,28 @@ describe("CHZZK ad response controller", () => {
         null,
       );
     }
+
+    const populatedLiveBreak = {
+      adUnitId: "w_live_chzzk_naver_va",
+      adSources: [{}],
+    };
+    const invalidMixedLiveBreaks = [
+      { adUnitId: "w_chzzk_naver_va", adSources: [{}] },
+      { adUnitId: "w_other_chzzk_naver_va_mid", adSources: [{}] },
+      { adUnitId: "w_live_chzzk_naver_va_mid", adSources: [] },
+      null,
+      { adUnitId: "w_live_chzzk_naver_va_mid", adSources: [null] },
+    ];
+    for (const invalidBreak of invalidMixedLiveBreaks) {
+      assert.equal(
+        sanitizeChzzkAdResponse({
+          ...emptyVodSchedule,
+          videoAdScheduleId: "LIVE_CHZZK_NDP_SCH",
+          adBreaks: [populatedLiveBreak, invalidBreak],
+        }),
+        null,
+      );
+    }
   });
 
   it("rewrites a BOM-prefixed current response without requiring the retired siape trackers", () => {
