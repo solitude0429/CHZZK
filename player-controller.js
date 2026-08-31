@@ -3,23 +3,23 @@
   var GFP_SCHEDULE_DESCRIPTION = "GFP Video Ad Schedule";
   var NAVER_WATERFALL_DESCRIPTION = "Naver SSP Waterfall List";
   var AD_PROTOCOL_VERSION = "0.0.1";
-  var CHZZK_VIDEO_SCHEDULE_IDS = /* @__PURE__ */ new Set(["LIVE_CHZZK_NDP_SCH", "LIVE_CHZZK_NDP_SCH_EVENT"]);
+  var CHZZK_LIVE_VIDEO_SCHEDULE_IDS = /* @__PURE__ */ new Set([
+    "LIVE_CHZZK_NDP_SCH",
+    "LIVE_CHZZK_NDP_SCH_EVENT",
+  ]);
+  var CHZZK_VOD_VIDEO_SCHEDULE_ID = "CHZZK_NDP_SCH";
   var CHZZK_LIVE_AD_UNIT = /^(?:event_)?w_live_chzzk_naver_va(?:_[a-z0-9]+)*$/i;
+  var CHZZK_VOD_AD_UNITS = /* @__PURE__ */ new Set(["w_chzzk_naver_va", "w_chzzk_naver_va_mid"]);
   var MAX_MARKER_SCAN_BYTES = 16384;
   var CONTROLLER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.ad-response-controller");
   var STYLE_ATTRIBUTE = "data-chzzk-extension-ad-guard";
   var AD_UI_STYLE = `
-[data-nlog-area="ad_blocking_info_layer"] {
+[data-nlog-area="ad_blocking_info_layer"],
+.webplayer-internal-core-dimmed,
+.webplayer-internal-core-ad-ui,
+#live_rs_banner,
+#vod_rs_banner {
   display: none !important;
-}
-
-.webplayer-internal-core-dimmed {
-  display: none !important;
-}
-
-.webplayer-internal-core-ad-ui {
-  clip-path: inset(50%) !important;
-  pointer-events: none !important;
 }
 `;
   function ignoreAdGuardFailure() {
@@ -30,6 +30,27 @@
   }
   function isChzzkLiveAdUnit(value) {
     return typeof value === "string" && CHZZK_LIVE_AD_UNIT.test(value);
+  }
+  function isChzzkVodAdUnit(value) {
+    return CHZZK_VOD_AD_UNITS.has(value);
+  }
+  function hasRecognizedChzzkScheduleBreak(videoAdScheduleId, adBreaks) {
+    let recognizesAdUnit;
+    if (CHZZK_LIVE_VIDEO_SCHEDULE_IDS.has(videoAdScheduleId)) {
+      recognizesAdUnit = isChzzkLiveAdUnit;
+    } else if (videoAdScheduleId === CHZZK_VOD_VIDEO_SCHEDULE_ID) {
+      recognizesAdUnit = isChzzkVodAdUnit;
+    } else {
+      return false;
+    }
+    return adBreaks.every(
+      (adBreak) =>
+        isRecord(adBreak) &&
+        recognizesAdUnit(adBreak.adUnitId) &&
+        Array.isArray(adBreak.adSources) &&
+        adBreak.adSources.length > 0 &&
+        adBreak.adSources.every(isRecord),
+    );
   }
   function isNeutralSchedule(adBreaks) {
     if (adBreaks.length !== 1 || !isRecord(adBreaks[0])) return false;
@@ -55,10 +76,9 @@
     }
     if (
       value.head.description === GFP_SCHEDULE_DESCRIPTION &&
-      CHZZK_VIDEO_SCHEDULE_IDS.has(value.videoAdScheduleId) &&
       Array.isArray(value.adBreaks) &&
       value.adBreaks.length > 0 &&
-      value.adBreaks.some((adBreak) => isRecord(adBreak) && isChzzkLiveAdUnit(adBreak.adUnitId)) &&
+      hasRecognizedChzzkScheduleBreak(value.videoAdScheduleId, value.adBreaks) &&
       !isNeutralSchedule(value.adBreaks)
     ) {
       return {
@@ -76,7 +96,7 @@
     }
     if (
       value.head.description === NAVER_WATERFALL_DESCRIPTION &&
-      isChzzkLiveAdUnit(value.adUnit) &&
+      (isChzzkLiveAdUnit(value.adUnit) || isChzzkVodAdUnit(value.adUnit)) &&
       isRecord(value.eventTracking) &&
       Number.isFinite(value.randomNumber) &&
       Array.isArray(value.ads) &&

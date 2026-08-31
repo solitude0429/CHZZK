@@ -75,8 +75,13 @@ describe("personal CHZZK extension policy", () => {
     assert.match(adGuardCss, /ad_blocking_info_layer/);
     assert.match(adGuardCss, /webplayer-internal-core-dimmed/);
     assert.match(adGuardCss, /webplayer-internal-core-ad-ui/);
+    assert.match(adGuardCss, /#live_rs_banner/);
+    assert.match(adGuardCss, /#vod_rs_banner/);
     assert.match(adGuardCss, /display:\s*none\s*!important/);
-    assert.match(adGuardCss, /pointer-events:\s*none\s*!important/);
+    assert.match(
+      adGuardCss,
+      /\.webplayer-internal-core-ad-ui,[\s\S]*#live_rs_banner,[\s\S]*#vod_rs_banner\s*\{\s*display:\s*none\s*!important/,
+    );
     assert.equal(
       existsSync(new URL("../../rules.json", import.meta.url)),
       false,

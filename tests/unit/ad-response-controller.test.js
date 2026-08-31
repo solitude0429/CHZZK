@@ -83,6 +83,14 @@ describe("CHZZK ad response controller", () => {
     const eventUnit = currentMidrollFixture();
     eventUnit.adUnit = `event_${eventUnit.adUnit}`;
     assert.deepEqual(sanitizeChzzkAdResponse(eventUnit).ads, []);
+
+    const vodUnit = currentMidrollFixture();
+    vodUnit.adUnit = "w_chzzk_naver_va";
+    assert.deepEqual(sanitizeChzzkAdResponse(vodUnit).ads, []);
+
+    const vodMidUnit = currentMidrollFixture();
+    vodMidUnit.adUnit = "w_chzzk_naver_va_mid";
+    assert.deepEqual(sanitizeChzzkAdResponse(vodMidUnit).ads, []);
   });
 
   it("replaces a populated GFP schedule with the player-compatible empty shell", () => {
@@ -119,6 +127,30 @@ describe("CHZZK ad response controller", () => {
     assert.deepEqual(sanitizeChzzkAdResponse(eventSource).adBreaks[0].adSources, []);
   });
 
+  it("replaces the exact current VOD pre- and mid-roll schedule with the empty shell", () => {
+    const source = {
+      head: { version: "0.0.1", description: "GFP Video Ad Schedule" },
+      requestId: "vod-schedule-redacted",
+      videoAdScheduleId: "CHZZK_NDP_SCH",
+      adBreaks: ["pre", "mid"].map((roll, index) => ({
+        id: `synthetic-${roll}-roll`,
+        startDelay: index * 60,
+        preFetch: 5,
+        adUnitId: roll === "mid" ? "w_chzzk_naver_va_mid" : "w_chzzk_naver_va",
+        adSources: [{ id: `synthetic-${roll}-source` }],
+      })),
+      passthrough: { videoId: "synthetic-video" },
+    };
+
+    const sanitized = sanitizeChzzkAdResponse(source);
+    assert.deepEqual(sanitized, {
+      ...source,
+      adBreaks: [{ id: "", startDelay: 0, preFetch: 0, adUnitId: "", adSources: [] }],
+    });
+    assert.equal(sanitized.passthrough, source.passthrough);
+    assert.equal(sanitizeChzzkAdResponse(sanitized), null);
+  });
+
   it("fails open for ordinary JSON, binary data, empty ads, and lookalike objects", () => {
     assert.equal(sanitizeChzzkAdResponse({ head: { description: "ordinary" }, ads: [1] }), null);
     assert.equal(
@@ -146,6 +178,85 @@ describe("CHZZK ad response controller", () => {
       adBreaks: [{ adUnitId: "w_live_chzzk_naver_va_mid", adSources: [{}] }],
     };
     assert.equal(sanitizeChzzkAdResponse(wrongSchedule), null);
+
+    const emptyVodSchedule = {
+      ...wrongSchedule,
+      videoAdScheduleId: "CHZZK_NDP_SCH",
+      adBreaks: [{ adUnitId: "w_chzzk_naver_va", adSources: [] }],
+    };
+    assert.equal(sanitizeChzzkAdResponse(emptyVodSchedule), null);
+
+    const malformedVodSchedule = {
+      ...emptyVodSchedule,
+      adBreaks: [{ adUnitId: "", adSources: [{}] }],
+    };
+    assert.equal(sanitizeChzzkAdResponse(malformedVodSchedule), null);
+
+    const vodScheduleWithLiveUnit = {
+      ...emptyVodSchedule,
+      adBreaks: [{ adUnitId: "w_live_chzzk_naver_va_mid", adSources: [{}] }],
+    };
+    assert.equal(sanitizeChzzkAdResponse(vodScheduleWithLiveUnit), null);
+
+    const liveScheduleWithVodUnit = {
+      ...emptyVodSchedule,
+      videoAdScheduleId: "LIVE_CHZZK_NDP_SCH",
+      adBreaks: [{ adUnitId: "w_chzzk_naver_va", adSources: [{}] }],
+    };
+    assert.equal(sanitizeChzzkAdResponse(liveScheduleWithVodUnit), null);
+
+    const unobservedVodPostUnit = {
+      ...emptyVodSchedule,
+      adBreaks: [{ adUnitId: "w_chzzk_naver_va_post", adSources: [{}] }],
+    };
+    assert.equal(sanitizeChzzkAdResponse(unobservedVodPostUnit), null);
+
+    const unobservedVodPostWaterfall = currentMidrollFixture();
+    unobservedVodPostWaterfall.adUnit = "w_chzzk_naver_va_post";
+    assert.equal(sanitizeChzzkAdResponse(unobservedVodPostWaterfall), null);
+
+    const populatedVodBreak = {
+      adUnitId: "w_chzzk_naver_va",
+      adSources: [{}],
+    };
+    const invalidMixedVodBreaks = [
+      { adUnitId: "w_chzzk_naver_va_post", adSources: [{}] },
+      { adUnitId: "w_live_chzzk_naver_va_mid", adSources: [{}] },
+      { adUnitId: "w_chzzk_naver_va_mid", adSources: [] },
+      null,
+      { adUnitId: "w_chzzk_naver_va_mid", adSources: [null] },
+    ];
+    for (const invalidBreak of invalidMixedVodBreaks) {
+      assert.equal(
+        sanitizeChzzkAdResponse({
+          ...emptyVodSchedule,
+          adBreaks: [populatedVodBreak, invalidBreak],
+        }),
+        null,
+      );
+    }
+
+    const populatedLiveBreak = {
+      adUnitId: "w_live_chzzk_naver_va",
+      adSources: [{}],
+    };
+    const invalidMixedLiveBreaks = [
+      { adUnitId: "w_chzzk_naver_va", adSources: [{}] },
+      { adUnitId: "w_other_chzzk_naver_va_mid", adSources: [{}] },
+      { adUnitId: "w_live_chzzk_naver_va_mid", adSources: [] },
+      null,
+      { adUnitId: "w_live_chzzk_naver_va_mid", adSources: [null] },
+    ];
+    for (const invalidBreak of invalidMixedLiveBreaks) {
+      assert.equal(
+        sanitizeChzzkAdResponse({
+          ...emptyVodSchedule,
+          videoAdScheduleId: "LIVE_CHZZK_NDP_SCH",
+          adBreaks: [populatedLiveBreak, invalidBreak],
+        }),
+        null,
+      );
+    }
   });
 
   it("rewrites a BOM-prefixed current response without requiring the retired siape trackers", () => {
@@ -199,6 +310,12 @@ describe("CHZZK ad response controller", () => {
     assert.notEqual(installed, original);
     assert.equal(appended.length, 1);
     assert.match(appended[0].textContent, /ad_blocking_info_layer/);
+    assert.match(appended[0].textContent, /#live_rs_banner/);
+    assert.match(appended[0].textContent, /#vod_rs_banner/);
+    assert.match(
+      appended[0].textContent,
+      /\.webplayer-internal-core-ad-ui,[\s\S]*display:\s*none\s*!important/,
+    );
 
     class ChildBytes extends globalRef.Uint8Array {}
     const rewritten = new ChildBytes(encoder.encode(JSON.stringify(currentMidrollFixture())));
