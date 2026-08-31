@@ -315,6 +315,9 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
 <div id="ad-blocking" data-nlog-area="ad_blocking_info_layer">blocking</div>
 <div id="ad-dimmed" class="webplayer-internal-core-dimmed">dimmed</div>
 <div id="ad-ui" class="webplayer-internal-core-ad-ui">ad</div>
+<div id="live_rs_banner">live banner</div>
+<div id="vod_rs_banner">vod banner</div>
+<div id="other_rs_banner">unrelated banner</div>
 <script>
 (() => {
   const encoder = new TextEncoder();
@@ -359,6 +362,16 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       "event-request",
     ),
   ).payload;
+  const vod = throughPlayerBytes({
+    ...schedule("CHZZK_NDP_SCH", "w_chzzk_naver_va", "vod-request"),
+    adBreaks: ["pre", "mid"].map((roll, index) => ({
+      id: "synthetic-" + roll + "-roll",
+      startDelay: index * 60,
+      preFetch: 5,
+      adUnitId: roll === "mid" ? "w_chzzk_naver_va_mid" : "w_chzzk_naver_va",
+      adSources: [{ provider: "gfp" }, { provider: "ima" }],
+    })),
+  }).payload;
   const waterfall = throughPlayerBytes({
     head: { description: "Naver SSP Waterfall List", version: "0.0.1" },
     requestId: "waterfall-request",
@@ -367,6 +380,14 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
     randomNumber: 42,
     ads: [{ provider: "gfp" }, { provider: "ima" }],
     passthrough: { channelId: "fixture-channel" },
+  }).payload;
+  const vodWaterfall = throughPlayerBytes({
+    head: { description: "Naver SSP Waterfall List", version: "0.0.1" },
+    requestId: "vod-waterfall-request",
+    adUnit: "w_chzzk_naver_va",
+    eventTracking: { impression: ["https://tracker.invalid/vod-impression"] },
+    randomNumber: 24,
+    ads: [{ provider: "gfp" }, { provider: "ima" }],
   }).payload;
   const unrelated = throughPlayerBytes(
     schedule("UNRELATED_SCHEDULE", "w_live_chzzk_naver_va_mid", "unrelated-request"),
@@ -378,7 +399,10 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
       snapshot() {
         const blockingStyle = getComputedStyle(document.getElementById("ad-blocking"));
         const dimmedStyle = getComputedStyle(document.getElementById("ad-dimmed"));
-        const adUiStyle = getComputedStyle(document.getElementById("ad-ui"));
+        const adUi = document.getElementById("ad-ui");
+        const liveBanner = document.getElementById("live_rs_banner");
+        const vodBanner = document.getElementById("vod_rs_banner");
+        const otherBanner = document.getElementById("other_rs_banner");
         return {
           controllerInstalled: Boolean(window[Symbol.for("chzzk.ad-response-controller")]),
           event: {
@@ -389,8 +413,14 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
           overlay: {
             adBlockingDisplay: blockingStyle.display,
             adDimmedDisplay: dimmedStyle.display,
-            adUiClipPath: adUiStyle.clipPath,
-            adUiPointerEvents: adUiStyle.pointerEvents,
+            adUiDisplay: getComputedStyle(adUi).display,
+            adUiRects: adUi.getClientRects().length,
+            liveBannerDisplay: getComputedStyle(liveBanner).display,
+            liveBannerRects: liveBanner.getClientRects().length,
+            otherBannerDisplay: getComputedStyle(otherBanner).display,
+            otherBannerRects: otherBanner.getClientRects().length,
+            vodBannerDisplay: getComputedStyle(vodBanner).display,
+            vodBannerRects: vodBanner.getClientRects().length,
           },
           standard: {
             ads: countScheduleAds(standard),
@@ -404,6 +434,11 @@ function createFixtureServer({ certificatePath, keyPath, requests, state }) {
             ads: countScheduleAds(unrelated.payload),
             bytesUnchanged: unrelated.bytesUnchanged,
             scheduleId: unrelated.payload.videoAdScheduleId,
+          },
+          vod: {
+            ads: countScheduleAds(vod),
+            neutralBreak: vod.adBreaks.length === 1 && vod.adBreaks[0].adUnitId === "",
+            waterfallAds: vodWaterfall.ads.length,
           },
           waterfall: {
             ads: waterfall.ads.length,
@@ -1783,6 +1818,11 @@ return tracks[tracks.selectedIndex].label;`),
       neutralBreak: true,
       passthrough: { channelId: "fixture-channel" },
     });
+    assert.deepEqual(adResponseGuard.vod, {
+      ads: 0,
+      neutralBreak: true,
+      waterfallAds: 0,
+    });
     assert.deepEqual(adResponseGuard.waterfall, {
       ads: 0,
       passthrough: { channelId: "fixture-channel" },
@@ -1794,8 +1834,14 @@ return tracks[tracks.selectedIndex].label;`),
     });
     assert.equal(adResponseGuard.overlay.adBlockingDisplay, "none");
     assert.equal(adResponseGuard.overlay.adDimmedDisplay, "none");
-    assert.match(adResponseGuard.overlay.adUiClipPath, /^inset\(50%/);
-    assert.equal(adResponseGuard.overlay.adUiPointerEvents, "none");
+    assert.equal(adResponseGuard.overlay.adUiDisplay, "none");
+    assert.equal(adResponseGuard.overlay.adUiRects, 0);
+    assert.equal(adResponseGuard.overlay.liveBannerDisplay, "none");
+    assert.equal(adResponseGuard.overlay.liveBannerRects, 0);
+    assert.equal(adResponseGuard.overlay.vodBannerDisplay, "none");
+    assert.equal(adResponseGuard.overlay.vodBannerRects, 0);
+    assert.equal(adResponseGuard.overlay.otherBannerDisplay, "block");
+    assert.equal(adResponseGuard.overlay.otherBannerRects, 1);
 
     await driver.setContext("content");
     await driver.command("POST", "/url", {
@@ -2443,7 +2489,7 @@ browser.storage.local.get("chzzkDiagnostics").then(
     console.log(
       JSON.stringify({
         asyncPlayerSelection: "one-write-per-generation",
-        adResponseSanitizer: "standard+event+waterfall",
+        adResponseSanitizer: "standard+event+vod+waterfall",
         adUiOverlay: "suppressed",
         cacheRevalidation: "304",
         canvasCapturePlayback: "real-media-progress-without-post-baseline-stall-events",
