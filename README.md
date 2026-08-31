@@ -7,7 +7,8 @@ The extension is deliberately narrow: unrelated requests fail open, it never inv
 ## Behavior
 
 - Cancels only the exact CHZZK live ad-state polling routes and removes the detector token only from exact live/video-detail requests.
-- Neutralizes recognized decrypted GFP schedules and NAVER waterfall responses in the page MAIN world while preserving their response envelopes and tracking context.
+- Neutralizes recognized decrypted live, event-live, and VOD GFP schedules plus live/VOD NAVER waterfall responses in the page MAIN world while preserving their response envelopes and tracking context. The two live schedule IDs share one live-unit family, while VOD uses a separate exact unit set; every break must stay within its live-or-VOD family and contain populated record-only sources. Malformed required guard fields, live/VOD family crossings, mixed-family schedules, unrecognized units, and unrelated payloads fail open.
+- Suppresses only CHZZK's known ad-blocking/ad UI overlays and the exact `#live_rs_banner` and `#vod_rs_banner` elements while leaving unrelated banners rendered.
 - Observes trusted CHZZK HLS master playlists, scores advertised variants by resolution, frame rate, then bitrate, and seeds the best valid target without an extra fetch.
 - When Firefox exposes only a numeric rendition URL, probes one bounded concurrent fallback batch per tab, live context, and secret-free playlist family. The configured order is `2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p`.
 - Preserves verified dedicated-livecloud state across eligible live-to-mini-player transitions while rejecting generic-CDN, stale, conflicting, or foreign-navigation evidence.
