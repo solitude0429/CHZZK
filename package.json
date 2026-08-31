@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "26.8.30",
+  "version": "26.8.31",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension for CHZZK ad removal and highest-quality playback.",

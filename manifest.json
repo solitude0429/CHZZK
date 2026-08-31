@@ -4,7 +4,9 @@
     "gecko": {
       "id": "chzzk@solitude0429.local",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       },
       "strict_min_version": "140.0",
       "update_url": "https://chzzk.home.arpa:8443/updates.json"
@@ -14,7 +16,7 @@
     }
   },
   "name": "CHZZK",
-  "version": "26.8.30",
+  "version": "26.8.31",
   "content_security_policy": "script-src 'self'; object-src 'none'; base-uri 'none';",
   "permissions": [
     "https://*.akamaized.net/*",
@@ -27,7 +29,9 @@
     "webRequestBlocking"
   ],
   "background": {
-    "scripts": ["background.js"],
+    "scripts": [
+      "background.js"
+    ],
     "persistent": true
   },
   "icons": {
@@ -48,14 +52,25 @@
   },
   "content_scripts": [
     {
-      "js": ["site-observer.js"],
-      "matches": ["https://*.chzzk.naver.com/live", "https://*.chzzk.naver.com/live/*"],
+      "js": [
+        "site-observer.js"
+      ],
+      "matches": [
+        "https://*.chzzk.naver.com/live",
+        "https://*.chzzk.naver.com/live/*"
+      ],
       "run_at": "document_start"
     },
     {
-      "css": ["ad-guard.css"],
-      "js": ["player-controller.js"],
-      "matches": ["https://*.chzzk.naver.com/*"],
+      "css": [
+        "ad-guard.css"
+      ],
+      "js": [
+        "player-controller.js"
+      ],
+      "matches": [
+        "https://*.chzzk.naver.com/*"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     }
