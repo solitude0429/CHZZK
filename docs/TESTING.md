@@ -29,6 +29,14 @@ The player unit suite covers the current DIV-layout React bridge, live-layout pr
 
 The ad-response unit suite covers exact live, event-live, and VOD GFP schedule identities; live/VOD NAVER waterfalls; response-envelope preservation; and neutral-shell idempotence. Five mixed live cases and five mixed VOD cases require fail-open behavior for crossed or unrecognized units, empty sources, malformed breaks, and malformed schedule-source entries.
 
+The diagnostics store regressions cover clear/write/clear ordering, an older
+clear completing while a newer clear remains queued, saturated mutation queues,
+and recovery after storage-write failure. Popup tests cover delayed refresh after
+clearing and sanitized action failures. Probe tests check pre-aborted requests,
+unread-body cancellation, and reader-lock release on success, overflow, and error.
+The operator suite also bounds the one-time early `26.9.6` release to its approved
+date and exact previous immutable release, including expiry and duplicate rejection.
+
 ## Functional-only Firefox E2E
 
 The CI E2E downloads checksum-pinned Firefox Developer Edition and geckodriver builds, then uses an isolated profile and synthetic HTTPS hosts. Its runtime policy is loaded from the production policy file; only the idle evidence TTL is shortened to keep the bounded expiry scenario practical.
@@ -62,6 +70,12 @@ The fixture XPIs are unsigned and exist only in the disposable Developer Edition
 ## Stock Firefox signed-release gate
 
 `test:firefox-signed-smoke` is the production-like authenticity gate. It launches stock Firefox with a new mode-`0700` disposable profile, supplies no preference overrides, confirms `xpinstall.signatures.required` is enabled and has no user value, permanently installs the final XPI, and requires the exact release add-on ID, version, update URL, active state, `temporarilyInstalled=false`, and `AddonManager.SIGNEDSTATE_SIGNED`.
+
+Direct installation and both update paths poll the complete trusted, permanent,
+active add-on state for up to 30 seconds. Merely observing the expected version is
+insufficient. A timeout remains a failed check; record it even if a fresh run
+passes. See [activation failure troubleshooting](TROUBLESHOOTING.md#signed-firefox-check-reports-an-inactive-add-on)
+and the [dated deployment result](UPDATES.md#latest-verified-deployment).
 
 The release workflow downloads checksum-pinned stock Firefox and geckodriver with the separate signed-smoke setup, then runs install mode on the final AMO-signed XPI before attestation or draft staging. The nonce-bound out-of-band release operation waits for that exact staging run and performs a fresh administrator-only immutable-setting and attestation preflight before publication. To provision the same binaries locally:
 

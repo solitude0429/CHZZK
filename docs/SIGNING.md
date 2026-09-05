@@ -8,7 +8,7 @@ Firefox Release/Beta requires Mozilla signing for a normally installed extension
 ## Trust boundary
 
 - The GitHub operator must be the exact `RELEASE_OPERATOR_LOGIN` authenticated in this PC's `gh` keyring.
-- Before every mutation, the operator reads back the repository ID, exact protected remote `main` head, and UTC `YY.M.D` version.
+- Before every mutation, the operator reads back the repository ID, exact protected remote `main` head, and canonical release slot version under the [daily rule and its one approved exception](OPERATIONS.md#one-release-per-utc-day).
 - Never pass GitHub administrator authority or a raw token to Actions, artifacts, argv, environment variables, checkouts, logs, or the server.
 - `AMO_JWT_ISSUER` and `AMO_JWT_SECRET` must exist as a complete pair only in Repository Actions secrets or the protected `firefox-signing` environment. A partial pair, conflicting scopes, or an unprotected environment fails closed.
 - Repository immutable Releases must be enabled. Never overwrite a tag or asset, and never use `--clobber`.
@@ -77,6 +77,11 @@ Temporary artifacts and evidence are bounded. On success or failure, remove only
 ## Daily UTC Release rule
 
 Use the UTC date without zero padding as `YY.M.D`, with one immutable Release per day. If that UTC date already has a Release, do not bump, merge, or sign another product change. Hold all such changes in one `ship-pending` PR; the next mutating product request after the date changes resumes it with the new date version.
+
+The owner-approved exception published `26.9.6` early on 2026-09-05 for PR #112.
+It preserves the exact immutable `26.9.5` release and consumes the September 6
+version. The operator accepts only that dated exception; all signature, source,
+provenance, and immutable-asset checks still apply. See [OPERATIONS.md](OPERATIONS.md#one-release-per-utc-day).
 
 ## Protected PR review
 

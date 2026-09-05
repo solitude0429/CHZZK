@@ -22,6 +22,7 @@ Read this file and root `README.md` before working on the CHZZK extension. Follo
 - Change requests authorize implementation and scoped verification. GitHub, signing, release, and deployment actions require the global authorization rules; reuse approval for its covered stages. Run `npm run chzzk -- ship --json` from a clean `agent/*` branch only when its entire applicable flow is authorized; see `docs/OPERATIONS.md`.
 - Documentation, test infrastructure, operator tooling, and workflow-pin changes may reach protected PR merge only when authorized. Never version, release, or deploy them. The `docs-only` marker is a maximum boundary, not merge permission.
 - Versions use UTC `YY.M.D`, with one immutable Release per UTC day. Authorized same-day overflow stays in one `ship-pending` PR. Later shipping still needs applicable authorization; a code-edit request alone does not grant it.
+- The sole early-release exception is `26.9.6` on 2026-09-05; see [OPERATIONS.md](docs/OPERATIONS.md#one-release-per-utc-day).
 - Run `npm run chzzk -- rollback <version> --json` only when the user explicitly names the version and requests rollback.
 
 ## Working rules
@@ -39,5 +40,7 @@ Read this file and root `README.md` before working on the CHZZK extension. Follo
 ## Completion boundary
 
 Verify product behavior. Authorized shipping also requires signature, provenance, immutable Release, production version/MIME/SHA-256 readback, and disposable Firefox `update_url` verification. Finish independent authorized work before reporting a blocker; distinguish implementation, verification, and delivery.
+
+Before completion, synchronize affected behavior, test, operations, and deployment documentation with final code and actual results; check references. Preserve historical snapshots and disclose unresolved failures. Documentation-only follow-up stops at protected merge.
 
 Perform and report only the requested scope.

@@ -9,6 +9,35 @@ npm run validate:manifest
 npx web-ext lint --source-dir .
 ```
 
+## Signed Firefox check reports an inactive add-on
+
+`active=false` is a failed check even when `appDisabled=false` and
+`userDisabled=false`. The runner already waits up to 30 seconds for the complete
+trusted active state. Identify whether failure occurred during direct installation,
+old-version installation, manual update, or automatic update from the task's logs.
+Check the exact signed version and production manifest before retrying; do not
+disable signature enforcement or modify the user's profile.
+
+If server activation and asset verification succeeded, the authorized operator may
+resume with `npm run chzzk -- deploy <same-version> --json`. It verifies the same
+immutable assets and reruns the disposable-profile update gate. A successful retry
+proves that run succeeded, not why the earlier run failed. If failure repeats,
+investigate the failing installation stage rather than repeatedly retrying or
+claiming completion. The [26.9.6 deployment result](UPDATES.md#latest-verified-deployment)
+records both the initial failure and the successful retry.
+
+## Diagnostics remain after clearing
+
+Version `26.9.6` fixes clear/write/clear overlap: the second clear follows any
+accepted write between the two requests. Repeated clicks share a pending clear
+only when no accepted write intervenes. Writes accepted after the final clear may
+create new diagnostics during continued playback; that is expected.
+
+The popup sends its clear request to the background and refreshes after completion.
+A delayed earlier refresh cannot restore the old display. If a fixed clear-failure
+message appears, deletion has not been confirmed; inspect local storage failure
+through the existing diagnostics tests without publishing raw browser errors.
+
 ## Player still selects a lower quality
 
 The extension intentionally does not rename `480p` to a fake `1080p` label. It selects the highest real manual track that CHZZK exposes in the current player's `VideoTrackList`, even when the quality-pane display filter temporarily hides that track, and the network layer keeps matching playlist requests on the resolved quality. Check the selected player track and the `live-player-video-track` value, not just menu text.

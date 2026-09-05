@@ -8,6 +8,31 @@ CHZZK distributes its Mozilla-signed unlisted XPI from a private HTTPS update ho
 https://chzzk.home.arpa:8443/updates.json
 ```
 
+## Latest verified deployment
+
+Verified on **2026-09-05 UTC**. This is a dated deployment result; use
+`npm run chzzk -- status --json` to refresh live state before another operation.
+
+| Field                          | Verified result                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Immutable Release              | [v26.9.6](https://github.com/solitude0429/CHZZK/releases/tag/v26.9.6)                                  |
+| Source                         | `c1ce6e8d8be7edb2f18462da9ca20ed30750e19f` ([PR #112](https://github.com/solitude0429/CHZZK/pull/112)) |
+| Signed XPI SHA-256             | `23efd2f672a583408a5f73b61f5bb0d470630bae16315e4ab9c0bda6acd8321f`                                     |
+| Production manifest / XPI MIME | `application/json` / `application/x-xpinstall`                                                         |
+| Windows Firefox ESR            | `140.15.0`                                                                                             |
+| Disposable-profile update      | `26.9.5` to `26.9.6`, `permanent-signed-active`, final `none-found`                                    |
+
+The release fixes deletion ordering when diagnostics writes occur between clear
+requests. All four required PR checks passed, including three functional Firefox
+E2E runs; the signing workflow verified the signed XPI in stock Firefox before
+publication. Version `26.9.6` used the [one-time early-release exception](OPERATIONS.md#one-release-per-utc-day).
+
+The first Windows post-deployment smoke failed with `active=false`,
+`appDisabled=false`, and `userDisabled=false`. A fresh disposable-profile run of
+`deploy 26.9.6` passed using the same immutable assets and active server generation.
+The first failure's cause remains undetermined; the successful retry is not a
+root-cause fix. The user's installed Firefox profile was not changed or verified.
+
 ## From Release to update host
 
 1. The local operator uses the `gh` keyring to verify the exact protected `main` and immutable Release.

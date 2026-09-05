@@ -7,7 +7,7 @@ The extension is deliberately narrow: unrelated requests fail open, it never inv
 ## Behavior
 
 - Cancels only the exact CHZZK live ad-state polling routes and removes the detector token only from exact live/video-detail requests.
-- Neutralizes recognized decrypted live, event-live, and VOD GFP schedules plus live/VOD NAVER waterfall responses in the page MAIN world while preserving their response envelopes and tracking context. The two live schedule IDs share one live-unit family, while VOD uses a separate exact unit set; every break must stay within its live-or-VOD family and contain populated record-only sources. Malformed required guard fields, live/VOD family crossings, mixed-family schedules, unrecognized units, and unrelated payloads fail open.
+- Neutralizes recognized decrypted live, event-live, and VOD GFP schedules and NAVER waterfall responses in the page MAIN world, preserving envelopes and tracking context. Malformed, mixed-family, unrecognized, and unrelated payloads fail open; exact guards are in [SECURITY.md](docs/SECURITY.md).
 - Suppresses only CHZZK's known ad-blocking/ad UI overlays and the exact `#live_rs_banner` and `#vod_rs_banner` elements while leaving unrelated banners rendered.
 - Observes trusted CHZZK HLS master playlists, scores advertised variants by resolution, frame rate, then bitrate, and seeds the best valid target without an extra fetch.
 - When Firefox exposes only a numeric rendition URL, probes one bounded concurrent fallback batch per tab, live context, and secret-free playlist family. The configured order is `2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p`.
@@ -26,7 +26,7 @@ Example when `1440p` is available:
 1440p playlist  -> unchanged
 ```
 
-If a master advertises a quality outside the numeric fallback list, that valid advertised quality may still win. Numeric fallback evidence cannot promote a master-derived target above its advertised ceiling. Recovery derives any candidate URL transiently from the current same-family request and never stores a signed recovery URL.
+Valid master-advertised qualities may exceed the fallback list. Numeric probes cannot exceed that master's ceiling. Recovery uses the current same-family request and never stores signed recovery URLs.
 
 ## Source and policy
 
@@ -65,13 +65,17 @@ The Developer Edition E2E is functional-only. Release authenticity is checked se
 
 ## Install and updates
 
-Install the Mozilla-signed XPI from the latest immutable GitHub Release. Firefox updates through:
+Install the Mozilla-signed XPI from the latest immutable GitHub Release.
+
+Latest verified deployment: **26.9.6**, checked on 2026-09-05 UTC. See [results and limits](docs/UPDATES.md#latest-verified-deployment).
+
+Firefox updates through:
 
 ```text
 https://chzzk.home.arpa:8443/updates.json
 ```
 
-The router resolves `chzzk.home.arpa` to the server WireGuard address. Caddy terminates TLS on port 8443 and proxies to the isolated update backend. The landing page exposes the current immutable signed XPI as a manual fallback.
+The router resolves the update host over WireGuard. Caddy serves TLS on port 8443 through the isolated backend. The landing page links the signed XPI for manual installation.
 
 Signing, protected release, and deployment procedures are in:
 
@@ -79,15 +83,19 @@ Signing, protected release, and deployment procedures are in:
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
 - [`docs/UPDATES.md`](docs/UPDATES.md)
 
-Changes authorize implementation and scoped verification; external shipping stages follow global approval rules. Run `ship` only with authorization for its entire applicable flow: protected PR and merge, then product signing, immutable Release, deployment, and disposable Firefox verification. Non-product changes may reach authorized protected merge, but never Release or deployment. See `AGENTS.md` and `docs/OPERATIONS.md`.
+Changes authorize implementation and scoped verification. Run `ship` only with authorization for its entire applicable flow under `AGENTS.md` and `docs/OPERATIONS.md`. Non-product changes stop at authorized protected merge.
 
-Release versions use UTC `YY.M.D`, with at most one immutable Release per UTC day. The four retained Actions are CI, CodeQL, Dependency review, and Build signed Firefox release. The local operator uses the existing `gh` keyring and sends only a verified, credential-free SCP bundle through `ssh server`.
+Versions normally use UTC `YY.M.D`, one immutable Release per day. The local operator uses the `gh` keyring and sends only a verified, credential-free bundle through `ssh server`.
+
+The sole [approved exception](docs/OPERATIONS.md#one-release-per-utc-day) released `26.9.6` early on September 5 and reserves September 6.
 
 Mozilla signing means Firefox may install the XPI; it is not NAVER approval.
 
 ## Diagnostics
 
 The popup shows the active redirect target, last decision, redacted HLS samples, and observed qualities. It stores a bounded, normalized schema locally and sends nothing to an external collector.
+
+Clearing follows earlier accepted writes. Clears coalesce only without an intervening write. Continued playback may create new records after deletion.
 
 If NAVER changes URL shapes or qualities:
 
