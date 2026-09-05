@@ -34,12 +34,13 @@ The installed Firefox profile is a separate boundary. Automated shipping uses a 
 
 ## One Release per UTC day
 
-One-time owner-approved exception: publish the PR #112 diagnostics-clear fix on
-2026-09-05 as `26.9.6`, preserving immutable `26.9.5`. The operator reserves the
+One-time owner-approved exception: the PR #112 diagnostics-clear fix was published
+on 2026-09-05 as `26.9.6`, preserving immutable `26.9.5`. The operator reserved the
 September 6 version early; that date cannot create another `26.9.6` release.
 This exception grants no additional daily releases or future policy bypass.
+The deployed source and actual checks are recorded in [UPDATES.md](UPDATES.md#latest-verified-deployment).
 
-The production version is the UTC date without zero padding: `YY.M.D` (for example, `26.8.30`).
+By default, the production version is the UTC date without zero padding: `YY.M.D` (for example, `26.8.30`).
 
 - Publish at most one immutable Release per UTC day.
 - If the day's slot is free, `ship` aligns the four version fields in `manifest.json`, `package.json`, and `package-lock.json`.
