@@ -12,7 +12,7 @@ function ignorePageAccessFailure() {
   return false;
 }
 
-export function createPlayerSelectionGuards(documentRef) {
+export function createPlayerSelectionGuards(documentRef, { requestSelection = () => {} } = {}) {
   const guardedTracks = new Map();
   let wrappedFilter = null;
   let wrappedFilterOwnDescriptor = null;
@@ -106,7 +106,13 @@ export function createPlayerSelectionGuards(documentRef) {
             const highest = currentResolution.candidate;
             if (highest?.track !== track && (!requested || !sameTrackQuality(requested, highest))) {
               if (!isCurrentTrack(currentResolution.player, highest)) {
-                highest.track.selected = true;
+                // Schedule through the controller: never write from a page-owned setter.
+                // This shares its budget, pending confirmation, retry and stop lifecycle.
+                try {
+                  requestSelection();
+                } catch {
+                  ignorePageAccessFailure();
+                }
               }
               return;
             }

@@ -62,8 +62,7 @@ function normalizedIsoTimestamp(value) {
   return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : EPOCH_ISO;
 }
 
-function normalizedTabId(value, { nullable = false } = {}) {
-  if (nullable && value === null) return null;
+function normalizedTabId(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
@@ -86,20 +85,18 @@ function normalizedRuntimeError(value) {
 function normalizeSample(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const quality = normalizedQuality(value.quality);
-  const tabId = normalizedTabId(value.tabId, { nullable: true });
   const type = normalizedType(value.type);
   const url = normalizedDiagnosticUrl(value.url);
-  if (!quality || tabId === undefined || type === undefined || url === undefined) return null;
+  if (!quality || type === undefined || url === undefined) return null;
   const seenAt = normalizedIsoTimestamp(value.seenAt);
   if (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) return null;
-  return { quality, seenAt, tabId, type, url };
+  return { quality, seenAt, type, url };
 }
 
 function normalizeDecision(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const quality = normalizedQuality(value.quality, { nullable: true });
   const targetQuality = normalizedQuality(value.targetQuality, { nullable: true });
-  const tabId = normalizedTabId(value.tabId, { nullable: true });
   const type = normalizedType(value.type);
   const url = normalizedDiagnosticUrl(value.url);
   const seenAt = normalizedIsoTimestamp(value.seenAt);
@@ -108,7 +105,6 @@ function normalizeDecision(value) {
     typeof value.redirectedCurrentRequest !== "boolean" ||
     quality === undefined ||
     targetQuality === undefined ||
-    tabId === undefined ||
     type === undefined ||
     url === undefined ||
     seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO ||
@@ -124,7 +120,6 @@ function normalizeDecision(value) {
     reason: value.reason,
     redirectedCurrentRequest: value.redirectedCurrentRequest,
     seenAt,
-    tabId,
     targetQuality,
     type,
     url,
@@ -189,6 +184,35 @@ function normalizeTargetsByTab(value, maxSamples) {
   );
 }
 
+function normalizeTargetQualities(value, maxSamples) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, maxSamples)
+    .map((quality) => normalizedQuality(quality))
+    .filter(Boolean)
+    .sort((left, right) => qualityNumber(right) - qualityNumber(left));
+}
+
+function normalizeRuntimeRedirectSummary(value, maxSamples) {
+  // Older snapshots used browser tab IDs. Read them once as aggregates and
+  // never copy their keys or identifiers into the new persisted/exported schema.
+  const activeTabCount = Object.hasOwn(value, "activeTabCount")
+    ? Math.min(normalizedCounter(value.activeTabCount), maxSamples)
+    : normalizeActiveTabIds(value.activeTabIds, maxSamples).length;
+  const targetQualities = normalizeTargetQualities(
+    Object.hasOwn(value, "targetQualities")
+      ? value.targetQualities
+      : Object.values(normalizeTargetsByTab(value.targetsByTab, maxSamples)),
+    maxSamples,
+  );
+  return {
+    activeTabCount,
+    lastError: normalizedRuntimeError(value.lastError),
+    targetQualities,
+    updatedAt: normalizedIsoTimestamp(value.updatedAt),
+  };
+}
+
 export function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
   const policyMaxSamples = normalizedMaxSamples(maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -199,7 +223,6 @@ export function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
     !Array.isArray(source.runtimeRedirects)
       ? source.runtimeRedirects
       : {};
-  const lastError = normalizedRuntimeError(runtimeSource.lastError);
 
   return {
     decisions: (Array.isArray(source.decisions)
@@ -211,12 +234,7 @@ export function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
     generatedAt: normalizedIsoTimestamp(source.generatedAt),
     maxSamples: effectiveMaxSamples,
     qualities: normalizeQualityCounters(source.qualities),
-    runtimeRedirects: {
-      activeTabIds: normalizeActiveTabIds(runtimeSource.activeTabIds, effectiveMaxSamples),
-      lastError,
-      targetsByTab: normalizeTargetsByTab(runtimeSource.targetsByTab, effectiveMaxSamples),
-      updatedAt: normalizedIsoTimestamp(runtimeSource.updatedAt),
-    },
+    runtimeRedirects: normalizeRuntimeRedirectSummary(runtimeSource, effectiveMaxSamples),
     runtimeTransitions: (Array.isArray(source.runtimeTransitions)
       ? source.runtimeTransitions.slice(-effectiveMaxSamples)
       : []
@@ -237,9 +255,9 @@ export function createEmptyDiagnostics({ maxSamples = 200 } = {}) {
     maxSamples: normalizedMaxSamples(maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES),
     qualities: {},
     runtimeRedirects: {
-      activeTabIds: [],
+      activeTabCount: 0,
       lastError: null,
-      targetsByTab: {},
+      targetQualities: [],
       updatedAt: EPOCH_ISO,
     },
     runtimeTransitions: [],
@@ -262,7 +280,6 @@ export function recordDiagnosticUrl(diagnostics, url, { context = {}, now = new 
   const sample = normalizeSample({
     quality,
     seenAt: now.toISOString(),
-    tabId: context.tabId ?? null,
     type: context.type ?? null,
     url,
   });
@@ -290,7 +307,6 @@ export function recordDecision(diagnostics, decision, details = {}, { now = new 
     reason: decision.reason ?? "unknown",
     redirectedCurrentRequest: Boolean(decision.redirectedCurrentRequest),
     seenAt: now.toISOString(),
-    tabId: decision.tabId ?? details.tabId ?? null,
     targetQuality: decision.targetQuality ?? null,
     type: details.type ?? null,
     url: details.url ?? "",
@@ -329,12 +345,10 @@ export function updateRuntimeRedirectDiagnostics(
 ) {
   if (!diagnostics) return false;
   const maxSamples = normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
-  diagnostics.runtimeRedirects = {
-    activeTabIds: normalizeActiveTabIds(activeTabIds, maxSamples),
-    lastError: normalizedRuntimeError(lastError),
-    targetsByTab: normalizeTargetsByTab(targetsByTab, maxSamples),
-    updatedAt: now.toISOString(),
-  };
+  diagnostics.runtimeRedirects = normalizeRuntimeRedirectSummary(
+    { activeTabIds, lastError, targetsByTab, updatedAt: now.toISOString() },
+    maxSamples,
+  );
   diagnostics.generatedAt = now.toISOString();
   return true;
 }

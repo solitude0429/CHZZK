@@ -367,7 +367,7 @@
   function ignorePageAccessFailure2() {
     return false;
   }
-  function createPlayerSelectionGuards(documentRef) {
+  function createPlayerSelectionGuards(documentRef, { requestSelection = () => {} } = {}) {
     const guardedTracks = /* @__PURE__ */ new Map();
     let wrappedFilter = null;
     let wrappedFilterOwnDescriptor = null;
@@ -455,7 +455,11 @@
               const highest = currentResolution.candidate;
               if (highest?.track !== track && (!requested || !sameTrackQuality(requested, highest))) {
                 if (!isCurrentTrack(currentResolution.player, highest)) {
-                  highest.track.selected = true;
+                  try {
+                    requestSelection();
+                  } catch {
+                    ignorePageAccessFailure2();
+                  }
                 }
                 return;
               }
@@ -982,7 +986,10 @@
     visualViewportRef = windowRef?.visualViewport,
     watchdogIntervalMs = WATCHDOG_INTERVAL_MS,
   } = {}) {
-    const guards = createPlayerSelectionGuards(documentRef);
+    const guards = createPlayerSelectionGuards(documentRef, {
+      // Do not restart an already scheduled scan for every intercepted page write.
+      requestSelection: () => scheduleScan(),
+    });
     const resolveControllerPlayerTrack = guards.resolve;
     const resolvedStorage = resolveStorage(storage);
     const storedIntent = readStoredTrackIntent(resolvedStorage);

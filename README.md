@@ -12,8 +12,8 @@ The extension is deliberately narrow: unrelated requests fail open, it never inv
 - Observes trusted CHZZK HLS master playlists, scores advertised variants by resolution, frame rate, then bitrate, and seeds the best valid target without an extra fetch.
 - When Firefox exposes only a numeric rendition URL, probes one bounded concurrent fallback batch per tab, live context, and secret-free playlist family. The configured order is `2160p, 1440p, 1080p, 720p, 480p, 360p, 270p, 144p`.
 - Preserves verified dedicated-livecloud state across eligible live-to-mini-player transitions while rejecting generic-CDN, stale, conflicting, or foreign-navigation evidence.
-- Validates selected or redirected playlist bodies before renewing evidence. Empty, HTML, malformed, gap-only, oversized, failed, or unavailable responses invalidate the target; exact Firefox client cancellations are neutral.
-- Resolves the current CHZZK player through the live-layout React bridge with bounded fallbacks and selects only a concrete track accepted by CHZZK. A shared write budget prevents selection churn.
+- Validates selected or redirected playlist bodies before renewing evidence. Empty, HTML, malformed, gap-only, hint-only, oversized, failed, or unavailable responses invalidate the target; exact Firefox client cancellations are neutral.
+- Resolves the current CHZZK player through the live-layout React bridge with bounded fallbacks and selects only a concrete track accepted by CHZZK. Intercepted selections share the controller write budget.
 - Enforces the same quality invariant on live, home, search, category, following, and mini-player routes, including remounts and silent demotions.
 - Keeps signed query strings, raw browser errors, tab IDs, full subdomains, ports, cookies, and account/session identifiers out of persisted diagnostics.
 
@@ -93,7 +93,7 @@ Mozilla signing means Firefox may install the XPI; it is not NAVER approval.
 
 ## Diagnostics
 
-The popup shows the active redirect target, last decision, redacted HLS samples, and observed qualities. It stores a bounded, normalized schema locally and sends nothing to an external collector.
+The popup shows the active tab count, target qualities, last decision, and redacted HLS samples. It stores a bounded, normalized schema locally and sends nothing to an external collector.
 
 Clearing follows earlier accepted writes. Clears coalesce only without an intervening write. Continued playback may create new records after deletion.
 

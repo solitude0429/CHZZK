@@ -20,13 +20,6 @@ function renderQualitySummary(diagnostics) {
     .join("\n");
 }
 
-function renderTargetSummary(runtimeRedirects) {
-  const targets = Object.entries(runtimeRedirects.targetsByTab ?? {})
-    .sort(([a], [b]) => Number(a) - Number(b))
-    .map(([tabId, target]) => `${tabId}:${target}`);
-  return targets.join(", ") || "none";
-}
-
 function render(value) {
   const diagnostics = normalizeDiagnostics(value, NORMALIZATION_OPTIONS);
   const runtimeRedirects = diagnostics.runtimeRedirects;
@@ -37,15 +30,15 @@ function render(value) {
   summary.textContent = [
     `generatedAt: ${diagnostics.generatedAt}`,
     `totalHlsRequests: ${diagnostics.totalHlsRequests ?? 0}`,
-    `activeTabIds: ${(runtimeRedirects.activeTabIds ?? []).join(", ") || "none"}`,
-    `targetsByTab: ${renderTargetSummary(runtimeRedirects)}`,
+    `activeTabCount: ${runtimeRedirects.activeTabCount}`,
+    `targetQualities: ${runtimeRedirects.targetQualities.join(", ") || "none"}`,
     `runtimeRedirectsUpdatedAt: ${runtimeRedirects.updatedAt}`,
     `lastRuntimeRedirectError: ${runtimeRedirects.lastError ?? "none"}`,
     lastTransition
       ? `lastRuntimeTransition: ${lastTransition.action} / ${lastTransition.reason} / ${lastTransition.fromQuality ?? "none"} -> ${lastTransition.toQuality ?? "none"} / ${lastTransition.source}`
       : "lastRuntimeTransition: none",
     lastDecision
-      ? `lastDecision: ${lastDecision.ok ? "ok" : "blocked"} / ${lastDecision.reason} / tab ${lastDecision.tabId ?? "n/a"}`
+      ? `lastDecision: ${lastDecision.ok ? "ok" : "blocked"} / ${lastDecision.reason}`
       : "lastDecision: none",
     "",
     qualities || "qualities: none",

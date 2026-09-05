@@ -195,7 +195,10 @@ export function createHighestQualityPlayerController({
   visualViewportRef = windowRef?.visualViewport,
   watchdogIntervalMs = WATCHDOG_INTERVAL_MS,
 } = {}) {
-  const guards = createPlayerSelectionGuards(documentRef);
+  const guards = createPlayerSelectionGuards(documentRef, {
+    // Do not restart an already scheduled scan for every intercepted page write.
+    requestSelection: () => scheduleScan(),
+  });
   const resolveControllerPlayerTrack = guards.resolve;
   const resolvedStorage = resolveStorage(storage);
   const storedIntent = readStoredTrackIntent(resolvedStorage);
