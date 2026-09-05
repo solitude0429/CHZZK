@@ -19,6 +19,8 @@ export function createDiagnosticsStore({ storage, maxSamples, maxPendingMutation
   function mutate(mutator) {
     if (depth >= limit) return Promise.resolve({ diagnostics: null, dropped: true, result: false });
     depth += 1;
+    // A later clear must follow this accepted write, not reuse an earlier clear.
+    pendingClear = null;
     return enqueue(async () => {
       const stored = await storage.get(key);
       const diagnostics = normalizeDiagnostics(stored?.[key], options);
@@ -34,14 +36,15 @@ export function createDiagnosticsStore({ storage, maxSamples, maxPendingMutation
   function clear() {
     if (pendingClear) return pendingClear;
     // The user's clear follows all accepted writes, even when the telemetry
-    // queue is full. Coalesce repeated clicks to keep this path bounded too.
-    pendingClear = enqueue(async () => {
+    // queue is full. Coalesce clicks only when no write intervenes.
+    const operation = enqueue(async () => {
       await storage.remove(key);
       return normalizeDiagnostics(null, options);
     }).finally(() => {
-      pendingClear = null;
+      if (pendingClear === operation) pendingClear = null;
     });
-    return pendingClear;
+    pendingClear = operation;
+    return operation;
   }
 
   return Object.freeze({ clear, mutate });

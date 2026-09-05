@@ -132,13 +132,20 @@ export function formatUtcVersion(date = new Date()) {
   return `${String(year).slice(-2)}.${date.getUTCMonth() + 1}.${date.getUTCDate()}`;
 }
 
+// Owner-approved one-time early release of the diagnostics clear fix (PR #112).
+// Reserve tomorrow's version instead of replacing the immutable 26.9.5 release.
+export function releaseSlotVersion(date = new Date()) {
+  const version = formatUtcVersion(date);
+  return version === "26.9.5" ? "26.9.6" : version;
+}
+
 export function compareUtcVersions(left, right) {
   return parseUtcVersion(left).date.getTime() - parseUtcVersion(right).date.getTime();
 }
 
 export function assertUtcReleaseSlot(expectedVersion, date = new Date()) {
   const expected = parseUtcVersion(expectedVersion).canonical;
-  if (formatUtcVersion(date) !== expected) {
+  if (releaseSlotVersion(date) !== expected) {
     throw new UtcReleaseSlotRolloverError(
       "UTC release slot rolled over before merge; the operator must update the version and repeat checks",
     );
@@ -427,16 +434,25 @@ function sameUtcDay(isoTimestamp, date) {
 
 export function classifyDailyReleaseState({ headSha, now, releases, runs, version }) {
   const exactHead = validateSha(headSha, "daily release source");
-  const parsedVersion = parseUtcVersion(version);
-  if (formatUtcVersion(now) !== version)
+  parseUtcVersion(version);
+  if (releaseSlotVersion(now) !== version)
     throw new Error("daily release version does not match current UTC day");
   if (!Array.isArray(releases) || !Array.isArray(runs)) throw new Error("release state inputs are malformed");
   const publishedToday = releases.filter(
-    (release) => !release.isDraft && sameUtcDay(release.publishedAt, parsedVersion.date),
+    (release) => !release.isDraft && sameUtcDay(release.publishedAt, now),
   );
-  if (publishedToday.length > 1)
+  const approvedPrior = publishedToday.filter(
+    (release) =>
+      formatUtcVersion(now) === "26.9.5" &&
+      version === "26.9.6" &&
+      release.tagName === "v26.9.5" &&
+      release.isImmutable === true &&
+      release.targetCommitish === "2ffe1c178935749ab0872ef8adb9fe35bdeca3f9",
+  );
+  const consumingSlot = publishedToday.filter((release) => !approvedPrior.includes(release));
+  if (approvedPrior.length > 1 || consumingSlot.length > 1)
     throw new Error("more than one GitHub release was published on this UTC day");
-  if (publishedToday.length === 1 && publishedToday[0].tagName !== tagFor(version)) {
+  if (consumingSlot.length === 1 && consumingSlot[0].tagName !== tagFor(version)) {
     throw new Error("another GitHub release already consumed this UTC release day");
   }
   const tagged = releases.filter((release) => release.tagName === tagFor(version));
@@ -467,7 +483,7 @@ export function classifyDailyReleaseState({ headSha, now, releases, runs, versio
 }
 
 async function listReleaseState(run, context, now) {
-  const version = formatUtcVersion(now);
+  const version = releaseSlotVersion(now);
   const releaseResponse = await jsonCommand(
     run,
     "gh",
