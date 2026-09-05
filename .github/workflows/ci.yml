@@ -27,17 +27,6 @@ jobs:
           cache: npm
           node-version: 22
       - run: npm ci
-      - name: Capture read-only review verification context
-        run: |
-          git archive --format=tar HEAD > "$RUNNER_TEMP/chzzk-review-context.tar"
-          tar --append --file="$RUNNER_TEMP/chzzk-review-context.tar" node_modules
-          gzip "$RUNNER_TEMP/chzzk-review-context.tar"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: chzzk-review-context-${{ github.sha }}
-          path: ${{ runner.temp }}/chzzk-review-context.tar.gz
-          retention-days: 1
-          if-no-files-found: error
       - name: Check formatting
         run: npm run format:check
       - name: Check generated runtime
