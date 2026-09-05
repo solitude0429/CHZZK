@@ -1,0 +1,12 @@
+{
+  "name": "@chzzk/image-size",
+  "version": "2.0.2-patch.1",
+  "private": true,
+  "description": "Locally patched image-size buffer API for CHZZK development tooling",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "index.cjs",
+  "exports": {
+    ".": "./index.cjs"
+  }
+}

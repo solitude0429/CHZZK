@@ -18,6 +18,16 @@ function read(path) {
 }
 
 describe("Windows signed-smoke policy", () => {
+  it("detects Windows from the runtime rather than the inherited OS environment", () => {
+    for (const path of [
+      "scripts/firefox-signed-smoke.windows.ps1",
+      "scripts/verify-live-update.windows.ps1",
+    ]) {
+      const wrapper = read(path);
+      assert.match(wrapper, /\[Environment\]::OSVersion\.Platform -ne \[PlatformID\]::Win32NT/);
+      assert.doesNotMatch(wrapper, /\$env:OS/);
+    }
+  });
   it("requires an explicit absolute Node executable and never resolves Node through PATH", () => {
     const wrapper = read("scripts/firefox-signed-smoke.windows.ps1");
     assert.match(wrapper, /\[Parameter\(Mandatory = \$true\)\]\s*\[string\]\$NodeBinary/);
@@ -114,6 +124,7 @@ process.exitCode = 17;
             encoding: "utf8",
             env: {
               ...process.env,
+              OS: "synthetic-untrusted-platform-name",
               GH_ENTERPRISE_TOKEN: "enterprise-gh-secret",
               GH_TOKEN: "gh-secret",
               GITHUB_ENTERPRISE_TOKEN: "enterprise-github-secret",
@@ -123,7 +134,7 @@ process.exitCode = 17;
           },
         );
 
-        assert.equal(result.status, 17);
+        assert.equal(result.status, 17, result.stderr.slice(0, 2000));
         assert.equal(result.stdout, "");
         assert.match(result.stderr, /stdout-phase-marker/);
         assert.match(result.stderr, /stderr-phase-marker/);

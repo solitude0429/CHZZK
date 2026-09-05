@@ -61,6 +61,10 @@ function sha256(bytes) {
 }
 
 export function readStableRegularFile(path, { onDescriptorOpened = () => {} } = {}) {
+  const pathStat = lstatSync(path);
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+    throw new Error(`Release input must be a regular file, not a symbolic link: ${path}`);
+  }
   let descriptor;
   try {
     descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
@@ -72,6 +76,9 @@ export function readStableRegularFile(path, { onDescriptorOpened = () => {} } = 
   try {
     const before = fstatSync(descriptor);
     if (!before.isFile()) throw new Error(`Release input must be a regular file: ${path}`);
+    if (pathStat.dev !== before.dev || pathStat.ino !== before.ino) {
+      throw new Error(`Release input changed before it was opened: ${path}`);
+    }
     onDescriptorOpened(descriptor);
     const bytes = readFileSync(descriptor);
     const after = fstatSync(descriptor);
@@ -99,6 +106,9 @@ function ensurePrivateDirectory(path) {
 }
 
 function fsyncDirectory(path) {
+  // Node cannot flush directory handles on Windows. Local artifacts still use
+  // fsynced files and rename; POSIX retains the directory durability guarantee.
+  if (process.platform === "win32") return;
   const descriptor = openSync(path, "r");
   try {
     fsyncSync(descriptor);

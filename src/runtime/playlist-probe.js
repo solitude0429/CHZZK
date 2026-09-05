@@ -71,6 +71,8 @@ async function readResponseTextWithLimit(response, maxBytes) {
     return chunks.join("");
   } catch {
     return null;
+  } finally {
+    reader.releaseLock?.();
   }
 }
 
@@ -109,6 +111,7 @@ export function createPlaylistProbe({
   }
 
   async function fetchPlaylistEvidence(url, { signal = null } = {}) {
+    if (signal?.aborted) return null;
     if (!isTrustedRequestDomain(url, policy)) return null;
     const requestedNetworkUrl = networkRequestUrl(url);
     if (!requestedNetworkUrl) return null;
@@ -137,6 +140,9 @@ export function createPlaylistProbe({
     } catch {
       return null;
     } finally {
+      // Headers can reject evidence before the body is consumed. End the fetch
+      // on every terminal path so rejected streams cannot outlive their timeout.
+      controller.abort();
       clearTimeoutImpl(timeout);
       signal?.removeEventListener?.("abort", abortFromParent);
     }

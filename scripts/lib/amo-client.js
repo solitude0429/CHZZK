@@ -403,6 +403,9 @@ async function fetchSignedXpi(fetchImpl, initialUrl, deadline, authorization) {
 }
 
 function fsyncDirectory(path) {
+  // Local Windows downloads retain file fsync and rename. Directory fsync is
+  // available only on POSIX; the server's activation journal remains separate.
+  if (process.platform === "win32") return;
   const descriptor = openSync(path, "r");
   try {
     fsyncSync(descriptor);

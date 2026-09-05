@@ -113,7 +113,7 @@ describe("immutable release preparation", () => {
     const secondOutput = mkdtempSync(join(tmpdir(), "chzzk-release-output-b-"));
     try {
       writeFileSync(join(rootDir, "private.pem"), "synthetic private material that must never be archived");
-      symlinkSync("private.pem", join(rootDir, "leak-link.pem"));
+      if (process.platform !== "win32") symlinkSync("private.pem", join(rootDir, "leak-link.pem"));
 
       const first = await prepareReleaseArtifacts({
         outputDir: firstOutput,
@@ -148,12 +148,18 @@ describe("immutable release preparation", () => {
     }
   });
 
-  it("fails before packaging when an allowlisted runtime path is a symlink", async () => {
+  it("fails before packaging when an allowlisted runtime path is a symlink", async (t) => {
     const rootDir = makeReleaseFixture();
     const outputDir = mkdtempSync(join(tmpdir(), "chzzk-release-output-"));
     try {
       rmSync(join(rootDir, "background.js"));
-      symlinkSync("manifest.json", join(rootDir, "background.js"));
+      try {
+        symlinkSync("manifest.json", join(rootDir, "background.js"));
+      } catch (error) {
+        if (process.platform !== "win32" || error.code !== "EPERM") throw error;
+        t.skip("Windows symlink creation privilege is unavailable; Linux CI covers this boundary");
+        return;
+      }
 
       await assert.rejects(
         prepareReleaseArtifacts({

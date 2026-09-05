@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 
 const npmCli = process.env.npm_execpath;
 if (typeof npmCli !== "string" || !npmCli) {
@@ -21,6 +20,10 @@ try {
   throw new Error("npm audit did not return bounded JSON output");
 }
 
+if (report && typeof report === "object" && Object.hasOwn(report, "error")) {
+  throw new Error("npm audit registry request failed; vulnerability status is unverified");
+}
+
 const vulnerabilities = report?.vulnerabilities;
 if (!vulnerabilities || typeof vulnerabilities !== "object" || Array.isArray(vulnerabilities)) {
   throw new Error("npm audit returned an invalid vulnerability report");
@@ -33,39 +36,5 @@ if (names.length === 0) {
   process.exit(0);
 }
 
-const expectedNames = ["addons-linter", "image-size", "web-ext"];
-const expectedAdvisories = [
-  "https://github.com/advisories/GHSA-5p2g-fcmc-qvqq",
-  "https://github.com/advisories/GHSA-w3rx-r6r6-pgpr",
-];
-const imageSize = vulnerabilities["image-size"];
-const advisoryUrls = Array.isArray(imageSize?.via)
-  ? imageSize.via
-      .filter((entry) => entry && typeof entry === "object")
-      .map((entry) => entry.url)
-      .sort()
-  : [];
-const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
-const exactUnpatchedToolingAdvisory =
-  JSON.stringify(names) === JSON.stringify(expectedNames) &&
-  JSON.stringify(advisoryUrls) === JSON.stringify(expectedAdvisories) &&
-  imageSize?.isDirect === false &&
-  imageSize?.severity === "high" &&
-  JSON.stringify(imageSize?.effects) === JSON.stringify(["addons-linter"]) &&
-  JSON.stringify(imageSize?.nodes) === JSON.stringify(["node_modules/image-size"]) &&
-  vulnerabilities["addons-linter"]?.isDirect === false &&
-  JSON.stringify(vulnerabilities["addons-linter"]?.via) === JSON.stringify(["image-size"]) &&
-  vulnerabilities["web-ext"]?.isDirect === true &&
-  JSON.stringify(vulnerabilities["web-ext"]?.via) === JSON.stringify(["addons-linter"]) &&
-  lock.packages?.["node_modules/image-size"]?.version === "2.0.2" &&
-  lock.packages?.["node_modules/addons-linter"]?.version === "10.10.0" &&
-  lock.packages?.["node_modules/web-ext"]?.version === "10.6.0";
-
-if (!exactUnpatchedToolingAdvisory) {
-  const summary = names.map((name) => `${name}:${vulnerabilities[name]?.severity ?? "unknown"}`);
-  throw new Error(`npm audit found non-allowlisted vulnerabilities: ${summary.join(", ")}`);
-}
-
-console.warn(
-  "npm audit exception: image-size 2.0.2 has two unpatched parser DoS advisories in dev-only web-ext lint tooling",
-);
+const summary = names.map((name) => `${name}:${vulnerabilities[name]?.severity ?? "unknown"}`);
+throw new Error(`npm audit found vulnerabilities: ${summary.join(", ")}`);

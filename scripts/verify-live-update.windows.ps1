@@ -18,7 +18,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($env:OS -ne 'Windows_NT') {
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'The production update readback requires Windows.'
 }
 

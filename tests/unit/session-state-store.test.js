@@ -8,6 +8,29 @@ function state(key, tabId, extra = {}) {
 }
 
 describe("runtime session-state store", () => {
+  it("counts a family once and uses its most recent state across all registries", () => {
+    const store = createSessionStateStore({ maxStates: 2, maxStatesPerTab: 2 });
+    const controller = new AbortController();
+    store.activeTargetsBySession.set("shared", store.touch(state("shared", 1)));
+    store.resolutionBySession.set("older", store.touch(state("older", 1, { controller })));
+    store.failedTargetsBySession.set(
+      "shared",
+      store.touch(state("shared", 1, { targets: new Map([["1080p", Date.now() + 60_000]]) })),
+    );
+    store.masterLineageBySession.set("shared", store.touch(state("shared", 1)));
+    store.enforceLimits();
+    assert.equal(controller.signal.aborted, false);
+
+    store.activeTargetsBySession.set("new", store.touch(state("new", 1)));
+    store.enforceLimits("new");
+
+    assert.deepEqual([...store.activeTargetsBySession.keys()], ["shared", "new"]);
+    assert.equal(store.failedTargetsBySession.has("shared"), true);
+    assert.equal(store.masterLineageBySession.has("shared"), true);
+    assert.equal(store.resolutionBySession.has("older"), false);
+    assert.equal(controller.signal.aborted, true);
+  });
+
   it("evicts the least-recently-used family and forgets its redirected requests", () => {
     let activeChanges = 0;
     const redirectedRequestsById = new Map([["old-request", { key: "family-b", settled: false }]]);

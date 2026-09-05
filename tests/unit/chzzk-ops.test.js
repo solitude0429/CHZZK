@@ -131,7 +131,13 @@ describe("CHZZK operator CLI contract", () => {
   it("never extracts a gh token and always spawns without a shell", async () => {
     const calls = [];
     const runner = createSubprocessRunner({
-      environment: { GH_TOKEN: "must-not-propagate", GITHUB_TOKEN: "also-remove", PATH: "synthetic" },
+      environment: {
+        GH_TOKEN: "must-not-propagate",
+        GITHUB_TOKEN: "also-remove",
+        PATH: "synthetic",
+        gh_token: "lowercase-remove",
+        GitHub_Enterprise_Token: "mixed-case-remove",
+      },
       spawn(command, args, options) {
         calls.push({ args, command, options });
         return { status: 0, stderr: "", stdout: "ok\n" };

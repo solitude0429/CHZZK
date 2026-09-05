@@ -9,6 +9,8 @@ npm run verify
 
 `verify` runs formatting, generated-runtime drift checks, manifest/project/workflow validation, ESLint, web-ext lint, unit and security behavior tests, dependency audit, deterministic packaging, and package-content audit.
 
+On Windows, the Linux activation filesystem suite is explicitly skipped: its ownership, `flock`, directory fsync and crash-recovery checks require Linux. The symbolic-link input test also reports a skip if Windows denies creation of its fixture link. Both remain required in Linux CI. Windows local artifact writes fsync file contents before rename; they do not claim POSIX directory-fsync durability.
+
 Useful individual gates:
 
 ```bash
@@ -39,6 +41,8 @@ npm run test:firefox-functional-e2e
 ```
 
 The test exercises real Firefox rather than a VM mock:
+
+The diagnostics popup also exercises its visible clear button through the background message boundary and waits for the refreshed empty payload.
 
 1. Installs a synthetic `0.1.21` XPI with a legacy MAIN-world controller through geckodriver, opens a live document, and confirms the old controller selects `720p`.
 2. Loads a normal CHZZK home document, enters `/live` with `pushState`, mounts the player, and requires the packaged MAIN-world controller to select `1080p`. It then moves the same player through `/following` and back to `/live`, demotes it to ABR on each route, and requires `1080p` recovery everywhere.

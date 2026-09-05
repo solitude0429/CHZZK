@@ -3,7 +3,7 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["codex-security-scans/", "dist/", "node_modules/", "web-ext-artifacts/"],
+    ignores: ["codex-security-scans/", "dist/", "node_modules/", "web-ext-artifacts/", "scripts/vendor/"],
   },
   eslint.configs.recommended,
   {

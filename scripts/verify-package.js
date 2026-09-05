@@ -26,9 +26,16 @@ const allowedFiles = new Set([
 const zip = readdirSync("dist").find((name) => name === expectedZip);
 assert.ok(zip, `dist/${expectedZip} must exist`);
 
-const result = spawnSync("unzip", ["-Z1", `dist/${zip}`], { encoding: "utf8" });
+const result = spawnSync("unzip", ["-Z1", `dist/${zip}`], {
+  encoding: "utf8",
+  windowsHide: true,
+});
+if (result.error) {
+  console.error(`Package audit could not run unzip (${result.error.code ?? "unknown error"})`);
+  process.exit(1);
+}
 if (result.status !== 0) {
-  process.stderr.write(result.stderr);
+  process.stderr.write(result.stderr ?? "");
   process.exit(result.status ?? 1);
 }
 

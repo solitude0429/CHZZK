@@ -15,6 +15,17 @@ Firefox Release/Beta requires Mozilla signing for a normally installed extension
 
 ## Operator commands
 
+For an explicitly approved credential replacement, use the separate local
+`scripts/Set-AmoCredentials.windows.ps1` prompt after closing unrestricted Codex
+sessions. Enter only credentials issued by Mozilla. The default mode performs
+an authenticated read-only check of this add-on's unlisted versions; `-Apply`
+then sends the pair through stdin to the existing GitHub Actions secret store.
+It does not read `.env`, print credentials, create a Release, or revoke old keys.
+Do not start signing concurrently: GitHub stores the two entries separately.
+A partial update is incomplete, and successful storage still requires separate
+signing verification and Mozilla revocation readback. `.env.example` contains
+only dummy documentation values and is excluded from the extension package.
+
 Normal product changes use `ship`, which includes signing and publication. Use `release` directly only to resume or recover publication of a canonical version already merged into protected `main`.
 
 ```powershell
