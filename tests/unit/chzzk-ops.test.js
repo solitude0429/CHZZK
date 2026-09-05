@@ -20,6 +20,7 @@ import {
   publishPreparedDraft,
   queueShipPending,
   readServerStatus,
+  releaseSlotVersion,
   redactSensitive,
   reusableSuccessfulRun,
   selectPreviousSignedRelease,
@@ -385,6 +386,39 @@ describe("server status provenance", () => {
 describe("daily release state", () => {
   const now = new Date("2026-08-30T12:00:00.000Z");
   const version = "26.8.30";
+
+  it("limits the owner-approved early release to 26.9.6 after the exact immutable 26.9.5", () => {
+    assert.equal(formatUtcVersion(new Date("2026-09-05T12:00:00Z")), "26.9.5");
+    for (const [date, expected] of [
+      ["2026-09-04T23:59:59Z", "26.9.4"],
+      ["2026-09-05T00:00:00Z", "26.9.6"],
+      ["2026-09-05T23:59:59Z", "26.9.6"],
+      ["2026-09-06T00:00:00Z", "26.9.6"],
+      ["2026-09-07T00:00:00Z", "26.9.7"],
+    ]) {
+      assert.equal(releaseSlotVersion(new Date(date)), expected);
+      assert.equal(assertUtcReleaseSlot(expected, new Date(date)), expected);
+    }
+    const prior = {
+      isDraft: false,
+      isImmutable: true,
+      publishedAt: "2026-09-05T02:42:34Z",
+      tagName: "v26.9.5",
+      targetCommitish: "2ffe1c178935749ab0872ef8adb9fe35bdeca3f9",
+    };
+    const classify = (releases, date = "2026-09-05T12:00:00Z") =>
+      classifyDailyReleaseState({ headSha: sha, now: new Date(date), releases, runs: [], version: "26.9.6" });
+    assert.equal(classify([prior]).kind, "ready");
+    for (const changed of [{ isImmutable: false }, { targetCommitish: sha }, { tagName: "v26.9.4" }]) {
+      assert.throws(() => classify([{ ...prior, ...changed }]), /consumed this UTC release day/);
+    }
+    assert.throws(() => classify([prior, prior]), /more than one/);
+    const released = { ...prior, tagName: "v26.9.6", targetCommitish: sha };
+    assert.equal(classify([prior, released]).kind, "published");
+    assert.equal(classify([prior, released], "2026-09-06T12:00:00Z").kind, "published");
+    assert.throws(() => classify([prior, released, released]), /more than one/);
+    assert.throws(() => classify([prior, released, { ...released, tagName: "v26.9.7" }]), /more than one/);
+  });
 
   it("reports one exact immutable release as idempotently published", () => {
     const release = {
