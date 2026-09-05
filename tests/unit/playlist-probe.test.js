@@ -31,6 +31,77 @@ function mediaPlaylist(segment = "segment.ts") {
 }
 
 describe("runtime playlist probe", () => {
+  it("does not start a fetch for an already cancelled probe", async () => {
+    let fetched = false;
+    const probe = createPlaylistProbe({
+      fetchImpl: async () => {
+        fetched = true;
+      },
+      policy,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    assert.equal(
+      await probe.fetchPlaylistEvidence("https://edge.pstatic.net/live.m3u8", {
+        signal: controller.signal,
+      }),
+      null,
+    );
+    assert.equal(fetched, false);
+  });
+
+  it("aborts unread response bodies on every early rejection", async () => {
+    const url = "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8";
+    for (const overrides of [
+      { ok: false },
+      { headers: { get: (name) => (name === "content-type" ? "text/html" : null) } },
+      { headers: { get: (name) => (name === "content-length" ? "256001" : null) } },
+      { url: `${url}?changed=synthetic` },
+    ]) {
+      let fetchSignal;
+      let reads = 0;
+      const probe = createPlaylistProbe({
+        fetchImpl: async (_url, { signal }) => {
+          fetchSignal = signal;
+          return {
+            ...playlistResponse(url, ""),
+            text: async () => {
+              reads += 1;
+              return "";
+            },
+            ...overrides,
+          };
+        },
+        policy,
+      });
+      assert.equal(await probe.fetchPlaylistEvidence(url), null);
+      assert.equal(reads, 0);
+      assert.equal(fetchSignal.aborted, true);
+    }
+  });
+
+  it("releases the response reader after success, overflow, and read failure", async () => {
+    const url = "https://edge.pstatic.net/chzzk/channel/chunklist_1080p.m3u8";
+    for (const outcome of ["success", "overflow", "failure"]) {
+      const body = new ReadableStream({
+        start(controller) {
+          if (outcome === "failure") controller.error(new Error("synthetic read failure"));
+          else {
+            controller.enqueue(new TextEncoder().encode(mediaPlaylist()));
+            controller.close();
+          }
+        },
+      });
+      const probe = createPlaylistProbe({
+        fetchImpl: async () => ({ ...playlistResponse(url, ""), body }),
+        policy: { ...policy, probeMaxBytes: outcome === "overflow" ? 4 : policy.probeMaxBytes },
+      });
+      const result = await probe.fetchPlaylistEvidence(url);
+      assert.equal(result?.text ?? null, outcome === "success" ? mediaPlaylist() : null);
+      assert.equal(body.locked, false);
+    }
+  });
+
   it("strips only a client-side fragment from network event URLs", () => {
     assert.equal(
       networkRequestUrl("https://edge.pstatic.net/live.m3u8?Policy=one#tail"),

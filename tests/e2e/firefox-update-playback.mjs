@@ -1669,6 +1669,15 @@ async function main() {
       { timeoutMs: 5000 },
     );
 
+    await driver.execute(`document.getElementById("payload").value = "pending-clear";
+document.getElementById("clear").click();`);
+    await poll(async () => {
+      const payload = await driver.execute("return document.getElementById('payload').value;");
+      if (payload === "pending-clear") return false;
+      assert.equal(JSON.parse(payload).totalHlsRequests, 0);
+      return true;
+    });
+
     const updateOpenUrl = `https://www.chzzk.naver.com:${state.port}/live/update-open`;
     await driver.setContext("content");
     await driver.command("POST", "/url", { url: updateOpenUrl });

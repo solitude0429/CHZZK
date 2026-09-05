@@ -47,10 +47,9 @@ describe("personal CHZZK extension policy", () => {
       false,
       "the extension-API observer must not touch page objects",
     );
-    const playerController = readFileSync(
-      new URL("../../src/runtime/player-controller.js", import.meta.url),
-      "utf8",
-    );
+    const playerController = ["player-controller", "player-model", "player-selection-guards"]
+      .map((name) => readFileSync(new URL(`../../src/runtime/${name}.js`, import.meta.url), "utf8"))
+      .join("\n");
     assert.match(playerController, /#live_player_layout > pzp-pc-layout/);
     assert.match(playerController, /live-player-video-track/);
     assert.match(playerController, /MutationObserver/);

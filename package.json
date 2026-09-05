@@ -1,6 +1,6 @@
 {
   "name": "chzzk",
-  "version": "26.8.31",
+  "version": "26.9.5",
   "private": true,
   "type": "module",
   "description": "Personal Firefox WebExtension for CHZZK ad removal and highest-quality playback.",
@@ -11,14 +11,15 @@
   "overrides": {
     "adm-zip": "0.6.0",
     "brace-expansion": "5.0.9",
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.6",
+    "image-size": "$image-size",
     "js-yaml": "4.3.1",
     "shell-quote": "1.10.0"
   },
   "scripts": {
     "audit:deps": "node scripts/audit-dependencies.js",
     "audit:package": "node scripts/verify-package.js",
-    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes AGENTS.md codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests",
+    "build": "npm run build:runtime && web-ext build --overwrite-dest --artifacts-dir dist --source-dir . --ignore-files .github .git .hermes AGENTS.md codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests secrets *.key *.pem *.p12 *.pfx *.secret *.secrets",
     "build:runtime": "node scripts/build-runtime.js",
     "build:server-activator": "esbuild scripts/server-update-activator.js --bundle --platform=node --format=esm --target=node22 --outfile=dist/server-update-activator.mjs",
     "build:update-manifest": "node scripts/build-update-manifest.js",
@@ -27,7 +28,7 @@
     "diagnostics:analyze": "node scripts/analyze-diagnostics.js",
     "format:check": "prettier --check \"**/*.{js,mjs,json,md,yml}\" --ignore-path .prettierignore",
     "lint": "eslint .",
-    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes AGENTS.md codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests",
+    "lint:webext": "web-ext lint --self-hosted --warnings-as-errors --source-dir . --ignore-files .github .git .hermes AGENTS.md codex-security-scans dist docs eslint.config.js node_modules package-lock.json package.json policy reg scripts src tests secrets *.key *.pem *.p12 *.pfx *.secret *.secrets",
     "prepare:release": "node scripts/prepare-release.js",
     "setup:firefox-e2e": "node scripts/setup-firefox-e2e.js",
     "setup:firefox-signed-smoke": "node scripts/setup-firefox-signed-smoke.js",
@@ -54,6 +55,7 @@
     "esbuild": "0.28.1",
     "eslint": "10.8.0",
     "globals": "17.7.0",
+    "image-size": "file:scripts/vendor/image-size",
     "jszip": "3.10.1",
     "prettier": "3.9.6",
     "web-ext": "10.6.0",

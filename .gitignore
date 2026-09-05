@@ -10,6 +10,7 @@ __pycache__/
 # local secrets
 .env
 .env.*
+!.env.example
 *.secret
 *.secrets
 *.key

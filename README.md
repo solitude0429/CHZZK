@@ -79,7 +79,7 @@ Signing, protected release, and deployment procedures are in:
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
 - [`docs/UPDATES.md`](docs/UPDATES.md)
 
-Product changes ship through a protected PR, exact-head checks and review, Mozilla unlisted signing, an immutable GitHub Release, internal transactional deployment, and a disposable Firefox update test. Documentation, test-infrastructure, operator-tool, and workflow-pin changes stop after the protected PR merge: they do not create a Release or deploy to the server.
+Changes authorize implementation and scoped verification; external shipping stages follow global approval rules. Run `ship` only with authorization for its entire applicable flow: protected PR and merge, then product signing, immutable Release, deployment, and disposable Firefox verification. Non-product changes may reach authorized protected merge, but never Release or deployment. See `AGENTS.md` and `docs/OPERATIONS.md`.
 
 Release versions use UTC `YY.M.D`, with at most one immutable Release per UTC day. The four retained Actions are CI, CodeQL, Dependency review, and Build signed Firefox release. The local operator uses the existing `gh` keyring and sends only a verified, credential-free SCP bundle through `ssh server`.
 

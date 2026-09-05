@@ -152,6 +152,7 @@ function requireEqualBytes(expectedPath, actualPath, name) {
 }
 
 function fsyncDirectory(path) {
+  if (process.platform === "win32") return;
   const descriptor = openSync(path, "r");
   try {
     fsyncSync(descriptor);

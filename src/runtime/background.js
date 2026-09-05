@@ -1,7 +1,6 @@
 import policy from "../../policy/quality-policy.json";
 import { CHZZK_AD_WEB_REQUEST_URLS, chzzkAdRequestDecision } from "../shared/ad-request-policy.js";
 import {
-  normalizeDiagnostics,
   recordDecision,
   recordDiagnosticUrl,
   recordRuntimeTransition,
@@ -28,10 +27,17 @@ import {
   qualityNumber,
 } from "../shared/quality.js";
 import { createPlaylistProbe, networkRequestUrl } from "./playlist-probe.js";
+import { createPlaylistResponseBuffer } from "./playlist-response-buffer.js";
+import { createDiagnosticsStore } from "./diagnostics-store.js";
 import { createSessionStateStore } from "./session-state-store.js";
 
 const api = globalThis.browser ?? globalThis.chrome;
-const STORAGE_KEY = "chzzkDiagnostics";
+const diagnosticsStore = createDiagnosticsStore({
+  storage: api.storage.local,
+  maxSamples: policy.maxDiagnosticsSamples,
+  maxPendingMutations: policy.maxPendingDiagnosticsMutations,
+});
+const enqueueDiagnosticsMutation = diagnosticsStore.mutate;
 const WEB_REQUEST_URLS = [...configuredWebRequestUrls(policy), ...CHZZK_AD_WEB_REQUEST_URLS].sort();
 const activeLiveTabIds = new Set();
 const liveContextByTab = new Map();
@@ -77,52 +83,7 @@ const HIGHEST_CONFIGURED_TARGET_NUMBER = qualityNumber(
     minRedirectQuality: policy.minRedirectQuality,
   }),
 );
-let diagnosticsMutationQueue = Promise.resolve();
-let diagnosticsMutationQueueDepth = 0;
 let redirectVerificationSequence = 0;
-
-async function loadDiagnostics() {
-  const stored = await api.storage.local.get(STORAGE_KEY);
-  return normalizeDiagnostics(stored?.[STORAGE_KEY], {
-    maxSamples: policy.maxDiagnosticsSamples,
-  });
-}
-
-async function saveDiagnostics(diagnostics) {
-  const normalized = normalizeDiagnostics(diagnostics, {
-    maxSamples: policy.maxDiagnosticsSamples,
-  });
-  await api.storage.local.set({ [STORAGE_KEY]: normalized });
-  return normalized;
-}
-
-async function mutateDiagnostics(mutator) {
-  const diagnostics = await loadDiagnostics();
-  const result = mutator(diagnostics);
-  const savedDiagnostics = await saveDiagnostics(diagnostics);
-  return { diagnostics: savedDiagnostics, result };
-}
-
-function diagnosticsQueueLimit() {
-  const configured = Number(policy.maxPendingDiagnosticsMutations ?? 50);
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : 50;
-}
-
-async function enqueueDiagnosticsMutation(mutator) {
-  if (diagnosticsMutationQueueDepth >= diagnosticsQueueLimit()) {
-    return { diagnostics: null, dropped: true, result: false };
-  }
-  diagnosticsMutationQueueDepth += 1;
-  const operation = diagnosticsMutationQueue
-    .then(() => mutateDiagnostics(mutator))
-    .finally(() => {
-      diagnosticsMutationQueueDepth = Math.max(0, diagnosticsMutationQueueDepth - 1);
-    });
-  diagnosticsMutationQueue = operation.catch((error) => {
-    console.warn("[CHZZK] diagnostics mutation failed", error);
-  });
-  return operation;
-}
 
 function currentRedirectState(lastError = null) {
   sweepExpiredSessionState();
@@ -228,15 +189,15 @@ async function reportRedirectError(error) {
 }
 
 function scheduleRedirectDiagnostics(lastError = null) {
-  updateRedirectDiagnostics(lastError).catch((error) =>
-    console.warn("[CHZZK] failed to persist redirect diagnostics", error),
+  updateRedirectDiagnostics(lastError).catch(() =>
+    console.warn("[CHZZK] failed to persist redirect diagnostics"),
   );
 }
 
 function scheduleRuntimeTransition(transition) {
   enqueueDiagnosticsMutation((diagnostics) => {
     recordRuntimeTransition(diagnostics, transition);
-  }).catch((error) => console.warn("[CHZZK] failed to persist runtime transition diagnostics", error));
+  }).catch(() => console.warn("[CHZZK] failed to persist runtime transition diagnostics"));
 }
 
 function resolutionDiagnosticSource(resolution) {
@@ -991,30 +952,17 @@ function attachMasterResponseFilter(record) {
     return false;
   }
 
-  const decoder = new TextDecoder();
-  const maxBytes = probeMaxBytes();
-  const textChunks = [];
+  const body = createPlaylistResponseBuffer(probeMaxBytes());
   record.filterAttached = true;
-  record.oversized = false;
   record.streamFailed = false;
-  record.totalBytes = 0;
 
   filter.ondata = (event) => {
     try {
       filter.write(event.data);
-      const bytes = new Uint8Array(event.data);
-      if (!record.oversized) {
-        record.totalBytes += bytes.byteLength;
-        if (record.totalBytes <= maxBytes) {
-          textChunks.push(decoder.decode(bytes, { stream: true }));
-        } else {
-          record.oversized = true;
-          textChunks.length = 0;
-        }
-      }
+      body.append(event.data);
     } catch {
       record.streamFailed = true;
-      textChunks.length = 0;
+      body.clear();
     }
   };
   filter.onstop = () => {
@@ -1028,11 +976,10 @@ function attachMasterResponseFilter(record) {
     }
     settleMasterResponseObserver(record);
     try {
-      if (!record.streamFailed && !record.oversized && record.totalBytes > 0) {
-        textChunks.push(decoder.decode());
+      if (!record.streamFailed && !body.oversized && body.totalBytes > 0) {
         const evidence = {
           finalUrl: record.finalNetworkUrl,
-          text: textChunks.join(""),
+          text: body.finish(),
         };
         const resolution = resolveMasterTargetFromEvidence(record.session, evidence);
         applyMasterResolution(
@@ -1046,7 +993,7 @@ function attachMasterResponseFilter(record) {
       }
     } catch (error) {
       reportRedirectError(error).catch(() => {});
-      console.warn("[CHZZK] failed to score observed HLS master response", error);
+      console.warn("[CHZZK] failed to score observed HLS master response");
     } finally {
       try {
         filter.close();
@@ -1082,7 +1029,7 @@ function handleMasterResponseHeaders(details) {
       settleMasterResponseObserver(record);
       startMasterTargetResolution(record.details, { sourceSession, sourceSessions }).catch((error) => {
         reportRedirectError(error).catch(() => {});
-        console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+        console.warn("[CHZZK] failed to score trusted HLS master playlist");
       });
     }
     return;
@@ -1212,7 +1159,7 @@ function scheduleUpwardTargetResolution(details, decision, targetState) {
     startMasterRecoveryTargetResolution(details, decision, targetState, lineage, recoveryUrl).catch(
       (error) => {
         reportRedirectError(error).catch(() => {});
-        console.warn("[CHZZK] failed to recover master-advertised HLS playlist quality", error);
+        console.warn("[CHZZK] failed to recover master-advertised HLS playlist quality");
       },
     );
     return;
@@ -1251,7 +1198,7 @@ function scheduleUpwardTargetResolution(details, decision, targetState) {
   });
   resolution.catch((error) => {
     reportRedirectError(error).catch(() => {});
-    console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality", error);
+    console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality");
   });
 }
 
@@ -1562,8 +1509,8 @@ function registerRequestContext(details) {
   const tabId = details?.tabId;
   if (!isValidRedirectTabId(tabId)) return false;
   if (hasContradictoryChzzkMetadata(details, policy)) {
-    removeTabTrustContext(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to clear contradicted tab trust", error),
+    removeTabTrustContext(tabId).catch(() =>
+      console.warn("[CHZZK] failed to clear contradicted tab trust"),
     );
     return false;
   }
@@ -1575,8 +1522,8 @@ function registerRequestContext(details) {
   if (!requestContext) return true;
   const knownContext = liveContextByTab.get(tabId);
   if (knownContext && knownContext !== requestContext) {
-    removeTabTrustContext(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to clear mismatched live context", error),
+    removeTabTrustContext(tabId).catch(() =>
+      console.warn("[CHZZK] failed to clear mismatched live context"),
     );
     return false;
   }
@@ -1773,26 +1720,13 @@ function attachRedirectBodyVerifier(record) {
   record.bodyEvidence = "pending";
   record.bodyVerificationFailed = false;
   record.responseVerifierAttached = false;
-  const decoder = new TextDecoder();
-  const textChunks = [];
-  const maxBytes = probeMaxBytes();
-  let totalBytes = 0;
-  let oversized = false;
+  const body = createPlaylistResponseBuffer(probeMaxBytes());
   filter.ondata = (event) => {
     try {
       // The filter owns the response stream once attached. Forward each chunk
       // before doing bounded verification so playback is never held behind parsing.
       filter.write(event.data);
-      const bytes = new Uint8Array(event.data);
-      if (!oversized) {
-        totalBytes += bytes.byteLength;
-        if (totalBytes <= maxBytes) {
-          textChunks.push(decoder.decode(bytes, { stream: true }));
-        } else {
-          oversized = true;
-          textChunks.length = 0;
-        }
-      }
+      body.append(event.data);
     } catch {
       record.bodyVerificationFailed = true;
       record.bodyEvidence = "invalid";
@@ -1802,13 +1736,12 @@ function attachRedirectBodyVerifier(record) {
   filter.onstop = () => {
     try {
       filter.close();
-      if (record.bodyVerificationFailed || oversized) {
+      if (record.bodyVerificationFailed || body.oversized) {
         record.bodyEvidence = "invalid";
-      } else if (totalBytes === 0) {
+      } else if (body.totalBytes === 0) {
         record.bodyEvidence = "empty";
       } else {
-        textChunks.push(decoder.decode());
-        const text = textChunks.join("");
+        const text = body.finish();
         record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
           { finalUrl: record.redirectNetworkUrl, text },
           record.targetQuality,
@@ -2079,8 +2012,8 @@ async function recordRequestDiagnostics(details, decision) {
 
 function scheduleRequestDiagnostics(details, decision, shouldRecord) {
   if (!shouldRecord) return;
-  recordRequestDiagnostics(details, decision).catch((error) =>
-    console.warn("[CHZZK] diagnostics recording failed", error),
+  recordRequestDiagnostics(details, decision).catch(() =>
+    console.warn("[CHZZK] diagnostics recording failed"),
   );
 }
 
@@ -2134,7 +2067,7 @@ function resolveTargetForRequest(
   } catch (error) {
     if (ownsBudget) blockingBudget.clear();
     scheduleRedirectDiagnostics(String(error?.message ?? error));
-    console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+    console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality");
     scheduleRequestDiagnostics(details, decision, shouldRecord);
     return undefined;
   }
@@ -2153,7 +2086,7 @@ function resolveTargetForRequest(
     })
     .catch((error) => {
       scheduleRedirectDiagnostics(String(error?.message ?? error));
-      console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+      console.warn("[CHZZK] failed to redirect trusted HLS playlist request");
       scheduleRequestDiagnostics(details, decision, shouldRecord);
       return undefined;
     });
@@ -2186,7 +2119,7 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
       ) {
         startHighestTargetResolution(details, decision).catch((error) => {
           reportRedirectError(error).catch(() => {});
-          console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+          console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality");
         });
       } else {
         scheduleUpwardTargetResolution(details, decision, targetState);
@@ -2201,7 +2134,7 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
       );
     } catch (error) {
       scheduleRedirectDiagnostics(String(error?.message ?? error));
-      console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+      console.warn("[CHZZK] failed to redirect trusted HLS playlist request");
       scheduleRequestDiagnostics(details, decision, shouldRecord);
       return undefined;
     }
@@ -2210,7 +2143,7 @@ function handleTrustedPlaylistRequest(details, attachedRedirectVerifier, inherit
     if (!attachMasterResponseObserver(details)) {
       startMasterTargetResolution(details).catch((error) => {
         reportRedirectError(error).catch(() => {});
-        console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+        console.warn("[CHZZK] failed to score trusted HLS master playlist");
       });
     }
   }
@@ -2253,13 +2186,13 @@ function handleRequestSafely(details) {
   try {
     const result = handleRequest(details);
     return typeof result?.then === "function"
-      ? result.catch((error) => {
-          console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+      ? result.catch(() => {
+          console.warn("[CHZZK] diagnostics/redirect handling failed");
           return undefined;
         })
       : result;
-  } catch (error) {
-    console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+  } catch {
+    console.warn("[CHZZK] diagnostics/redirect handling failed");
     return undefined;
   }
 }
@@ -2280,13 +2213,24 @@ async function prewarmMessageTab(tabId) {
 }
 
 api.runtime.onMessage?.addListener((message, sender) => {
+  if (message?.type === "chzzk.clear-diagnostics") {
+    if (
+      !api.runtime.id || sender?.id !== api.runtime.id ||
+      typeof api.runtime.getURL !== "function" ||
+      sender.url !== api.runtime.getURL("diagnostics.html")
+    ) return undefined;
+    return diagnosticsStore.clear().then(
+      (diagnostics) => ({ ok: true, diagnostics }),
+      () => ({ ok: false }),
+    );
+  }
   if (message?.type !== "chzzk.live-page-ready") return undefined;
   const tabId = sender?.tab?.id;
   if (!isValidRedirectTabId(tabId)) return undefined;
   // A delayed message can outlive its document. Query the current tab and prewarm only
   // when its authoritative URL is still a CHZZK live page.
-  prewarmMessageTab(tabId).catch((error) =>
-    console.warn("[CHZZK] failed to validate and prewarm live tab", error),
+  prewarmMessageTab(tabId).catch(() =>
+    console.warn("[CHZZK] failed to validate and prewarm live tab"),
   );
   return undefined;
 });
@@ -2324,26 +2268,26 @@ async function refreshAndPrewarmRuntimeState() {
 api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (changeInfo?.status === "loading") {
     if (!changeInfo?.url) {
-      clearTabQualityState(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to clear tab quality state for document load", error),
+      clearTabQualityState(tabId).catch(() =>
+        console.warn("[CHZZK] failed to clear tab quality state for document load"),
       );
-      startReloadTrustValidation(tabId)?.catch((error) =>
-        console.warn("[CHZZK] failed to validate tab trust after document load", error),
+      startReloadTrustValidation(tabId)?.catch(() =>
+        console.warn("[CHZZK] failed to validate tab trust after document load"),
       );
       return;
     }
     miniPlayerTabIds.delete(tabId);
     pendingTrustValidationByTab.delete(tabId);
     if (isChzzkLiveUrl(changeInfo.url, policy)) {
-      clearTabQualityState(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to clear tab quality state for live document load", error),
+      clearTabQualityState(tabId).catch(() =>
+        console.warn("[CHZZK] failed to clear tab quality state for live document load"),
       );
-      prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
-        console.warn("[CHZZK] failed to prewarm live tab from document load", error),
+      prewarmLiveTab(tabId, changeInfo.url).catch(() =>
+        console.warn("[CHZZK] failed to prewarm live tab from document load"),
       );
     } else {
-      removeTabTrustContext(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to clear tab trust context for document load", error),
+      removeTabTrustContext(tabId).catch(() =>
+        console.warn("[CHZZK] failed to clear tab trust context for document load"),
       );
     }
     return;
@@ -2351,32 +2295,32 @@ api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
   if (!changeInfo?.url) return;
   pendingTrustValidationByTab.delete(tabId);
   if (isChzzkLiveUrl(changeInfo.url, policy)) {
-    prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
-      console.warn("[CHZZK] failed to prewarm live tab from URL update", error),
+    prewarmLiveTab(tabId, changeInfo.url).catch(() =>
+      console.warn("[CHZZK] failed to prewarm live tab from URL update"),
     );
     return;
   }
   if (isChzzkSiteUrl(changeInfo.url, policy)) {
-    preserveSameSiteMiniPlayerState(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to preserve same-site mini-player state", error),
+    preserveSameSiteMiniPlayerState(tabId).catch(() =>
+      console.warn("[CHZZK] failed to preserve same-site mini-player state"),
     );
     return;
   }
-  removeTabTrustContext(tabId).catch((error) =>
-    console.warn("[CHZZK] failed to clear tab trust context", error),
+  removeTabTrustContext(tabId).catch(() =>
+    console.warn("[CHZZK] failed to clear tab trust context"),
   );
 });
 
 api.tabs?.onRemoved?.addListener((tabId) => {
-  removeTabTrustContext(tabId).catch((error) =>
-    console.warn("[CHZZK] failed to remove tab trust context", error),
+  removeTabTrustContext(tabId).catch(() =>
+    console.warn("[CHZZK] failed to remove tab trust context"),
   );
 });
 
 api.runtime.onInstalled?.addListener(() => {
-  refreshAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup prewarm failed", error));
+  refreshAndPrewarmRuntimeState().catch(() => console.warn("[CHZZK] startup prewarm failed"));
 });
 
 api.runtime.onStartup?.addListener(() => {
-  refreshAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup prewarm failed", error));
+  refreshAndPrewarmRuntimeState().catch(() => console.warn("[CHZZK] startup prewarm failed"));
 });

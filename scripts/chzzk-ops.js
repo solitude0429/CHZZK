@@ -20,7 +20,10 @@ import { basename, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 
-import { runWindowsSignedUpdateSmoke } from "./run-windows-signed-update-smoke.js";
+import {
+  createSanitizedChildEnvironment,
+  runWindowsSignedUpdateSmoke,
+} from "./run-windows-signed-update-smoke.js";
 
 export const OPS_REPOSITORY = "solitude0429/CHZZK";
 export const OPS_REPOSITORY_ID = 1_275_903_171;
@@ -214,10 +217,7 @@ function validateInvocation(command, args) {
 }
 
 export function createSubprocessRunner({ environment = process.env, spawn = spawnSync } = {}) {
-  const keyringEnvironment = { ...environment };
-  for (const name of ["GH_ENTERPRISE_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_TOKEN"]) {
-    delete keyringEnvironment[name];
-  }
+  const keyringEnvironment = createSanitizedChildEnvironment(environment);
   return async (command, args, options = {}) => {
     validateInvocation(command, args);
     const result = spawn(command, args, {

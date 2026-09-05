@@ -106,6 +106,45 @@
     return { redirectUrl: parsed.href };
   }
 
+  // src/shared/hls-attributes.js
+  function splitHlsAttributeList(value) {
+    const result = [];
+    let current = "";
+    let quoted = false;
+    for (const char of String(value ?? "")) {
+      if (char === '"') quoted = !quoted;
+      if (char === "," && !quoted) {
+        result.push(current);
+        current = "";
+        continue;
+      }
+      current += char;
+    }
+    if (quoted) return null;
+    if (current) result.push(current);
+    return result;
+  }
+  function parseHlsAttributeList(value) {
+    const entries = splitHlsAttributeList(value);
+    if (!entries) return null;
+    const attributes = {};
+    for (const entry of entries) {
+      const separator = entry.indexOf("=");
+      if (separator <= 0) return null;
+      const key = entry.slice(0, separator).trim().toUpperCase();
+      if (!/^[A-Z0-9-]+$/.test(key) || Object.hasOwn(attributes, key)) return null;
+      let rawValue = entry.slice(separator + 1).trim();
+      if (rawValue.startsWith('"')) {
+        if (rawValue.length < 2 || !rawValue.endsWith('"')) return null;
+        rawValue = rawValue.slice(1, -1);
+      } else if (rawValue.includes('"')) {
+        return null;
+      }
+      attributes[key] = rawValue;
+    }
+    return attributes;
+  }
+
   // src/shared/quality.js
   var QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
   var DEFAULT_QUALITY_CANDIDATES = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "270p", "144p"];
@@ -298,43 +337,6 @@
     if (!replacedAny) return null;
     const replacedUrl = `${urlParts[1]}${replacedPath}${urlParts[3] ?? ""}`;
     return urlQualityMarkersAreSafe(replacedUrl) ? replacedUrl : null;
-  }
-  function splitHlsAttributeList(value) {
-    const result = [];
-    let current = "";
-    let quoted = false;
-    for (const char of String(value ?? "")) {
-      if (char === '"') quoted = !quoted;
-      if (char === "," && !quoted) {
-        result.push(current);
-        current = "";
-        continue;
-      }
-      current += char;
-    }
-    if (quoted) return null;
-    if (current) result.push(current);
-    return result;
-  }
-  function parseHlsAttributeList(value) {
-    const entries = splitHlsAttributeList(value);
-    if (!entries) return null;
-    const attributes = {};
-    for (const entry of entries) {
-      const separator = entry.indexOf("=");
-      if (separator <= 0) return null;
-      const key = entry.slice(0, separator).trim().toUpperCase();
-      if (!/^[A-Z0-9-]+$/.test(key) || Object.hasOwn(attributes, key)) return null;
-      let rawValue = entry.slice(separator + 1).trim();
-      if (rawValue.startsWith('"')) {
-        if (rawValue.length < 2 || !rawValue.endsWith('"')) return null;
-        rawValue = rawValue.slice(1, -1);
-      } else if (rawValue.includes('"')) {
-        return null;
-      }
-      attributes[key] = rawValue;
-    }
-    return attributes;
   }
   function boundedPositiveDecimalInteger(value, max) {
     if (value == null) return { valid: true, value: null };
@@ -1037,43 +1039,6 @@
     }
     return false;
   }
-  function splitHlsAttributeList2(value) {
-    const entries = [];
-    let current = "";
-    let quoted = false;
-    for (const character of String(value ?? "")) {
-      if (character === '"') quoted = !quoted;
-      if (character === "," && !quoted) {
-        entries.push(current);
-        current = "";
-        continue;
-      }
-      current += character;
-    }
-    if (quoted) return null;
-    if (current) entries.push(current);
-    return entries;
-  }
-  function parseHlsAttributeList2(value) {
-    const entries = splitHlsAttributeList2(value);
-    if (!entries) return null;
-    const attributes = {};
-    for (const entry of entries) {
-      const separator = entry.indexOf("=");
-      if (separator <= 0) return null;
-      const key = entry.slice(0, separator).trim().toUpperCase();
-      if (!/^[A-Z0-9-]+$/.test(key) || Object.hasOwn(attributes, key)) return null;
-      let rawValue = entry.slice(separator + 1).trim();
-      if (rawValue.startsWith('"')) {
-        if (rawValue.length < 2 || !rawValue.endsWith('"')) return null;
-        rawValue = rawValue.slice(1, -1);
-      } else if (rawValue.includes('"')) {
-        return null;
-      }
-      attributes[key] = rawValue;
-    }
-    return attributes;
-  }
   function hasUnsafePlaylistUriCharacter(value) {
     for (const character of value) {
       const codePoint = character.codePointAt(0);
@@ -1174,7 +1139,7 @@
     for (const line of lines) {
       const upper = line.toUpperCase();
       if (upper.startsWith("#EXT-X-PART:")) {
-        const attributes = parseHlsAttributeList2(line.slice(line.indexOf(":") + 1));
+        const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
         const duration = Number(attributes?.DURATION);
         if (
           attributes &&
@@ -1188,7 +1153,7 @@
         }
       }
       if (upper.startsWith("#EXT-X-PRELOAD-HINT:")) {
-        const attributes = parseHlsAttributeList2(line.slice(line.indexOf(":") + 1));
+        const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
         if (attributes?.TYPE?.toUpperCase() === "PART" && isPlausiblePlaylistUri(attributes.URI)) {
           return true;
         }
@@ -1262,6 +1227,8 @@
       return chunks.join("");
     } catch {
       return null;
+    } finally {
+      reader.releaseLock?.();
     }
   }
   function bestVariantTargetQuality(variant) {
@@ -1294,6 +1261,7 @@
       );
     }
     async function fetchPlaylistEvidence2(url, { signal = null } = {}) {
+      if (signal?.aborted) return null;
       if (!isTrustedRequestDomain(url, policy)) return null;
       const requestedNetworkUrl = networkRequestUrl(url);
       if (!requestedNetworkUrl) return null;
@@ -1321,6 +1289,7 @@
       } catch {
         return null;
       } finally {
+        controller.abort();
         clearTimeoutImpl(timeout);
         signal?.removeEventListener?.("abort", abortFromParent);
       }
@@ -1460,6 +1429,85 @@
     });
   }
 
+  // src/runtime/playlist-response-buffer.js
+  function createPlaylistResponseBuffer(maxBytes) {
+    const decoder = new TextDecoder();
+    const textChunks = [];
+    let totalBytes = 0;
+    let oversized = false;
+    function append(data) {
+      if (oversized) return;
+      const bytes = new Uint8Array(data);
+      totalBytes += bytes.byteLength;
+      if (totalBytes > maxBytes) {
+        oversized = true;
+        clear();
+        return;
+      }
+      textChunks.push(decoder.decode(bytes, { stream: true }));
+    }
+    function clear() {
+      textChunks.length = 0;
+    }
+    function finish() {
+      if (oversized) return null;
+      textChunks.push(decoder.decode());
+      return textChunks.join("");
+    }
+    return {
+      append,
+      clear,
+      finish,
+      get oversized() {
+        return oversized;
+      },
+      get totalBytes() {
+        return totalBytes;
+      },
+    };
+  }
+
+  // src/runtime/diagnostics-store.js
+  function createDiagnosticsStore({ storage, maxSamples, maxPendingMutations = 50 }) {
+    const key = "chzzkDiagnostics";
+    const options = { maxSamples };
+    const configuredLimit = Number(maxPendingMutations);
+    const limit = Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 50;
+    let queue = Promise.resolve();
+    let depth = 0;
+    let pendingClear = null;
+    function enqueue(operation) {
+      const result = queue.then(operation);
+      queue = result.catch(() => {});
+      return result;
+    }
+    function mutate(mutator) {
+      if (depth >= limit) return Promise.resolve({ diagnostics: null, dropped: true, result: false });
+      depth += 1;
+      return enqueue(async () => {
+        const stored = await storage.get(key);
+        const diagnostics = normalizeDiagnostics(stored?.[key], options);
+        const result = mutator(diagnostics);
+        const normalized = normalizeDiagnostics(diagnostics, options);
+        await storage.set({ [key]: normalized });
+        return { diagnostics: normalized, result };
+      }).finally(() => {
+        depth -= 1;
+      });
+    }
+    function clear() {
+      if (pendingClear) return pendingClear;
+      pendingClear = enqueue(async () => {
+        await storage.remove(key);
+        return normalizeDiagnostics(null, options);
+      }).finally(() => {
+        pendingClear = null;
+      });
+      return pendingClear;
+    }
+    return Object.freeze({ clear, mutate });
+  }
+
   // src/runtime/session-state-store.js
   var DEFAULT_HARD_MAX_STATES = 1024;
   var DEFAULT_HARD_MAX_STATES_PER_TAB = 128;
@@ -1511,50 +1559,36 @@
     const failedTargetsBySession2 = /* @__PURE__ */ new Map();
     const masterLineageBySession2 = /* @__PURE__ */ new Map();
     const resolutionBySession2 = /* @__PURE__ */ new Map();
+    const stateMaps = [
+      activeTargetsBySession2,
+      failedTargetsBySession2,
+      masterLineageBySession2,
+      resolutionBySession2,
+    ];
     let sessionAccessSequence = 0;
     function sessionStateEntries() {
       const byKey = /* @__PURE__ */ new Map();
-      for (const map of [
-        activeTargetsBySession2,
-        failedTargetsBySession2,
-        masterLineageBySession2,
-        resolutionBySession2,
-      ]) {
+      for (const map of stateMaps) {
         for (const [key, state] of map) {
           const entry = byKey.get(key) ?? {
             key,
             lastTouchedOrder: 0,
+            states: [],
             tabId: state.tabId,
           };
           entry.lastTouchedOrder = Math.max(
             entry.lastTouchedOrder,
             Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
           );
+          entry.states.push(state);
           byKey.set(key, entry);
         }
       }
       return [...byKey.values()];
     }
     function normalizeAccessOrder() {
-      const groupsByKey = /* @__PURE__ */ new Map();
-      for (const map of [
-        activeTargetsBySession2,
-        failedTargetsBySession2,
-        masterLineageBySession2,
-        resolutionBySession2,
-      ]) {
-        for (const [key, state] of map) {
-          const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
-          group.lastTouchedOrder = Math.max(
-            group.lastTouchedOrder,
-            Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
-          );
-          group.states.push(state);
-          groupsByKey.set(key, group);
-        }
-      }
       sessionAccessSequence = 0;
-      for (const group of [...groupsByKey.values()].sort(compareSessionAccess)) {
+      for (const group of sessionStateEntries().sort(compareSessionAccess)) {
         sessionAccessSequence += 1;
         for (const state of group.states) state.lastTouchedOrder = sessionAccessSequence;
       }
@@ -1615,30 +1649,26 @@
     }
     function enforceLimits(protectedKey = null) {
       let removedActiveTarget = sweepExpired();
-      const byTab = /* @__PURE__ */ new Map();
-      for (const entry of sessionStateEntries()) {
-        const entries2 = byTab.get(entry.tabId) ?? [];
-        entries2.push(entry);
-        byTab.set(entry.tabId, entries2);
-      }
-      for (const entries2 of byTab.values()) {
-        entries2.sort(compareSessionAccess);
-        let excess2 = entries2.length - normalizedMaxStatesPerTab;
-        for (const entry of entries2) {
-          if (excess2 <= 0) break;
+      function evictExcess(entries, limit) {
+        entries.sort(compareSessionAccess);
+        let excess = entries.length - limit;
+        for (const entry of entries) {
+          if (excess <= 0) break;
           if (entry.key === protectedKey) continue;
           removedActiveTarget = remove(entry.key) || removedActiveTarget;
-          excess2 -= 1;
+          excess -= 1;
         }
       }
-      const entries = sessionStateEntries().sort(compareSessionAccess);
-      let excess = entries.length - normalizedMaxStates;
-      for (const entry of entries) {
-        if (excess <= 0) break;
-        if (entry.key === protectedKey) continue;
-        removedActiveTarget = remove(entry.key) || removedActiveTarget;
-        excess -= 1;
+      const byTab = /* @__PURE__ */ new Map();
+      for (const entry of sessionStateEntries()) {
+        const entries = byTab.get(entry.tabId) ?? [];
+        entries.push(entry);
+        byTab.set(entry.tabId, entries);
       }
+      for (const entries of byTab.values()) {
+        evictExcess(entries, normalizedMaxStatesPerTab);
+      }
+      evictExcess(sessionStateEntries(), normalizedMaxStates);
       if (removedActiveTarget) onActiveTargetsChanged();
       return removedActiveTarget;
     }
@@ -1657,7 +1687,12 @@
 
   // src/runtime/background.js
   var api = globalThis.browser ?? globalThis.chrome;
-  var STORAGE_KEY = "chzzkDiagnostics";
+  var diagnosticsStore = createDiagnosticsStore({
+    storage: api.storage.local,
+    maxSamples: quality_policy_default.maxDiagnosticsSamples,
+    maxPendingMutations: quality_policy_default.maxPendingDiagnosticsMutations,
+  });
+  var enqueueDiagnosticsMutation = diagnosticsStore.mutate;
   var WEB_REQUEST_URLS = [
     ...configuredWebRequestUrls(quality_policy_default),
     ...CHZZK_AD_WEB_REQUEST_URLS,
@@ -1706,47 +1741,7 @@
       minRedirectQuality: quality_policy_default.minRedirectQuality,
     }),
   );
-  var diagnosticsMutationQueue = Promise.resolve();
-  var diagnosticsMutationQueueDepth = 0;
   var redirectVerificationSequence = 0;
-  async function loadDiagnostics() {
-    const stored = await api.storage.local.get(STORAGE_KEY);
-    return normalizeDiagnostics(stored?.[STORAGE_KEY], {
-      maxSamples: quality_policy_default.maxDiagnosticsSamples,
-    });
-  }
-  async function saveDiagnostics(diagnostics) {
-    const normalized = normalizeDiagnostics(diagnostics, {
-      maxSamples: quality_policy_default.maxDiagnosticsSamples,
-    });
-    await api.storage.local.set({ [STORAGE_KEY]: normalized });
-    return normalized;
-  }
-  async function mutateDiagnostics(mutator) {
-    const diagnostics = await loadDiagnostics();
-    const result = mutator(diagnostics);
-    const savedDiagnostics = await saveDiagnostics(diagnostics);
-    return { diagnostics: savedDiagnostics, result };
-  }
-  function diagnosticsQueueLimit() {
-    const configured = Number(quality_policy_default.maxPendingDiagnosticsMutations ?? 50);
-    return Number.isSafeInteger(configured) && configured > 0 ? configured : 50;
-  }
-  async function enqueueDiagnosticsMutation(mutator) {
-    if (diagnosticsMutationQueueDepth >= diagnosticsQueueLimit()) {
-      return { diagnostics: null, dropped: true, result: false };
-    }
-    diagnosticsMutationQueueDepth += 1;
-    const operation = diagnosticsMutationQueue
-      .then(() => mutateDiagnostics(mutator))
-      .finally(() => {
-        diagnosticsMutationQueueDepth = Math.max(0, diagnosticsMutationQueueDepth - 1);
-      });
-    diagnosticsMutationQueue = operation.catch((error) => {
-      console.warn("[CHZZK] diagnostics mutation failed", error);
-    });
-    return operation;
-  }
   function currentRedirectState(lastError = null) {
     sweepExpiredSessionState();
     const targetsByTab = {};
@@ -1838,14 +1833,14 @@
     await updateRedirectDiagnostics(String(error?.message ?? error));
   }
   function scheduleRedirectDiagnostics(lastError = null) {
-    updateRedirectDiagnostics(lastError).catch((error) =>
-      console.warn("[CHZZK] failed to persist redirect diagnostics", error),
+    updateRedirectDiagnostics(lastError).catch(() =>
+      console.warn("[CHZZK] failed to persist redirect diagnostics"),
     );
   }
   function scheduleRuntimeTransition(transition) {
     enqueueDiagnosticsMutation((diagnostics) => {
       recordRuntimeTransition(diagnostics, transition);
-    }).catch((error) => console.warn("[CHZZK] failed to persist runtime transition diagnostics", error));
+    }).catch(() => console.warn("[CHZZK] failed to persist runtime transition diagnostics"));
   }
   function resolutionDiagnosticSource(resolution) {
     if (resolution?.source === "master-response") return "master-response";
@@ -2553,29 +2548,16 @@
     } catch {
       return false;
     }
-    const decoder = new TextDecoder();
-    const maxBytes = probeMaxBytes();
-    const textChunks = [];
+    const body = createPlaylistResponseBuffer(probeMaxBytes());
     record.filterAttached = true;
-    record.oversized = false;
     record.streamFailed = false;
-    record.totalBytes = 0;
     filter.ondata = (event) => {
       try {
         filter.write(event.data);
-        const bytes = new Uint8Array(event.data);
-        if (!record.oversized) {
-          record.totalBytes += bytes.byteLength;
-          if (record.totalBytes <= maxBytes) {
-            textChunks.push(decoder.decode(bytes, { stream: true }));
-          } else {
-            record.oversized = true;
-            textChunks.length = 0;
-          }
-        }
+        body.append(event.data);
       } catch {
         record.streamFailed = true;
-        textChunks.length = 0;
+        body.clear();
       }
     };
     filter.onstop = () => {
@@ -2589,11 +2571,10 @@
       }
       settleMasterResponseObserver(record);
       try {
-        if (!record.streamFailed && !record.oversized && record.totalBytes > 0) {
-          textChunks.push(decoder.decode());
+        if (!record.streamFailed && !body.oversized && body.totalBytes > 0) {
           const evidence = {
             finalUrl: record.finalNetworkUrl,
-            text: textChunks.join(""),
+            text: body.finish(),
           };
           const resolution = resolveMasterTargetFromEvidence(record.session, evidence);
           applyMasterResolution(
@@ -2607,7 +2588,7 @@
         }
       } catch (error) {
         reportRedirectError(error).catch(() => {});
-        console.warn("[CHZZK] failed to score observed HLS master response", error);
+        console.warn("[CHZZK] failed to score observed HLS master response");
       } finally {
         try {
           filter.close();
@@ -2642,7 +2623,7 @@
         settleMasterResponseObserver(record);
         startMasterTargetResolution(record.details, { sourceSession, sourceSessions }).catch((error) => {
           reportRedirectError(error).catch(() => {});
-          console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+          console.warn("[CHZZK] failed to score trusted HLS master playlist");
         });
       }
       return;
@@ -2774,7 +2755,7 @@
       startMasterRecoveryTargetResolution(details, decision, targetState, lineage, recoveryUrl).catch(
         (error) => {
           reportRedirectError(error).catch(() => {});
-          console.warn("[CHZZK] failed to recover master-advertised HLS playlist quality", error);
+          console.warn("[CHZZK] failed to recover master-advertised HLS playlist quality");
         },
       );
       return;
@@ -2811,7 +2792,7 @@
     });
     resolution.catch((error) => {
       reportRedirectError(error).catch(() => {});
-      console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality", error);
+      console.warn("[CHZZK] failed to refresh highest trusted HLS playlist quality");
     });
   }
   function tabHasQualityState(tabId) {
@@ -3103,8 +3084,8 @@
     const tabId = details?.tabId;
     if (!isValidRedirectTabId(tabId)) return false;
     if (hasContradictoryChzzkMetadata(details, quality_policy_default)) {
-      removeTabTrustContext(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to clear contradicted tab trust", error),
+      removeTabTrustContext(tabId).catch(() =>
+        console.warn("[CHZZK] failed to clear contradicted tab trust"),
       );
       return false;
     }
@@ -3112,8 +3093,8 @@
     if (!requestContext) return true;
     const knownContext = liveContextByTab.get(tabId);
     if (knownContext && knownContext !== requestContext) {
-      removeTabTrustContext(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to clear mismatched live context", error),
+      removeTabTrustContext(tabId).catch(() =>
+        console.warn("[CHZZK] failed to clear mismatched live context"),
       );
       return false;
     }
@@ -3297,24 +3278,11 @@
     record.bodyEvidence = "pending";
     record.bodyVerificationFailed = false;
     record.responseVerifierAttached = false;
-    const decoder = new TextDecoder();
-    const textChunks = [];
-    const maxBytes = probeMaxBytes();
-    let totalBytes = 0;
-    let oversized = false;
+    const body = createPlaylistResponseBuffer(probeMaxBytes());
     filter.ondata = (event) => {
       try {
         filter.write(event.data);
-        const bytes = new Uint8Array(event.data);
-        if (!oversized) {
-          totalBytes += bytes.byteLength;
-          if (totalBytes <= maxBytes) {
-            textChunks.push(decoder.decode(bytes, { stream: true }));
-          } else {
-            oversized = true;
-            textChunks.length = 0;
-          }
-        }
+        body.append(event.data);
       } catch {
         record.bodyVerificationFailed = true;
         record.bodyEvidence = "invalid";
@@ -3324,13 +3292,12 @@
     filter.onstop = () => {
       try {
         filter.close();
-        if (record.bodyVerificationFailed || oversized) {
+        if (record.bodyVerificationFailed || body.oversized) {
           record.bodyEvidence = "invalid";
-        } else if (totalBytes === 0) {
+        } else if (body.totalBytes === 0) {
           record.bodyEvidence = "empty";
         } else {
-          textChunks.push(decoder.decode());
-          const text = textChunks.join("");
+          const text = body.finish();
           record.bodyEvidence = playlistEvidenceSupportsExpectedQuality(
             { finalUrl: record.redirectNetworkUrl, text },
             record.targetQuality,
@@ -3587,8 +3554,8 @@
   }
   function scheduleRequestDiagnostics(details, decision, shouldRecord) {
     if (!shouldRecord) return;
-    recordRequestDiagnostics(details, decision).catch((error) =>
-      console.warn("[CHZZK] diagnostics recording failed", error),
+    recordRequestDiagnostics(details, decision).catch(() =>
+      console.warn("[CHZZK] diagnostics recording failed"),
     );
   }
   function finalizeEligibleRequest(
@@ -3640,7 +3607,7 @@
     } catch (error) {
       if (ownsBudget) blockingBudget.clear();
       scheduleRedirectDiagnostics(String(error?.message ?? error));
-      console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+      console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality");
       scheduleRequestDiagnostics(details, decision, shouldRecord);
       return void 0;
     }
@@ -3658,7 +3625,7 @@
       })
       .catch((error) => {
         scheduleRedirectDiagnostics(String(error?.message ?? error));
-        console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+        console.warn("[CHZZK] failed to redirect trusted HLS playlist request");
         scheduleRequestDiagnostics(details, decision, shouldRecord);
         return void 0;
       });
@@ -3689,7 +3656,7 @@
         ) {
           startHighestTargetResolution(details, decision).catch((error) => {
             reportRedirectError(error).catch(() => {});
-            console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality", error);
+            console.warn("[CHZZK] failed to resolve highest trusted HLS playlist quality");
           });
         } else {
           scheduleUpwardTargetResolution(details, decision, targetState);
@@ -3704,7 +3671,7 @@
         );
       } catch (error) {
         scheduleRedirectDiagnostics(String(error?.message ?? error));
-        console.warn("[CHZZK] failed to redirect trusted HLS playlist request", error);
+        console.warn("[CHZZK] failed to redirect trusted HLS playlist request");
         scheduleRequestDiagnostics(details, decision, shouldRecord);
         return void 0;
       }
@@ -3713,7 +3680,7 @@
       if (!attachMasterResponseObserver(details)) {
         startMasterTargetResolution(details).catch((error) => {
           reportRedirectError(error).catch(() => {});
-          console.warn("[CHZZK] failed to score trusted HLS master playlist", error);
+          console.warn("[CHZZK] failed to score trusted HLS master playlist");
         });
       }
     }
@@ -3753,13 +3720,13 @@
     try {
       const result = handleRequest(details);
       return typeof result?.then === "function"
-        ? result.catch((error) => {
-            console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+        ? result.catch(() => {
+            console.warn("[CHZZK] diagnostics/redirect handling failed");
             return void 0;
           })
         : result;
-    } catch (error) {
-      console.warn("[CHZZK] diagnostics/redirect handling failed", error);
+    } catch {
+      console.warn("[CHZZK] diagnostics/redirect handling failed");
       return void 0;
     }
   }
@@ -3778,12 +3745,23 @@
     await prewarmCurrentLiveTab(tabId, { migrateVerifiedContextless: true });
   }
   api.runtime.onMessage?.addListener((message, sender) => {
+    if (message?.type === "chzzk.clear-diagnostics") {
+      if (
+        !api.runtime.id ||
+        sender?.id !== api.runtime.id ||
+        typeof api.runtime.getURL !== "function" ||
+        sender.url !== api.runtime.getURL("diagnostics.html")
+      )
+        return void 0;
+      return diagnosticsStore.clear().then(
+        (diagnostics) => ({ ok: true, diagnostics }),
+        () => ({ ok: false }),
+      );
+    }
     if (message?.type !== "chzzk.live-page-ready") return void 0;
     const tabId = sender?.tab?.id;
     if (!isValidRedirectTabId(tabId)) return void 0;
-    prewarmMessageTab(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to validate and prewarm live tab", error),
-    );
+    prewarmMessageTab(tabId).catch(() => console.warn("[CHZZK] failed to validate and prewarm live tab"));
     return void 0;
   });
   function liveTabQueryUrls() {
@@ -3819,26 +3797,26 @@
   api.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
     if (changeInfo?.status === "loading") {
       if (!changeInfo?.url) {
-        clearTabQualityState(tabId).catch((error) =>
-          console.warn("[CHZZK] failed to clear tab quality state for document load", error),
+        clearTabQualityState(tabId).catch(() =>
+          console.warn("[CHZZK] failed to clear tab quality state for document load"),
         );
-        startReloadTrustValidation(tabId)?.catch((error) =>
-          console.warn("[CHZZK] failed to validate tab trust after document load", error),
+        startReloadTrustValidation(tabId)?.catch(() =>
+          console.warn("[CHZZK] failed to validate tab trust after document load"),
         );
         return;
       }
       miniPlayerTabIds.delete(tabId);
       pendingTrustValidationByTab.delete(tabId);
       if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
-        clearTabQualityState(tabId).catch((error) =>
-          console.warn("[CHZZK] failed to clear tab quality state for live document load", error),
+        clearTabQualityState(tabId).catch(() =>
+          console.warn("[CHZZK] failed to clear tab quality state for live document load"),
         );
-        prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
-          console.warn("[CHZZK] failed to prewarm live tab from document load", error),
+        prewarmLiveTab(tabId, changeInfo.url).catch(() =>
+          console.warn("[CHZZK] failed to prewarm live tab from document load"),
         );
       } else {
-        removeTabTrustContext(tabId).catch((error) =>
-          console.warn("[CHZZK] failed to clear tab trust context for document load", error),
+        removeTabTrustContext(tabId).catch(() =>
+          console.warn("[CHZZK] failed to clear tab trust context for document load"),
         );
       }
       return;
@@ -3846,30 +3824,26 @@
     if (!changeInfo?.url) return;
     pendingTrustValidationByTab.delete(tabId);
     if (isChzzkLiveUrl(changeInfo.url, quality_policy_default)) {
-      prewarmLiveTab(tabId, changeInfo.url).catch((error) =>
-        console.warn("[CHZZK] failed to prewarm live tab from URL update", error),
+      prewarmLiveTab(tabId, changeInfo.url).catch(() =>
+        console.warn("[CHZZK] failed to prewarm live tab from URL update"),
       );
       return;
     }
     if (isChzzkSiteUrl(changeInfo.url, quality_policy_default)) {
-      preserveSameSiteMiniPlayerState(tabId).catch((error) =>
-        console.warn("[CHZZK] failed to preserve same-site mini-player state", error),
+      preserveSameSiteMiniPlayerState(tabId).catch(() =>
+        console.warn("[CHZZK] failed to preserve same-site mini-player state"),
       );
       return;
     }
-    removeTabTrustContext(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to clear tab trust context", error),
-    );
+    removeTabTrustContext(tabId).catch(() => console.warn("[CHZZK] failed to clear tab trust context"));
   });
   api.tabs?.onRemoved?.addListener((tabId) => {
-    removeTabTrustContext(tabId).catch((error) =>
-      console.warn("[CHZZK] failed to remove tab trust context", error),
-    );
+    removeTabTrustContext(tabId).catch(() => console.warn("[CHZZK] failed to remove tab trust context"));
   });
   api.runtime.onInstalled?.addListener(() => {
-    refreshAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup prewarm failed", error));
+    refreshAndPrewarmRuntimeState().catch(() => console.warn("[CHZZK] startup prewarm failed"));
   });
   api.runtime.onStartup?.addListener(() => {
-    refreshAndPrewarmRuntimeState().catch((error) => console.warn("[CHZZK] startup prewarm failed", error));
+    refreshAndPrewarmRuntimeState().catch(() => console.warn("[CHZZK] startup prewarm failed"));
   });
 })();

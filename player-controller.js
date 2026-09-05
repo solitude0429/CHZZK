@@ -1,265 +1,5 @@
 (() => {
-  // src/runtime/ad-response-controller.js
-  var GFP_SCHEDULE_DESCRIPTION = "GFP Video Ad Schedule";
-  var NAVER_WATERFALL_DESCRIPTION = "Naver SSP Waterfall List";
-  var AD_PROTOCOL_VERSION = "0.0.1";
-  var CHZZK_LIVE_VIDEO_SCHEDULE_IDS = /* @__PURE__ */ new Set([
-    "LIVE_CHZZK_NDP_SCH",
-    "LIVE_CHZZK_NDP_SCH_EVENT",
-  ]);
-  var CHZZK_VOD_VIDEO_SCHEDULE_ID = "CHZZK_NDP_SCH";
-  var CHZZK_LIVE_AD_UNIT = /^(?:event_)?w_live_chzzk_naver_va(?:_[a-z0-9]+)*$/i;
-  var CHZZK_VOD_AD_UNITS = /* @__PURE__ */ new Set(["w_chzzk_naver_va", "w_chzzk_naver_va_mid"]);
-  var MAX_MARKER_SCAN_BYTES = 16384;
-  var CONTROLLER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.ad-response-controller");
-  var STYLE_ATTRIBUTE = "data-chzzk-extension-ad-guard";
-  var AD_UI_STYLE = `
-[data-nlog-area="ad_blocking_info_layer"],
-.webplayer-internal-core-dimmed,
-.webplayer-internal-core-ad-ui,
-#live_rs_banner,
-#vod_rs_banner {
-  display: none !important;
-}
-`;
-  function ignoreAdGuardFailure() {
-    return false;
-  }
-  function isRecord(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-  function isChzzkLiveAdUnit(value) {
-    return typeof value === "string" && CHZZK_LIVE_AD_UNIT.test(value);
-  }
-  function isChzzkVodAdUnit(value) {
-    return CHZZK_VOD_AD_UNITS.has(value);
-  }
-  function hasRecognizedChzzkScheduleBreak(videoAdScheduleId, adBreaks) {
-    let recognizesAdUnit;
-    if (CHZZK_LIVE_VIDEO_SCHEDULE_IDS.has(videoAdScheduleId)) {
-      recognizesAdUnit = isChzzkLiveAdUnit;
-    } else if (videoAdScheduleId === CHZZK_VOD_VIDEO_SCHEDULE_ID) {
-      recognizesAdUnit = isChzzkVodAdUnit;
-    } else {
-      return false;
-    }
-    return adBreaks.every(
-      (adBreak) =>
-        isRecord(adBreak) &&
-        recognizesAdUnit(adBreak.adUnitId) &&
-        Array.isArray(adBreak.adSources) &&
-        adBreak.adSources.length > 0 &&
-        adBreak.adSources.every(isRecord),
-    );
-  }
-  function isNeutralSchedule(adBreaks) {
-    if (adBreaks.length !== 1 || !isRecord(adBreaks[0])) return false;
-    const adBreak = adBreaks[0];
-    return (
-      adBreak.id === "" &&
-      adBreak.startDelay === 0 &&
-      adBreak.preFetch === 0 &&
-      adBreak.adUnitId === "" &&
-      Array.isArray(adBreak.adSources) &&
-      adBreak.adSources.length === 0
-    );
-  }
-  function sanitizeChzzkAdResponse(value) {
-    if (
-      !isRecord(value) ||
-      !isRecord(value.head) ||
-      value.head.version !== AD_PROTOCOL_VERSION ||
-      typeof value.requestId !== "string" ||
-      value.requestId === ""
-    ) {
-      return null;
-    }
-    if (
-      value.head.description === GFP_SCHEDULE_DESCRIPTION &&
-      Array.isArray(value.adBreaks) &&
-      value.adBreaks.length > 0 &&
-      hasRecognizedChzzkScheduleBreak(value.videoAdScheduleId, value.adBreaks) &&
-      !isNeutralSchedule(value.adBreaks)
-    ) {
-      return {
-        ...value,
-        adBreaks: [
-          {
-            id: "",
-            startDelay: 0,
-            preFetch: 0,
-            adUnitId: "",
-            adSources: [],
-          },
-        ],
-      };
-    }
-    if (
-      value.head.description === NAVER_WATERFALL_DESCRIPTION &&
-      (isChzzkLiveAdUnit(value.adUnit) || isChzzkVodAdUnit(value.adUnit)) &&
-      isRecord(value.eventTracking) &&
-      Number.isFinite(value.randomNumber) &&
-      Array.isArray(value.ads) &&
-      value.ads.length > 0
-    ) {
-      return { ...value, ads: [] };
-    }
-    return null;
-  }
-  function firstMeaningfulByteIsObject(bytes) {
-    let index = 0;
-    if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) {
-      index = 3;
-    }
-    while (
-      index < bytes.length &&
-      (bytes[index] === 9 || bytes[index] === 10 || bytes[index] === 13 || bytes[index] === 32)
-    ) {
-      index += 1;
-    }
-    return bytes[index] === 123;
-  }
-  function bytesInclude(bytes, marker) {
-    const limit = Math.min(bytes.length, MAX_MARKER_SCAN_BYTES);
-    if (marker.length === 0 || marker.length > limit) return false;
-    const lastStart = limit - marker.length;
-    outer: for (let start = 0; start <= lastStart; start += 1) {
-      for (let index = 0; index < marker.length; index += 1) {
-        if (bytes[start + index] !== marker[index]) continue outer;
-      }
-      return true;
-    }
-    return false;
-  }
-  function rewriteChzzkAdResponseBytes(
-    bytes,
-    {
-      decoder = new globalThis.TextDecoder("utf-8", { fatal: true }),
-      encoder = new globalThis.TextEncoder(),
-      parse = globalThis.JSON.parse,
-      stringify = globalThis.JSON.stringify,
-    } = {},
-  ) {
-    if (!bytes || bytes.byteLength === 0 || !firstMeaningfulByteIsObject(bytes)) return null;
-    const scheduleMarker = encoder.encode(GFP_SCHEDULE_DESCRIPTION);
-    const waterfallMarker = encoder.encode(NAVER_WATERFALL_DESCRIPTION);
-    if (!bytesInclude(bytes, scheduleMarker) && !bytesInclude(bytes, waterfallMarker)) return null;
-    try {
-      const parsed = parse(decoder.decode(bytes));
-      const sanitized = sanitizeChzzkAdResponse(parsed);
-      return sanitized ? encoder.encode(stringify(sanitized)) : null;
-    } catch {
-      return null;
-    }
-  }
-  function createChzzkAdResponseController({
-    documentRef = globalThis.document,
-    globalRef = globalThis,
-  } = {}) {
-    const OriginalUint8Array = globalRef.Uint8Array;
-    const ProxyImpl = globalRef.Proxy;
-    const ReflectImpl = globalRef.Reflect;
-    const TextDecoderImpl = globalRef.TextDecoder;
-    const TextEncoderImpl = globalRef.TextEncoder;
-    const parse = globalRef.JSON?.parse?.bind(globalRef.JSON);
-    const stringify = globalRef.JSON?.stringify?.bind(globalRef.JSON);
-    let active = false;
-    let styleElement = null;
-    let wrappedUint8Array = null;
-    function installStyle() {
-      if (styleElement || typeof documentRef?.createElement !== "function") return;
-      const parent = documentRef.head ?? documentRef.documentElement;
-      if (!parent?.append) return;
-      try {
-        const style = documentRef.createElement("style");
-        style.setAttribute(STYLE_ATTRIBUTE, "");
-        style.textContent = AD_UI_STYLE;
-        parent.append(style);
-        styleElement = style;
-      } catch {
-        styleElement = null;
-      }
-    }
-    function start() {
-      if (active) return;
-      active = true;
-      installStyle();
-      if (
-        typeof OriginalUint8Array !== "function" ||
-        typeof ProxyImpl !== "function" ||
-        typeof ReflectImpl?.construct !== "function" ||
-        typeof TextDecoderImpl !== "function" ||
-        typeof TextEncoderImpl !== "function" ||
-        typeof parse !== "function" ||
-        typeof stringify !== "function"
-      ) {
-        return;
-      }
-      const decoder = new TextDecoderImpl("utf-8", { fatal: true });
-      const encoder = new TextEncoderImpl();
-      wrappedUint8Array = new ProxyImpl(OriginalUint8Array, {
-        construct(target, args, newTarget) {
-          const candidate = ReflectImpl.construct(target, args, newTarget);
-          try {
-            const replacement = rewriteChzzkAdResponseBytes(candidate, {
-              decoder,
-              encoder,
-              parse,
-              stringify,
-            });
-            return replacement ? ReflectImpl.construct(target, [replacement], newTarget) : candidate;
-          } catch {
-            return candidate;
-          }
-        },
-      });
-      try {
-        globalRef.Uint8Array = wrappedUint8Array;
-        if (globalRef.Uint8Array !== wrappedUint8Array) wrappedUint8Array = null;
-      } catch {
-        wrappedUint8Array = null;
-      }
-    }
-    function stop() {
-      if (!active) return;
-      active = false;
-      try {
-        if (wrappedUint8Array && globalRef.Uint8Array === wrappedUint8Array) {
-          globalRef.Uint8Array = OriginalUint8Array;
-        }
-      } catch {
-        ignoreAdGuardFailure();
-      }
-      wrappedUint8Array = null;
-      try {
-        styleElement?.remove?.();
-      } catch {
-        ignoreAdGuardFailure();
-      }
-      styleElement = null;
-    }
-    return Object.freeze({ start, stop });
-  }
-  function replacePreviousController() {
-    try {
-      globalThis[CONTROLLER_SLOT]?.stop?.();
-    } catch {
-      ignoreAdGuardFailure();
-    }
-    const controller = createChzzkAdResponseController();
-    try {
-      Object.defineProperty(globalThis, CONTROLLER_SLOT, {
-        configurable: true,
-        value: controller,
-      });
-    } catch {
-      ignoreAdGuardFailure();
-    }
-    controller.start();
-  }
-  if (typeof document !== "undefined") replacePreviousController();
-
-  // src/runtime/player-controller.js
+  // src/runtime/player-model.js
   var PLAYER_LAYOUT_SELECTOR = "#live_player_layout > pzp-pc-layout";
   var QUALITY_PANE_SELECTOR =
     "#live_player_layout pzp-pc-setting-quality-pane, #live_player_layout pzp-setting-quality, #live_player_layout .pzp-pc-setting-quality-pane, #live_player_layout .pzp-setting-quality-pane";
@@ -270,48 +10,9 @@
   var MAX_REACT_FIBER_NODES = 1024;
   var MAX_REACT_STATE_NODES = 1024;
   var MAX_REACT_STATE_DEPTH = 8;
-  var INITIAL_DISCOVERY_TARGET_RESOLUTION = 1080;
-  var DEFAULT_QUALITY_INTENT = Object.freeze({
-    height: 1080,
-    label: "1080p",
-    resolution: 1080,
-    videoBitrate: 0,
-    width: 1920,
-  });
-  var RETRY_DELAYS_MS = [0, 50, 250, 1e3, 3e3];
-  var RESPONSIVE_SETTLE_DELAY_MS = 250;
-  var RESPONSIVE_RECHECK_DELAYS_MS = [250, 1e3, 3e3];
-  var SELECTION_CONFIRM_DELAYS_MS = [50, 200, 750];
-  var SELECTION_STABLE_MS = 5e3;
-  var WATCHDOG_INTERVAL_MS = 1e3;
-  var MAX_SELECTION_WRITES_PER_CANDIDATE = 2;
-  var MAX_GLOBAL_SELECTION_WRITES = 4;
   var MANUAL_QUALITY_LABEL_RE = /^\d{3,4}p$/i;
-  var TRACK_LIST_EVENT_TYPES = ["addtrack", "removetrack", "change"];
-  var CONTROLLER_SLOT2 = /* @__PURE__ */ Symbol.for("chzzk.highest-quality-player-controller");
-  var FILTER_WRAPPER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.highest-quality-filter-wrapper");
   function ignorePageAccessFailure() {
     return false;
-  }
-  function isPlayerPageLocation(value) {
-    let hostname = "";
-    let pathname;
-    try {
-      if (typeof value?.pathname === "string") {
-        pathname = value.pathname;
-        hostname = typeof value.hostname === "string" ? value.hostname.toLowerCase() : "";
-      } else {
-        const url = new globalThis.URL(String(value), "https://chzzk.naver.com");
-        hostname = url.hostname.toLowerCase();
-        pathname = url.pathname;
-      }
-    } catch {
-      return false;
-    }
-    return (
-      pathname.startsWith("/") &&
-      (!hostname || hostname === "chzzk.naver.com" || hostname.endsWith(".chzzk.naver.com"))
-    );
   }
   function positiveDimension(value) {
     const number = Number(value);
@@ -660,287 +361,17 @@
       left.candidate.track === right.candidate.track,
     );
   }
-  function selectHighestAllowedPlayerTrack({
-    allowSelectionWrite = true,
-    documentRef = globalThis.document,
-    persistSelection = true,
-    storage,
-  } = {}) {
-    const resolvedStorage = resolveStorage(storage);
-    const resolution = resolveHighestConcretePlayerTrack(documentRef);
-    if (resolution.outcome) return resolution.outcome;
-    const changed = !isCurrentTrack(resolution.player, resolution.candidate);
-    if (changed) {
-      if (!allowSelectionWrite) return { reason: "selection-required", selected: false };
-      try {
-        resolution.candidate.track.selected = true;
-      } catch {
-        return { reason: "selection-failed", selected: false };
-      }
-    }
-    const observedResolution = resolveHighestConcretePlayerTrack(documentRef);
-    if (!selectionContextMatches(resolution, observedResolution)) {
-      return { reason: "selection-context-changed", selected: false };
-    }
-    if (!isCurrentTrack(observedResolution.player, observedResolution.candidate)) {
-      return { reason: "selection-not-applied", selected: false };
-    }
-    if (persistSelection) persistSelectedTrack(resolvedStorage, observedResolution.candidate);
-    return selectedTrackOutcome(observedResolution.candidate, changed);
+
+  // src/runtime/player-selection-guards.js
+  var FILTER_WRAPPER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.highest-quality-filter-wrapper");
+  function ignorePageAccessFailure2() {
+    return false;
   }
-  function nodeBelongsToQualityPane(node) {
-    try {
-      if (node?.matches?.(QUALITY_PANE_SELECTOR) || node?.closest?.(QUALITY_PANE_SELECTOR)) return true;
-    } catch {
-      ignorePageAccessFailure();
-    }
-    const tagName = String(node?.tagName ?? "").toUpperCase();
-    if (tagName === "PZP-PC-SETTING-QUALITY-PANE" || tagName === "PZP-SETTING-QUALITY") {
-      return true;
-    }
-    const classes = String(node?.className ?? "")
-      .split(/\s+/)
-      .filter(Boolean);
-    return classes.includes("pzp-pc-setting-quality-pane") || classes.includes("pzp-setting-quality-pane");
-  }
-  function eventBelongsToQualityPane(event) {
-    const nodes =
-      typeof event?.composedPath === "function" ? event.composedPath() : [event?.target].filter(Boolean);
-    return nodes.some(nodeBelongsToQualityPane);
-  }
-  function eventBelongsToPlayerMedia(event, documentRef) {
-    const nodes =
-      typeof event?.composedPath === "function" ? event.composedPath() : [event?.target].filter(Boolean);
-    const media = nodes.find((node) => String(node?.tagName ?? "").toUpperCase() === "VIDEO");
-    if (!media) return false;
-    try {
-      const layout = documentRef?.querySelector?.("#live_player_layout") ?? null;
-      if (!layout) return false;
-      return (
-        layout === media ||
-        layout.contains?.(media) === true ||
-        media.closest?.("#live_player_layout") === layout
-      );
-    } catch {
-      return false;
-    }
-  }
-  function mutationTouchesPlayer(records) {
-    return (Array.isArray(records) ? records : []).some((record) => {
-      if (nodeBelongsToQualityPane(record?.target)) return true;
-      return [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
-        try {
-          const tagName = String(node?.tagName ?? "").toUpperCase();
-          if (
-            node?.id === "live_player_layout" ||
-            tagName === "VIDEO" ||
-            tagName === "PZP-PC-LAYOUT" ||
-            nodeBelongsToQualityPane(node)
-          ) {
-            return true;
-          }
-          return Boolean(
-            node?.querySelector?.(
-              "#live_player_layout, video, pzp-pc-layout, pzp-pc-setting-quality-pane, pzp-setting-quality, .pzp-pc-setting-quality-pane, .pzp-setting-quality-pane",
-            ),
-          );
-        } catch {
-          return false;
-        }
-      });
-    });
-  }
-  function mutationContainsPlayerRoot(records) {
-    return (Array.isArray(records) ? records : []).some((record) =>
-      [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
-        try {
-          const tagName = String(node?.tagName ?? "").toUpperCase();
-          if (node?.id === "live_player_layout" || tagName === "VIDEO" || tagName === "PZP-PC-LAYOUT") {
-            return true;
-          }
-          return Boolean(node?.querySelector?.("#live_player_layout, video, pzp-pc-layout"));
-        } catch {
-          return false;
-        }
-      }),
-    );
-  }
-  function defaultMonotonicNow() {
-    try {
-      const value = globalThis.performance?.now?.();
-      if (Number.isFinite(value)) return value;
-    } catch {
-      return globalThis.Date.now();
-    }
-    return globalThis.Date.now();
-  }
-  function createHighestQualityPlayerController({
-    MutationObserverImpl = globalThis.MutationObserver,
-    clearTimeoutImpl = globalThis.clearTimeout,
-    documentRef = globalThis.document,
-    historyRef = globalThis.history,
-    locationRef = globalThis.location,
-    nowImpl = defaultMonotonicNow,
-    setTimeoutImpl = globalThis.setTimeout,
-    storage,
-    windowRef = globalThis.window,
-    visualViewportRef = windowRef?.visualViewport,
-    watchdogIntervalMs = WATCHDOG_INTERVAL_MS,
-  } = {}) {
-    const resolvedStorage = resolveStorage(storage);
-    const storedIntent = readStoredTrackIntent(resolvedStorage);
-    let qualityIntent =
-      storedIntent && compareTrackQuality(storedIntent, DEFAULT_QUALITY_INTENT) <= 0
-        ? storedIntent
-        : DEFAULT_QUALITY_INTENT;
-    const watchdogDelay =
-      Number.isFinite(Number(watchdogIntervalMs)) && Number(watchdogIntervalMs) > 0
-        ? Number(watchdogIntervalMs)
-        : null;
-    let active = false;
-    let boundTracks = null;
-    let confirmedSelection = null;
-    let discoveryContext = null;
-    const eventRestorers = [];
-    let globalAvailableWrites = MAX_GLOBAL_SELECTION_WRITES;
-    let globalLastRefillAt = null;
-    const historyRestorers = [];
-    let lastNow = 0;
-    let observer = null;
-    let responsiveTimer = null;
-    let responsiveRecheckIndex = 0;
-    let responsiveRecheckLimit = 0;
-    let responsiveRecheckTimer = null;
-    let responsiveRecheckToken = 0;
-    let retryIndex = 0;
-    let scheduledTimer = null;
-    let selectionConfirmationTimer = null;
-    let selectionToken = 0;
-    let selectionTransaction = null;
-    let watchdogTimer = null;
+  function createPlayerSelectionGuards(documentRef) {
     const guardedTracks = /* @__PURE__ */ new Map();
     let wrappedFilter = null;
     let wrappedFilterOwnDescriptor = null;
     let wrappedPane = null;
-    function now() {
-      try {
-        const value = Number(nowImpl());
-        if (Number.isFinite(value)) lastNow = Math.max(lastNow, value);
-      } catch {
-        return lastNow;
-      }
-      return lastNow;
-    }
-    function cancelScheduledScan() {
-      if (scheduledTimer == null) return;
-      clearTimeoutImpl(scheduledTimer);
-      scheduledTimer = null;
-    }
-    function cancelWatchdog() {
-      if (watchdogTimer == null) return;
-      clearTimeoutImpl(watchdogTimer);
-      watchdogTimer = null;
-    }
-    function scheduleWatchdog() {
-      if (!active || watchdogDelay == null || watchdogTimer != null) return;
-      watchdogTimer = setTimeoutImpl(() => {
-        watchdogTimer = null;
-        if (!active) return;
-        protectQualityIntent();
-        scheduleScan({ restart: true });
-        scheduleWatchdog();
-      }, watchdogDelay);
-    }
-    function cancelResponsiveScan() {
-      if (responsiveTimer == null) return;
-      clearTimeoutImpl(responsiveTimer);
-      responsiveTimer = null;
-    }
-    function cancelResponsiveRecheck() {
-      if (responsiveRecheckTimer == null) return;
-      clearTimeoutImpl(responsiveRecheckTimer);
-      responsiveRecheckTimer = null;
-    }
-    function clearResponsiveRechecks() {
-      cancelResponsiveRecheck();
-      responsiveRecheckIndex = 0;
-      responsiveRecheckLimit = 0;
-      responsiveRecheckToken += 1;
-    }
-    function armResponsiveRechecks() {
-      clearResponsiveRechecks();
-      responsiveRecheckLimit = RESPONSIVE_RECHECK_DELAYS_MS.length;
-    }
-    function scheduleResponsiveRecheck() {
-      if (!active || responsiveRecheckTimer != null || responsiveRecheckIndex >= responsiveRecheckLimit) {
-        return;
-      }
-      const index = responsiveRecheckIndex;
-      const token = responsiveRecheckToken;
-      responsiveRecheckIndex += 1;
-      responsiveRecheckTimer = setTimeoutImpl(() => {
-        responsiveRecheckTimer = null;
-        if (!active || token !== responsiveRecheckToken || !isPlayerPageLocation(locationRef)) {
-          return;
-        }
-        scheduleScan({ restart: true });
-      }, RESPONSIVE_RECHECK_DELAYS_MS[index]);
-    }
-    function cancelSelectionConfirmation() {
-      if (selectionConfirmationTimer == null) return;
-      clearTimeoutImpl(selectionConfirmationTimer);
-      selectionConfirmationTimer = null;
-    }
-    function clearSelectionTransaction() {
-      cancelSelectionConfirmation();
-      selectionToken += 1;
-      selectionTransaction = null;
-    }
-    function transactionMatches(transaction, resolution) {
-      return Boolean(
-        transaction &&
-        selectionContextMatches(
-          {
-            candidate: { track: transaction.track },
-            player: transaction.player,
-            tracks: transaction.tracks,
-          },
-          resolution,
-        ),
-      );
-    }
-    function confirmedContextMatches(resolution) {
-      return Boolean(
-        confirmedSelection &&
-        resolution &&
-        !resolution.outcome &&
-        confirmedSelection.player === resolution.player &&
-        confirmedSelection.tracks === resolution.tracks,
-      );
-    }
-    function rememberConfirmedSelection(resolution, candidate = resolution?.candidate) {
-      if (!resolution || !candidate) return;
-      confirmedSelection = {
-        player: resolution.player,
-        track: candidate.track,
-        tracks: resolution.tracks,
-      };
-    }
-    function persistQualityIntent(candidate) {
-      if (!candidate) return;
-      if (qualityIntent && compareTrackQuality(candidate, qualityIntent) > 0) return;
-      qualityIntent = {
-        height: candidate.height,
-        label: candidate.label,
-        resolution: candidate.resolution,
-        videoBitrate: candidate.videoBitrate,
-        width: candidate.width,
-      };
-      protectQualityIntent();
-    }
-    function protectQualityIntent() {
-      persistSelectedTrack(resolvedStorage, qualityIntent);
-    }
     function restoreWrappedFilter() {
       if (!wrappedPane || !wrappedFilter) return;
       try {
@@ -953,7 +384,7 @@
           }
         }
       } catch {
-        ignorePageAccessFailure();
+        ignorePageAccessFailure2();
       }
       wrappedFilter = null;
       wrappedFilterOwnDescriptor = null;
@@ -972,7 +403,7 @@
           delete track.selected;
         }
       } catch {
-        ignorePageAccessFailure();
+        ignorePageAccessFailure2();
       }
     }
     function restoreTrackGuardsExcept(retainedTracks = null) {
@@ -1099,7 +530,7 @@
             }
           }
         } catch {
-          ignorePageAccessFailure();
+          ignorePageAccessFailure2();
         }
         return;
       }
@@ -1112,6 +543,596 @@
       const resolution = resolveHighestConcretePlayerTrack(documentRef);
       ensureTrackSelectionGuards(resolution);
       return resolution;
+    }
+    return Object.freeze({
+      resolve: resolveControllerPlayerTrack,
+      restore() {
+        restoreTrackGuardsExcept();
+        restoreWrappedFilter();
+      },
+    });
+  }
+
+  // src/runtime/ad-response-controller.js
+  var GFP_SCHEDULE_DESCRIPTION = "GFP Video Ad Schedule";
+  var NAVER_WATERFALL_DESCRIPTION = "Naver SSP Waterfall List";
+  var AD_PROTOCOL_VERSION = "0.0.1";
+  var CHZZK_LIVE_VIDEO_SCHEDULE_IDS = /* @__PURE__ */ new Set([
+    "LIVE_CHZZK_NDP_SCH",
+    "LIVE_CHZZK_NDP_SCH_EVENT",
+  ]);
+  var CHZZK_VOD_VIDEO_SCHEDULE_ID = "CHZZK_NDP_SCH";
+  var CHZZK_LIVE_AD_UNIT = /^(?:event_)?w_live_chzzk_naver_va(?:_[a-z0-9]+)*$/i;
+  var CHZZK_VOD_AD_UNITS = /* @__PURE__ */ new Set(["w_chzzk_naver_va", "w_chzzk_naver_va_mid"]);
+  var MAX_MARKER_SCAN_BYTES = 16384;
+  var CONTROLLER_SLOT = /* @__PURE__ */ Symbol.for("chzzk.ad-response-controller");
+  var STYLE_ATTRIBUTE = "data-chzzk-extension-ad-guard";
+  var AD_UI_STYLE = `
+[data-nlog-area="ad_blocking_info_layer"],
+.webplayer-internal-core-dimmed,
+.webplayer-internal-core-ad-ui,
+#live_rs_banner,
+#vod_rs_banner {
+  display: none !important;
+}
+`;
+  function ignoreAdGuardFailure() {
+    return false;
+  }
+  function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function isChzzkLiveAdUnit(value) {
+    return typeof value === "string" && CHZZK_LIVE_AD_UNIT.test(value);
+  }
+  function isChzzkVodAdUnit(value) {
+    return CHZZK_VOD_AD_UNITS.has(value);
+  }
+  function hasRecognizedChzzkScheduleBreak(videoAdScheduleId, adBreaks) {
+    let recognizesAdUnit;
+    if (CHZZK_LIVE_VIDEO_SCHEDULE_IDS.has(videoAdScheduleId)) {
+      recognizesAdUnit = isChzzkLiveAdUnit;
+    } else if (videoAdScheduleId === CHZZK_VOD_VIDEO_SCHEDULE_ID) {
+      recognizesAdUnit = isChzzkVodAdUnit;
+    } else {
+      return false;
+    }
+    return adBreaks.every(
+      (adBreak) =>
+        isRecord(adBreak) &&
+        recognizesAdUnit(adBreak.adUnitId) &&
+        Array.isArray(adBreak.adSources) &&
+        adBreak.adSources.length > 0 &&
+        adBreak.adSources.every(isRecord),
+    );
+  }
+  function isNeutralSchedule(adBreaks) {
+    if (adBreaks.length !== 1 || !isRecord(adBreaks[0])) return false;
+    const adBreak = adBreaks[0];
+    return (
+      adBreak.id === "" &&
+      adBreak.startDelay === 0 &&
+      adBreak.preFetch === 0 &&
+      adBreak.adUnitId === "" &&
+      Array.isArray(adBreak.adSources) &&
+      adBreak.adSources.length === 0
+    );
+  }
+  function sanitizeChzzkAdResponse(value) {
+    if (
+      !isRecord(value) ||
+      !isRecord(value.head) ||
+      value.head.version !== AD_PROTOCOL_VERSION ||
+      typeof value.requestId !== "string" ||
+      value.requestId === ""
+    ) {
+      return null;
+    }
+    if (
+      value.head.description === GFP_SCHEDULE_DESCRIPTION &&
+      Array.isArray(value.adBreaks) &&
+      value.adBreaks.length > 0 &&
+      hasRecognizedChzzkScheduleBreak(value.videoAdScheduleId, value.adBreaks) &&
+      !isNeutralSchedule(value.adBreaks)
+    ) {
+      return {
+        ...value,
+        adBreaks: [
+          {
+            id: "",
+            startDelay: 0,
+            preFetch: 0,
+            adUnitId: "",
+            adSources: [],
+          },
+        ],
+      };
+    }
+    if (
+      value.head.description === NAVER_WATERFALL_DESCRIPTION &&
+      (isChzzkLiveAdUnit(value.adUnit) || isChzzkVodAdUnit(value.adUnit)) &&
+      isRecord(value.eventTracking) &&
+      Number.isFinite(value.randomNumber) &&
+      Array.isArray(value.ads) &&
+      value.ads.length > 0
+    ) {
+      return { ...value, ads: [] };
+    }
+    return null;
+  }
+  function firstMeaningfulByteIsObject(bytes) {
+    let index = 0;
+    if (bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191) {
+      index = 3;
+    }
+    while (
+      index < bytes.length &&
+      (bytes[index] === 9 || bytes[index] === 10 || bytes[index] === 13 || bytes[index] === 32)
+    ) {
+      index += 1;
+    }
+    return bytes[index] === 123;
+  }
+  function bytesInclude(bytes, marker) {
+    const limit = Math.min(bytes.length, MAX_MARKER_SCAN_BYTES);
+    if (marker.length === 0 || marker.length > limit) return false;
+    const lastStart = limit - marker.length;
+    outer: for (let start = 0; start <= lastStart; start += 1) {
+      for (let index = 0; index < marker.length; index += 1) {
+        if (bytes[start + index] !== marker[index]) continue outer;
+      }
+      return true;
+    }
+    return false;
+  }
+  function rewriteChzzkAdResponseBytes(
+    bytes,
+    {
+      decoder = new globalThis.TextDecoder("utf-8", { fatal: true }),
+      encoder = new globalThis.TextEncoder(),
+      parse = globalThis.JSON.parse,
+      stringify = globalThis.JSON.stringify,
+    } = {},
+  ) {
+    if (!bytes || bytes.byteLength === 0 || !firstMeaningfulByteIsObject(bytes)) return null;
+    const scheduleMarker = encoder.encode(GFP_SCHEDULE_DESCRIPTION);
+    const waterfallMarker = encoder.encode(NAVER_WATERFALL_DESCRIPTION);
+    if (!bytesInclude(bytes, scheduleMarker) && !bytesInclude(bytes, waterfallMarker)) return null;
+    try {
+      const parsed = parse(decoder.decode(bytes));
+      const sanitized = sanitizeChzzkAdResponse(parsed);
+      return sanitized ? encoder.encode(stringify(sanitized)) : null;
+    } catch {
+      return null;
+    }
+  }
+  function createChzzkAdResponseController({
+    documentRef = globalThis.document,
+    globalRef = globalThis,
+  } = {}) {
+    const OriginalUint8Array = globalRef.Uint8Array;
+    const ProxyImpl = globalRef.Proxy;
+    const ReflectImpl = globalRef.Reflect;
+    const TextDecoderImpl = globalRef.TextDecoder;
+    const TextEncoderImpl = globalRef.TextEncoder;
+    const parse = globalRef.JSON?.parse?.bind(globalRef.JSON);
+    const stringify = globalRef.JSON?.stringify?.bind(globalRef.JSON);
+    let active = false;
+    let styleElement = null;
+    let wrappedUint8Array = null;
+    function installStyle() {
+      if (styleElement || typeof documentRef?.createElement !== "function") return;
+      const parent = documentRef.head ?? documentRef.documentElement;
+      if (!parent?.append) return;
+      try {
+        const style = documentRef.createElement("style");
+        style.setAttribute(STYLE_ATTRIBUTE, "");
+        style.textContent = AD_UI_STYLE;
+        parent.append(style);
+        styleElement = style;
+      } catch {
+        styleElement = null;
+      }
+    }
+    function start() {
+      if (active) return;
+      active = true;
+      installStyle();
+      if (
+        typeof OriginalUint8Array !== "function" ||
+        typeof ProxyImpl !== "function" ||
+        typeof ReflectImpl?.construct !== "function" ||
+        typeof TextDecoderImpl !== "function" ||
+        typeof TextEncoderImpl !== "function" ||
+        typeof parse !== "function" ||
+        typeof stringify !== "function"
+      ) {
+        return;
+      }
+      const decoder = new TextDecoderImpl("utf-8", { fatal: true });
+      const encoder = new TextEncoderImpl();
+      wrappedUint8Array = new ProxyImpl(OriginalUint8Array, {
+        construct(target, args, newTarget) {
+          const candidate = ReflectImpl.construct(target, args, newTarget);
+          try {
+            const replacement = rewriteChzzkAdResponseBytes(candidate, {
+              decoder,
+              encoder,
+              parse,
+              stringify,
+            });
+            return replacement ? ReflectImpl.construct(target, [replacement], newTarget) : candidate;
+          } catch {
+            return candidate;
+          }
+        },
+      });
+      try {
+        globalRef.Uint8Array = wrappedUint8Array;
+        if (globalRef.Uint8Array !== wrappedUint8Array) wrappedUint8Array = null;
+      } catch {
+        wrappedUint8Array = null;
+      }
+    }
+    function stop() {
+      if (!active) return;
+      active = false;
+      try {
+        if (wrappedUint8Array && globalRef.Uint8Array === wrappedUint8Array) {
+          globalRef.Uint8Array = OriginalUint8Array;
+        }
+      } catch {
+        ignoreAdGuardFailure();
+      }
+      wrappedUint8Array = null;
+      try {
+        styleElement?.remove?.();
+      } catch {
+        ignoreAdGuardFailure();
+      }
+      styleElement = null;
+    }
+    return Object.freeze({ start, stop });
+  }
+  function replacePreviousController() {
+    try {
+      globalThis[CONTROLLER_SLOT]?.stop?.();
+    } catch {
+      ignoreAdGuardFailure();
+    }
+    const controller = createChzzkAdResponseController();
+    try {
+      Object.defineProperty(globalThis, CONTROLLER_SLOT, {
+        configurable: true,
+        value: controller,
+      });
+    } catch {
+      ignoreAdGuardFailure();
+    }
+    controller.start();
+  }
+  if (typeof document !== "undefined") replacePreviousController();
+
+  // src/runtime/player-controller.js
+  var INITIAL_DISCOVERY_TARGET_RESOLUTION = 1080;
+  var DEFAULT_QUALITY_INTENT = Object.freeze({
+    height: 1080,
+    label: "1080p",
+    resolution: 1080,
+    videoBitrate: 0,
+    width: 1920,
+  });
+  var RETRY_DELAYS_MS = [0, 50, 250, 1e3, 3e3];
+  var RESPONSIVE_SETTLE_DELAY_MS = 250;
+  var RESPONSIVE_RECHECK_DELAYS_MS = [250, 1e3, 3e3];
+  var SELECTION_CONFIRM_DELAYS_MS = [50, 200, 750];
+  var SELECTION_STABLE_MS = 5e3;
+  var WATCHDOG_INTERVAL_MS = 1e3;
+  var MAX_SELECTION_WRITES_PER_CANDIDATE = 2;
+  var MAX_GLOBAL_SELECTION_WRITES = 4;
+  var TRACK_LIST_EVENT_TYPES = ["addtrack", "removetrack", "change"];
+  var CONTROLLER_SLOT2 = /* @__PURE__ */ Symbol.for("chzzk.highest-quality-player-controller");
+  function ignorePageAccessFailure3() {
+    return false;
+  }
+  function isPlayerPageLocation(value) {
+    let hostname = "";
+    let pathname;
+    try {
+      if (typeof value?.pathname === "string") {
+        pathname = value.pathname;
+        hostname = typeof value.hostname === "string" ? value.hostname.toLowerCase() : "";
+      } else {
+        const url = new globalThis.URL(String(value), "https://chzzk.naver.com");
+        hostname = url.hostname.toLowerCase();
+        pathname = url.pathname;
+      }
+    } catch {
+      return false;
+    }
+    return (
+      pathname.startsWith("/") &&
+      (!hostname || hostname === "chzzk.naver.com" || hostname.endsWith(".chzzk.naver.com"))
+    );
+  }
+  function selectHighestAllowedPlayerTrack({
+    allowSelectionWrite = true,
+    documentRef = globalThis.document,
+    persistSelection = true,
+    storage,
+  } = {}) {
+    const resolvedStorage = resolveStorage(storage);
+    const resolution = resolveHighestConcretePlayerTrack(documentRef);
+    if (resolution.outcome) return resolution.outcome;
+    const changed = !isCurrentTrack(resolution.player, resolution.candidate);
+    if (changed) {
+      if (!allowSelectionWrite) return { reason: "selection-required", selected: false };
+      try {
+        resolution.candidate.track.selected = true;
+      } catch {
+        return { reason: "selection-failed", selected: false };
+      }
+    }
+    const observedResolution = resolveHighestConcretePlayerTrack(documentRef);
+    if (!selectionContextMatches(resolution, observedResolution)) {
+      return { reason: "selection-context-changed", selected: false };
+    }
+    if (!isCurrentTrack(observedResolution.player, observedResolution.candidate)) {
+      return { reason: "selection-not-applied", selected: false };
+    }
+    if (persistSelection) persistSelectedTrack(resolvedStorage, observedResolution.candidate);
+    return selectedTrackOutcome(observedResolution.candidate, changed);
+  }
+  function nodeBelongsToQualityPane(node) {
+    try {
+      if (node?.matches?.(QUALITY_PANE_SELECTOR) || node?.closest?.(QUALITY_PANE_SELECTOR)) return true;
+    } catch {
+      ignorePageAccessFailure3();
+    }
+    const tagName = String(node?.tagName ?? "").toUpperCase();
+    if (tagName === "PZP-PC-SETTING-QUALITY-PANE" || tagName === "PZP-SETTING-QUALITY") {
+      return true;
+    }
+    const classes = String(node?.className ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+    return classes.includes("pzp-pc-setting-quality-pane") || classes.includes("pzp-setting-quality-pane");
+  }
+  function eventBelongsToQualityPane(event) {
+    const nodes =
+      typeof event?.composedPath === "function" ? event.composedPath() : [event?.target].filter(Boolean);
+    return nodes.some(nodeBelongsToQualityPane);
+  }
+  function eventBelongsToPlayerMedia(event, documentRef) {
+    const nodes =
+      typeof event?.composedPath === "function" ? event.composedPath() : [event?.target].filter(Boolean);
+    const media = nodes.find((node) => String(node?.tagName ?? "").toUpperCase() === "VIDEO");
+    if (!media) return false;
+    try {
+      const layout = documentRef?.querySelector?.("#live_player_layout") ?? null;
+      if (!layout) return false;
+      return (
+        layout === media ||
+        layout.contains?.(media) === true ||
+        media.closest?.("#live_player_layout") === layout
+      );
+    } catch {
+      return false;
+    }
+  }
+  function mutationTouchesPlayer(records) {
+    return (Array.isArray(records) ? records : []).some((record) => {
+      if (nodeBelongsToQualityPane(record?.target)) return true;
+      return [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
+        try {
+          const tagName = String(node?.tagName ?? "").toUpperCase();
+          if (
+            node?.id === "live_player_layout" ||
+            tagName === "VIDEO" ||
+            tagName === "PZP-PC-LAYOUT" ||
+            nodeBelongsToQualityPane(node)
+          ) {
+            return true;
+          }
+          return Boolean(
+            node?.querySelector?.(
+              "#live_player_layout, video, pzp-pc-layout, pzp-pc-setting-quality-pane, pzp-setting-quality, .pzp-pc-setting-quality-pane, .pzp-setting-quality-pane",
+            ),
+          );
+        } catch {
+          return false;
+        }
+      });
+    });
+  }
+  function mutationContainsPlayerRoot(records) {
+    return (Array.isArray(records) ? records : []).some((record) =>
+      [...(record?.addedNodes ?? []), ...(record?.removedNodes ?? [])].some((node) => {
+        try {
+          const tagName = String(node?.tagName ?? "").toUpperCase();
+          if (node?.id === "live_player_layout" || tagName === "VIDEO" || tagName === "PZP-PC-LAYOUT") {
+            return true;
+          }
+          return Boolean(node?.querySelector?.("#live_player_layout, video, pzp-pc-layout"));
+        } catch {
+          return false;
+        }
+      }),
+    );
+  }
+  function defaultMonotonicNow() {
+    try {
+      const value = globalThis.performance?.now?.();
+      if (Number.isFinite(value)) return value;
+    } catch {
+      return globalThis.Date.now();
+    }
+    return globalThis.Date.now();
+  }
+  function createHighestQualityPlayerController({
+    MutationObserverImpl = globalThis.MutationObserver,
+    clearTimeoutImpl = globalThis.clearTimeout,
+    documentRef = globalThis.document,
+    historyRef = globalThis.history,
+    locationRef = globalThis.location,
+    nowImpl = defaultMonotonicNow,
+    setTimeoutImpl = globalThis.setTimeout,
+    storage,
+    windowRef = globalThis.window,
+    visualViewportRef = windowRef?.visualViewport,
+    watchdogIntervalMs = WATCHDOG_INTERVAL_MS,
+  } = {}) {
+    const guards = createPlayerSelectionGuards(documentRef);
+    const resolveControllerPlayerTrack = guards.resolve;
+    const resolvedStorage = resolveStorage(storage);
+    const storedIntent = readStoredTrackIntent(resolvedStorage);
+    let qualityIntent =
+      storedIntent && compareTrackQuality(storedIntent, DEFAULT_QUALITY_INTENT) <= 0
+        ? storedIntent
+        : DEFAULT_QUALITY_INTENT;
+    const watchdogDelay =
+      Number.isFinite(Number(watchdogIntervalMs)) && Number(watchdogIntervalMs) > 0
+        ? Number(watchdogIntervalMs)
+        : null;
+    let active = false;
+    let boundTracks = null;
+    let confirmedSelection = null;
+    let discoveryContext = null;
+    const eventRestorers = [];
+    let globalAvailableWrites = MAX_GLOBAL_SELECTION_WRITES;
+    let globalLastRefillAt = null;
+    const historyRestorers = [];
+    let lastNow = 0;
+    let observer = null;
+    let responsiveTimer = null;
+    let responsiveRecheckIndex = 0;
+    let responsiveRecheckLimit = 0;
+    let responsiveRecheckTimer = null;
+    let responsiveRecheckToken = 0;
+    let retryIndex = 0;
+    let scheduledTimer = null;
+    let selectionConfirmationTimer = null;
+    let selectionToken = 0;
+    let selectionTransaction = null;
+    let watchdogTimer = null;
+    function now() {
+      try {
+        const value = Number(nowImpl());
+        if (Number.isFinite(value)) lastNow = Math.max(lastNow, value);
+      } catch {
+        return lastNow;
+      }
+      return lastNow;
+    }
+    function cancelScheduledScan() {
+      if (scheduledTimer == null) return;
+      clearTimeoutImpl(scheduledTimer);
+      scheduledTimer = null;
+    }
+    function cancelWatchdog() {
+      if (watchdogTimer == null) return;
+      clearTimeoutImpl(watchdogTimer);
+      watchdogTimer = null;
+    }
+    function scheduleWatchdog() {
+      if (!active || watchdogDelay == null || watchdogTimer != null) return;
+      watchdogTimer = setTimeoutImpl(() => {
+        watchdogTimer = null;
+        if (!active) return;
+        protectQualityIntent();
+        scheduleScan({ restart: true });
+        scheduleWatchdog();
+      }, watchdogDelay);
+    }
+    function cancelResponsiveScan() {
+      if (responsiveTimer == null) return;
+      clearTimeoutImpl(responsiveTimer);
+      responsiveTimer = null;
+    }
+    function cancelResponsiveRecheck() {
+      if (responsiveRecheckTimer == null) return;
+      clearTimeoutImpl(responsiveRecheckTimer);
+      responsiveRecheckTimer = null;
+    }
+    function clearResponsiveRechecks() {
+      cancelResponsiveRecheck();
+      responsiveRecheckIndex = 0;
+      responsiveRecheckLimit = 0;
+      responsiveRecheckToken += 1;
+    }
+    function armResponsiveRechecks() {
+      clearResponsiveRechecks();
+      responsiveRecheckLimit = RESPONSIVE_RECHECK_DELAYS_MS.length;
+    }
+    function scheduleResponsiveRecheck() {
+      if (!active || responsiveRecheckTimer != null || responsiveRecheckIndex >= responsiveRecheckLimit) {
+        return;
+      }
+      const index = responsiveRecheckIndex;
+      const token = responsiveRecheckToken;
+      responsiveRecheckIndex += 1;
+      responsiveRecheckTimer = setTimeoutImpl(() => {
+        responsiveRecheckTimer = null;
+        if (!active || token !== responsiveRecheckToken || !isPlayerPageLocation(locationRef)) {
+          return;
+        }
+        scheduleScan({ restart: true });
+      }, RESPONSIVE_RECHECK_DELAYS_MS[index]);
+    }
+    function cancelSelectionConfirmation() {
+      if (selectionConfirmationTimer == null) return;
+      clearTimeoutImpl(selectionConfirmationTimer);
+      selectionConfirmationTimer = null;
+    }
+    function clearSelectionTransaction() {
+      cancelSelectionConfirmation();
+      selectionToken += 1;
+      selectionTransaction = null;
+    }
+    function transactionMatches(transaction, resolution) {
+      return Boolean(
+        transaction &&
+        selectionContextMatches(
+          {
+            candidate: { track: transaction.track },
+            player: transaction.player,
+            tracks: transaction.tracks,
+          },
+          resolution,
+        ),
+      );
+    }
+    function confirmedContextMatches(resolution) {
+      return Boolean(
+        confirmedSelection &&
+        resolution &&
+        !resolution.outcome &&
+        confirmedSelection.player === resolution.player &&
+        confirmedSelection.tracks === resolution.tracks,
+      );
+    }
+    function rememberConfirmedSelection(resolution, candidate = resolution?.candidate) {
+      if (!resolution || !candidate) return;
+      confirmedSelection = {
+        player: resolution.player,
+        track: candidate.track,
+        tracks: resolution.tracks,
+      };
+    }
+    function persistQualityIntent(candidate) {
+      if (!candidate) return;
+      if (qualityIntent && compareTrackQuality(candidate, qualityIntent) > 0) return;
+      qualityIntent = {
+        height: candidate.height,
+        label: candidate.label,
+        resolution: candidate.resolution,
+        videoBitrate: candidate.videoBitrate,
+        width: candidate.width,
+      };
+      protectQualityIntent();
+    }
+    function protectQualityIntent() {
+      persistSelectedTrack(resolvedStorage, qualityIntent);
     }
     function continueResponsiveRechecks(resolution) {
       const newDiscoveryContext =
@@ -1549,8 +1570,7 @@
       confirmedSelection = null;
       discoveryContext = null;
       unbindCurrentTracks();
-      restoreTrackGuardsExcept();
-      restoreWrappedFilter();
+      guards.restore();
       try {
         observer?.disconnect?.();
       } catch {

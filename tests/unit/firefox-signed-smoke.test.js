@@ -409,7 +409,7 @@ setInterval(() => {}, 1000);
   it("provides a native Windows update runner that requires and validates bounded evidence", () => {
     const wrapper = readFileSync(join(repoRoot, "scripts/firefox-signed-smoke.windows.ps1"), "utf8");
     const testingDocs = readFileSync(join(repoRoot, "docs/TESTING.md"), "utf8");
-    assert.match(wrapper, /\$env:OS\s+-ne\s+"Windows_NT"/);
+    assert.match(wrapper, /\[Environment\]::OSVersion\.Platform\s+-ne\s+\[PlatformID\]::Win32NT/);
     assert.match(wrapper, /CHZZK_SIGNED_SMOKE_MODE"\s*=\s*"update"/);
     assert.match(wrapper, /CHZZK_SIGNED_SMOKE_RESULT/);
     assert.match(wrapper, /finalUpdateState\s+-ne\s+"none-found"/);

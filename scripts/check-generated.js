@@ -12,7 +12,8 @@ function generatedDiff() {
 }
 
 const before = generatedDiff();
-const build = spawnSync("npm", ["run", "build:runtime"], { stdio: "inherit" });
+const build = spawnSync(process.execPath, ["scripts/build-runtime.js"], { stdio: "inherit" });
+if (build.error) console.error("Unable to start the runtime builder:", build.error.message);
 if (build.status !== 0) process.exit(build.status ?? 1);
 const after = generatedDiff();
 

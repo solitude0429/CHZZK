@@ -107,6 +107,8 @@ async function loadBackground({
   context.globalThis = context;
   context.browser = {
     runtime: {
+      id: "chzzk-test-addon",
+      getURL: (path) => `moz-extension://synthetic-extension/${path}`,
       onInstalled: {
         addListener(fn) {
           listeners.onInstalled = fn;
@@ -131,6 +133,9 @@ async function loadBackground({
         async set(value) {
           if (storageSetImplementation) await storageSetImplementation(value, storage);
           Object.assign(storage, value);
+        },
+        async remove(key) {
+          delete storage[key];
         },
       },
     },
@@ -263,6 +268,39 @@ ${source.slice(closureEnd)}`;
     timerDelays,
   };
 }
+
+describe("diagnostics clear message boundary", () => {
+  it("serializes clear after an in-flight write and accepts only this extension's popup", async () => {
+    const entered = deferred();
+    const release = deferred();
+    const runtime = await loadBackground({
+      storageSetImplementation: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const startup = runtime.listeners.onInstalled();
+    await entered.promise;
+    const message = { type: "chzzk.clear-diagnostics" };
+    for (const sender of [
+      {},
+      { id: "foreign-addon", url: "moz-extension://synthetic-extension/diagnostics.html" },
+      { id: "chzzk-test-addon", url: "https://www.chzzk.naver.com/live/synthetic" },
+    ])
+      assert.equal(runtime.listeners.onMessage(message, sender), undefined);
+
+    const clearing = runtime.listeners.onMessage(message, {
+      id: "chzzk-test-addon",
+      url: "moz-extension://synthetic-extension/diagnostics.html",
+    });
+    release.resolve();
+    await startup;
+    const result = await clearing;
+    assert.equal(result.ok, true);
+    assert.equal(result.diagnostics.totalHlsRequests, 0);
+    assert.equal(runtime.storage.chzzkDiagnostics, undefined);
+  });
+});
 
 async function waitForDiagnosticsQueue(delayMs = 50) {
   await new Promise((resolve) => setTimeout(resolve, delayMs));

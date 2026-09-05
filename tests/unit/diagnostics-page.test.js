@@ -3,7 +3,15 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import vm from "node:vm";
 
-async function renderStoredDiagnostics(storedDiagnostics) {
+async function renderStoredDiagnostics(
+  storedDiagnostics,
+  {
+    get = async () => ({ chzzkDiagnostics: storedDiagnostics }),
+    sendMessage = async () => ({ ok: true, diagnostics: null }),
+    copy = async () => {},
+    returnElements = false,
+  } = {},
+) {
   const elements = new Map(
     ["#summary", "#payload", "#refresh", "#copy", "#clear"].map((selector) => [
       selector,
@@ -18,12 +26,13 @@ async function renderStoredDiagnostics(storedDiagnostics) {
   );
   const context = {
     browser: {
+      runtime: { sendMessage },
       storage: {
         local: {
-          async get() {
-            return { chzzkDiagnostics: storedDiagnostics };
+          get,
+          async remove() {
+            throw new Error("Clear must use the background queue");
           },
-          async remove() {},
         },
       },
     },
@@ -34,7 +43,7 @@ async function renderStoredDiagnostics(storedDiagnostics) {
       },
     },
     globalThis: null,
-    navigator: { clipboard: { async writeText() {} } },
+    navigator: { clipboard: { writeText: copy } },
     setTimeout,
     URL,
   };
@@ -44,10 +53,53 @@ async function renderStoredDiagnostics(storedDiagnostics) {
     filename: "diagnostics.js",
   });
   await new Promise((resolve) => setTimeout(resolve, 25));
-  return JSON.parse(elements.get("#payload").value);
+  return returnElements ? elements : JSON.parse(elements.get("#payload").value);
 }
 
 describe("diagnostics popup", () => {
+  it("does not let a delayed refresh restore the screen after clearing", async () => {
+    let finishRead;
+    const delayed = new Promise((resolve) => {
+      finishRead = resolve;
+    });
+    let messageType;
+    const elements = await renderStoredDiagnostics(null, {
+      get: () => delayed,
+      sendMessage: async (message) => {
+        messageType = message.type;
+        return { ok: true, diagnostics: null };
+      },
+      returnElements: true,
+    });
+    await elements.get("#clear").listener();
+    assert.equal(messageType, "chzzk.clear-diagnostics");
+    assert.equal(JSON.parse(elements.get("#payload").value).totalHlsRequests, 0);
+    finishRead({ chzzkDiagnostics: { totalHlsRequests: 7 } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(JSON.parse(elements.get("#payload").value).totalHlsRequests, 0);
+  });
+
+  it("handles failed popup actions without showing raw exception details", async () => {
+    const fail = async () => {
+      throw new Error("synthetic-private-error");
+    };
+    const elements = await renderStoredDiagnostics(null, {
+      get: fail,
+      sendMessage: fail,
+      copy: fail,
+      returnElements: true,
+    });
+    assert.equal(elements.get("#summary").textContent, "Unable to load diagnostics. Try again.");
+    for (const [selector, action] of [
+      ["#refresh", "load"],
+      ["#copy", "copy"],
+      ["#clear", "clear"],
+    ]) {
+      await elements.get(selector).listener();
+      assert.equal(elements.get("#summary").textContent, `Unable to ${action} diagnostics. Try again.`);
+    }
+  });
+
   it("renders only the shared normalized local diagnostics schema", async () => {
     const timestamp = "2026-07-15T00:00:00.000Z";
     const rendered = await renderStoredDiagnostics({

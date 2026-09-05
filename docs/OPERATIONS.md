@@ -26,8 +26,8 @@ Every GitHub call uses this PC's GitHub CLI keyring. Never pass a raw token thro
 ## Request classification
 
 - Explanations, investigations, status checks, and reviews are read-only. Run `status` and necessary readbacks only; do not change a branch, commit, PR, Actions run, Release, server, or Firefox.
-- A requested change to extension behavior, manifest, permissions, or packaged output authorizes the complete `ship` flow. After checks pass, continue through squash merge, signing, publication, deployment, and verification without per-stage approval.
-- Documentation, operator tooling, test infrastructure, and workflow-pin changes stop after the protected PR merge. Do not change the version, create a Release, or deploy them.
+- A change request authorizes implementation and scoped verification. Commit, push, PR, merge, signing, release, and deployment follow the global authorization rules. Reuse explicit authorization for its covered stages without per-stage confirmation. Run `ship` only when its entire applicable flow is authorized; it is not a command for a local-only edit or a partial shipping request.
+- Documentation, operator tooling, test infrastructure, and workflow-pin changes may reach protected PR merge only when authorized. Do not change the version, create a Release, or deploy them. The `docs-only` contract marker describes the maximum shipping boundary, not permission to merge.
 - Rollback is never inferred. Run it only when the user explicitly identifies the target version and requests rollback.
 
 The installed Firefox profile is a separate boundary. Automated shipping uses a new disposable profile. Unless the user explicitly requests an installation or real-profile update, do not close Firefox, overwrite its installed XPI, or operate its update controls.
@@ -39,10 +39,14 @@ The production version is the UTC date without zero padding: `YY.M.D` (for examp
 - Publish at most one immutable Release per UTC day.
 - If the day's slot is free, `ship` aligns the four version fields in `manifest.json`, `package.json`, and `package-lock.json`.
 - If the day's Release already exists, do not bump or merge another product change. Create or update exactly one `ship-pending` PR.
-- The next mutating product request after the UTC date changes resumes that PR, assigns the new date version, verifies it, and ships it. Do not add a scheduler or fifth Action.
+- After the UTC date changes, resume that PR, assign the new date version, verify it, and ship only with applicable shipping authorization. A new code-edit request alone does not authorize shipping. Do not add a scheduler or fifth Action.
 - An exact existing tag, source SHA, and asset set is an idempotent no-op. A run for the same SHA or a compatible draft may resume. A foreign SHA, unexpected asset, or duplicate run fails closed before mutation.
 
 ## Product change and protected merge
+
+The following is the full authorized shipping procedure. Execute only authorized
+stages; complete implementation and independent verification before handing off
+missing approval. Do not invoke `ship` for a request authorizing only some stages.
 
 1. Read remote `main` and require a clean `agent/*` branch.
 2. Add a regression test for a real defect and regenerate runtime files when applicable.

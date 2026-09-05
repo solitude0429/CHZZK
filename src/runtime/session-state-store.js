@@ -52,26 +52,29 @@ export function createSessionStateStore({
   const failedTargetsBySession = new Map();
   const masterLineageBySession = new Map();
   const resolutionBySession = new Map();
+  const stateMaps = [
+    activeTargetsBySession,
+    failedTargetsBySession,
+    masterLineageBySession,
+    resolutionBySession,
+  ];
   let sessionAccessSequence = 0;
 
   function sessionStateEntries() {
     const byKey = new Map();
-    for (const map of [
-      activeTargetsBySession,
-      failedTargetsBySession,
-      masterLineageBySession,
-      resolutionBySession,
-    ]) {
+    for (const map of stateMaps) {
       for (const [key, state] of map) {
         const entry = byKey.get(key) ?? {
           key,
           lastTouchedOrder: 0,
+          states: [],
           tabId: state.tabId,
         };
         entry.lastTouchedOrder = Math.max(
           entry.lastTouchedOrder,
           Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
         );
+        entry.states.push(state);
         byKey.set(key, entry);
       }
     }
@@ -79,25 +82,8 @@ export function createSessionStateStore({
   }
 
   function normalizeAccessOrder() {
-    const groupsByKey = new Map();
-    for (const map of [
-      activeTargetsBySession,
-      failedTargetsBySession,
-      masterLineageBySession,
-      resolutionBySession,
-    ]) {
-      for (const [key, state] of map) {
-        const group = groupsByKey.get(key) ?? { key, lastTouchedOrder: 0, states: [] };
-        group.lastTouchedOrder = Math.max(
-          group.lastTouchedOrder,
-          Number.isSafeInteger(state.lastTouchedOrder) ? state.lastTouchedOrder : 0,
-        );
-        group.states.push(state);
-        groupsByKey.set(key, group);
-      }
-    }
     sessionAccessSequence = 0;
-    for (const group of [...groupsByKey.values()].sort(compareSessionAccess)) {
+    for (const group of sessionStateEntries().sort(compareSessionAccess)) {
       sessionAccessSequence += 1;
       for (const state of group.states) state.lastTouchedOrder = sessionAccessSequence;
     }
@@ -164,15 +150,9 @@ export function createSessionStateStore({
 
   function enforceLimits(protectedKey = null) {
     let removedActiveTarget = sweepExpired();
-    const byTab = new Map();
-    for (const entry of sessionStateEntries()) {
-      const entries = byTab.get(entry.tabId) ?? [];
-      entries.push(entry);
-      byTab.set(entry.tabId, entries);
-    }
-    for (const entries of byTab.values()) {
+    function evictExcess(entries, limit) {
       entries.sort(compareSessionAccess);
-      let excess = entries.length - normalizedMaxStatesPerTab;
+      let excess = entries.length - limit;
       for (const entry of entries) {
         if (excess <= 0) break;
         if (entry.key === protectedKey) continue;
@@ -181,14 +161,17 @@ export function createSessionStateStore({
       }
     }
 
-    const entries = sessionStateEntries().sort(compareSessionAccess);
-    let excess = entries.length - normalizedMaxStates;
-    for (const entry of entries) {
-      if (excess <= 0) break;
-      if (entry.key === protectedKey) continue;
-      removedActiveTarget = remove(entry.key) || removedActiveTarget;
-      excess -= 1;
+    const byTab = new Map();
+    for (const entry of sessionStateEntries()) {
+      const entries = byTab.get(entry.tabId) ?? [];
+      entries.push(entry);
+      byTab.set(entry.tabId, entries);
     }
+    for (const entries of byTab.values()) {
+      evictExcess(entries, normalizedMaxStatesPerTab);
+    }
+
+    evictExcess(sessionStateEntries(), normalizedMaxStates);
     if (removedActiveTarget) onActiveTargetsChanged();
     return removedActiveTarget;
   }

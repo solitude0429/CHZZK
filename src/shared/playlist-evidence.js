@@ -1,3 +1,5 @@
+import { parseHlsAttributeList } from "./hls-attributes.js";
+
 function normalizedPlaylistLines(text) {
   let source = String(text ?? "");
   if (source.charCodeAt(0) === 0xfeff) source = source.slice(1);
@@ -10,45 +12,6 @@ function firstMeaningfulLineIsHeader(lines) {
     return line === "#EXTM3U";
   }
   return false;
-}
-
-function splitHlsAttributeList(value) {
-  const entries = [];
-  let current = "";
-  let quoted = false;
-  for (const character of String(value ?? "")) {
-    if (character === '"') quoted = !quoted;
-    if (character === "," && !quoted) {
-      entries.push(current);
-      current = "";
-      continue;
-    }
-    current += character;
-  }
-  if (quoted) return null;
-  if (current) entries.push(current);
-  return entries;
-}
-
-function parseHlsAttributeList(value) {
-  const entries = splitHlsAttributeList(value);
-  if (!entries) return null;
-  const attributes = {};
-  for (const entry of entries) {
-    const separator = entry.indexOf("=");
-    if (separator <= 0) return null;
-    const key = entry.slice(0, separator).trim().toUpperCase();
-    if (!/^[A-Z0-9-]+$/.test(key) || Object.hasOwn(attributes, key)) return null;
-    let rawValue = entry.slice(separator + 1).trim();
-    if (rawValue.startsWith('"')) {
-      if (rawValue.length < 2 || !rawValue.endsWith('"')) return null;
-      rawValue = rawValue.slice(1, -1);
-    } else if (rawValue.includes('"')) {
-      return null;
-    }
-    attributes[key] = rawValue;
-  }
-  return attributes;
 }
 
 function hasUnsafePlaylistUriCharacter(value) {
