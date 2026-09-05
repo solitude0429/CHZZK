@@ -66,6 +66,40 @@ describe("serialized diagnostics storage", () => {
     assert.equal(removals(), 1);
   });
 
+  it("clears writes accepted between two clear requests", async () => {
+    const { store, values, removals } = fixture();
+    const first = store.clear();
+    const write = store.mutate((value) => {
+      value.totalHlsRequests = 7;
+    });
+    const second = store.clear();
+    await Promise.all([first, write, second]);
+    assert.equal(values.chzzkDiagnostics, undefined);
+    assert.equal(removals(), 2);
+  });
+
+  it("preserves the latest pending clear when an older clear completes", async () => {
+    let releaseWrite;
+    const blocked = new Promise((resolve) => {
+      releaseWrite = resolve;
+    });
+    const { store, values, removals } = fixture({ beforeSet: () => blocked });
+    const first = store.clear();
+    const write = store.mutate((value) => {
+      value.totalHlsRequests = 7;
+    });
+    const second = store.clear();
+    await first;
+    // Completion of the older clear must not discard the newer clear marker.
+    const repeated = store.clear();
+    releaseWrite();
+    await Promise.all([write, second, repeated]);
+    assert.equal(values.chzzkDiagnostics, undefined);
+    assert.notEqual(second, first);
+    assert.equal(repeated, second);
+    assert.equal(removals(), 2);
+  });
+
   it("continues after failed writes and normalizes unknown fields before saving", async () => {
     let fail = true;
     const { store, values } = fixture({

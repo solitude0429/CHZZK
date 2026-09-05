@@ -1484,6 +1484,7 @@
     function mutate(mutator) {
       if (depth >= limit) return Promise.resolve({ diagnostics: null, dropped: true, result: false });
       depth += 1;
+      pendingClear = null;
       return enqueue(async () => {
         const stored = await storage.get(key);
         const diagnostics = normalizeDiagnostics(stored?.[key], options);
@@ -1497,13 +1498,14 @@
     }
     function clear() {
       if (pendingClear) return pendingClear;
-      pendingClear = enqueue(async () => {
+      const operation = enqueue(async () => {
         await storage.remove(key);
         return normalizeDiagnostics(null, options);
       }).finally(() => {
-        pendingClear = null;
+        if (pendingClear === operation) pendingClear = null;
       });
-      return pendingClear;
+      pendingClear = operation;
+      return operation;
     }
     return Object.freeze({ clear, mutate });
   }
