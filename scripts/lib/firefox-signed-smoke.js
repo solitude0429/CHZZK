@@ -236,7 +236,9 @@ export function assertTrustedPermanentAddon({
     throw new Error("Installed add-on does not have the expected Mozilla signed state");
   }
   if (addon.active !== true || addon.appDisabled !== false || addon.userDisabled !== false) {
-    throw new Error("Installed add-on is not active and enabled");
+    throw new Error(
+      `Installed add-on is not active and enabled (active=${addon.active === true}, appDisabled=${addon.appDisabled === true}, userDisabled=${addon.userDisabled === true})`,
+    );
   }
   if (addon.updateURL !== expectedUpdateUrl) {
     throw new Error("Installed add-on update URL does not match release metadata");
@@ -460,12 +462,15 @@ AddonManager.getAddonByID(addonId).then((addon) => done({
 
 async function installAndInspect(driver, xpiPath, expected) {
   await driver.command("POST", "/moz/addon/install", { path: xpiPath, temporary: false });
-  const result = await poll(async () => {
-    const inspected = await inspectAddon(driver, expected.expectedAddOnId);
+  return waitForTrustedPermanentAddon(() => inspectAddon(driver, expected.expectedAddOnId), expected);
+}
+
+export async function waitForTrustedPermanentAddon(inspect, expected, pollOptions) {
+  return poll(async () => {
+    const inspected = await inspect();
     if (inspected?.error) throw new Error(`Firefox add-on inspection failed: ${inspected.error}`);
-    return inspected?.addon ? inspected : null;
-  });
-  return assertTrustedPermanentAddon({ ...expected, ...result });
+    return assertTrustedPermanentAddon({ ...expected, ...inspected });
+  }, pollOptions);
 }
 
 async function inspectUpdateDnsPolicy(driver, updateUrl) {
@@ -852,11 +857,10 @@ export async function runFirefoxSignedSmoke(rawInput) {
             `Firefox per-add-on pending update install failed: ${JSON.stringify(manualInstall)}`,
           );
         }
-        const inspected = await poll(async () => {
-          const state = await inspectAddon(driver, input.metadata.addOnId);
-          return state?.addon?.version === input.metadata.version ? state : null;
-        });
-        const after = assertTrustedPermanentAddon({ ...expectedFinal, ...inspected });
+        const after = await waitForTrustedPermanentAddon(
+          () => inspectAddon(driver, input.metadata.addOnId),
+          expectedFinal,
+        );
         const restored = await setAddonAutomaticUpdates(driver, input.metadata.addOnId, true);
         if (restored?.status !== "default") {
           throw new Error(`Firefox automatic-update restore failed: ${JSON.stringify(restored)}`);
@@ -878,11 +882,10 @@ export async function runFirefoxSignedSmoke(rawInput) {
             `Firefox old-to-new signed update failed: ${JSON.stringify({ before: before.version, updateResult })}`,
           );
         }
-        const inspected = await poll(async () => {
-          const state = await inspectAddon(driver, input.metadata.addOnId);
-          return state?.addon?.version === input.metadata.version ? state : null;
-        });
-        const after = assertTrustedPermanentAddon({ ...expectedFinal, ...inspected });
+        const after = await waitForTrustedPermanentAddon(
+          () => inspectAddon(driver, input.metadata.addOnId),
+          expectedFinal,
+        );
         const noUpdateResult = await triggerAddonUpdateThroughManagerUi(driver);
         if (noUpdateResult?.status !== "no-update") {
           throw new Error(`Firefox current-version update check failed: ${JSON.stringify(noUpdateResult)}`);

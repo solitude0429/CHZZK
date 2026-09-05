@@ -18,6 +18,7 @@ import {
   readSignedXpiUpdateIdentity,
   startGeckodriver,
   validateSignedSmokeInputs,
+  waitForTrustedPermanentAddon,
 } from "../../scripts/lib/firefox-signed-smoke.js";
 import { RELEASE_PACKAGE_FILES } from "../../scripts/lib/release-artifacts.js";
 
@@ -250,7 +251,7 @@ setInterval(() => {}, 1000);
     );
   });
 
-  it("requires the expected ID/version, permanent install, default enforcement, and AMO signed state", () => {
+  it("requires the expected ID/version, permanent install, default enforcement, and AMO signed state", async () => {
     const expected = {
       expectedAddOnId: "chzzk@solitude0429.local",
       expectedUpdateUrl: "https://chzzk.home.arpa:8443/updates.json",
@@ -274,6 +275,27 @@ setInterval(() => {}, 1000);
       version: expected.expectedVersion,
     };
     assert.equal(assertTrustedPermanentAddon({ addon, ...expected }).version, "0.1.5");
+
+    const installStates = [null, { ...addon, active: false }, addon];
+    const installed = await waitForTrustedPermanentAddon(
+      async () => ({ addon: installStates.shift() }),
+      expected,
+      { intervalMs: 1, timeoutMs: 1000 },
+    );
+    assert.equal(installed.active, true);
+    assert.equal(installStates.length, 0);
+    for (const invalidAddon of [
+      { ...addon, signedState: 0 },
+      { ...addon, active: false, appDisabled: true },
+    ]) {
+      await assert.rejects(
+        waitForTrustedPermanentAddon(async () => ({ addon: invalidAddon }), expected, {
+          intervalMs: 1,
+          timeoutMs: 30,
+        }),
+        /signed state|active and enabled/,
+      );
+    }
 
     const cases = [
       { addon: { ...addon, id: "other@example.invalid" } },
