@@ -59,15 +59,19 @@ const DIAGNOSTIC_TOP_LEVEL_KEYS = Object.freeze([
   "samples",
   "totalHlsRequests",
 ]);
-const DIAGNOSTIC_RUNTIME_KEYS = Object.freeze(["activeTabIds", "lastError", "targetsByTab", "updatedAt"]);
-const DIAGNOSTIC_SAMPLE_KEYS = Object.freeze(["quality", "seenAt", "tabId", "type", "url"]);
+const DIAGNOSTIC_RUNTIME_KEYS = Object.freeze([
+  "activeTabCount",
+  "lastError",
+  "targetQualities",
+  "updatedAt",
+]);
+const DIAGNOSTIC_SAMPLE_KEYS = Object.freeze(["quality", "seenAt", "type", "url"]);
 const DIAGNOSTIC_DECISION_KEYS = Object.freeze([
   "ok",
   "quality",
   "reason",
   "redirectedCurrentRequest",
   "seenAt",
-  "tabId",
   "targetQuality",
   "type",
   "url",
@@ -959,7 +963,7 @@ function assertExactDiagnosticsSchema(context, snapshot, secret) {
   trackCollection(
     snapshot.samples,
     snapshot.decisions,
-    snapshot.runtimeRedirects.activeTabIds,
+    snapshot.runtimeRedirects.targetQualities,
     snapshot.runtimeTransitions,
   );
   check(snapshot.samples.length <= snapshot.maxSamples, "diagnostic samples exceeded maxSamples");
@@ -969,7 +973,9 @@ function assertExactDiagnosticsSchema(context, snapshot, secret) {
     "diagnostic transitions exceeded maxSamples",
   );
   check(
-    snapshot.runtimeRedirects.activeTabIds.length <= snapshot.maxSamples,
+    Number.isSafeInteger(snapshot.runtimeRedirects.activeTabCount) &&
+      snapshot.runtimeRedirects.activeTabCount >= 0 &&
+      snapshot.runtimeRedirects.activeTabCount <= snapshot.maxSamples,
     "diagnostic active tabs exceeded maxSamples",
   );
   for (const sample of snapshot.samples) {
@@ -992,8 +998,8 @@ function assertExactDiagnosticsSchema(context, snapshot, secret) {
   }
   check(Object.keys(snapshot.qualities).length <= 64, "diagnostic quality counters were not bounded");
   check(
-    Object.keys(snapshot.runtimeRedirects.targetsByTab).length <= snapshot.maxSamples,
-    "diagnostic target map exceeded maxSamples",
+    snapshot.runtimeRedirects.targetQualities.length <= snapshot.maxSamples,
+    "diagnostic target qualities exceeded maxSamples",
   );
   for (const url of [
     ...snapshot.samples.map((sample) => sample.url),

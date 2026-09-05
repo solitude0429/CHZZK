@@ -43,6 +43,7 @@
   };
 
   // src/shared/quality.js
+  var QUALITY_LABEL_RE = /^(\d{3,4})p$/i;
   var QUALITY_PATH_MARKER_SOURCE = String.raw`(?:chunklist_|\/)(\d{3,4}p)(?=(?:[_-][^/]*)?\.m3u8$|\/)`;
   var RESOLUTION_RE = /(?:RESOLUTION=|^)(\d{3,5})x(\d{3,5})(?:[,\s]|$)/i;
   var TEXT_QUALITY_RE = /(?:^|[^0-9])(\d{3,4})\s*p(?:[^0-9]|$)/i;
@@ -60,6 +61,12 @@
     const qualityMatch = value.match(TEXT_QUALITY_RE);
     if (!qualityMatch) return null;
     return `${Number(qualityMatch[1])}p`;
+  }
+  function qualityNumber(label) {
+    const normalized = normalizeQualityLabel(label);
+    if (!normalized) return null;
+    const match = normalized.match(QUALITY_LABEL_RE);
+    return match ? Number(match[1]) : null;
   }
   function parseQualitiesFromUrl(url) {
     if (typeof url !== "string") return [];
@@ -139,8 +146,7 @@
     const timestamp = new Date(value);
     return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : EPOCH_ISO;
   }
-  function normalizedTabId(value, { nullable = false } = {}) {
-    if (nullable && value === null) return null;
+  function normalizedTabId(value) {
     return Number.isSafeInteger(value) && value >= 0 ? value : void 0;
   }
   function normalizedType(value) {
@@ -157,19 +163,17 @@
   function normalizeSample(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const quality = normalizedQuality(value.quality);
-    const tabId = normalizedTabId(value.tabId, { nullable: true });
     const type = normalizedType(value.type);
     const url = normalizedDiagnosticUrl(value.url);
-    if (!quality || tabId === void 0 || type === void 0 || url === void 0) return null;
+    if (!quality || type === void 0 || url === void 0) return null;
     const seenAt = normalizedIsoTimestamp(value.seenAt);
     if (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) return null;
-    return { quality, seenAt, tabId, type, url };
+    return { quality, seenAt, type, url };
   }
   function normalizeDecision(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const quality = normalizedQuality(value.quality, { nullable: true });
     const targetQuality = normalizedQuality(value.targetQuality, { nullable: true });
-    const tabId = normalizedTabId(value.tabId, { nullable: true });
     const type = normalizedType(value.type);
     const url = normalizedDiagnosticUrl(value.url);
     const seenAt = normalizedIsoTimestamp(value.seenAt);
@@ -178,7 +182,6 @@
       typeof value.redirectedCurrentRequest !== "boolean" ||
       quality === void 0 ||
       targetQuality === void 0 ||
-      tabId === void 0 ||
       type === void 0 ||
       url === void 0 ||
       (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) ||
@@ -194,7 +197,6 @@
       reason: value.reason,
       redirectedCurrentRequest: value.redirectedCurrentRequest,
       seenAt,
-      tabId,
       targetQuality,
       type,
       url,
@@ -258,6 +260,31 @@
         .map(([tabId, quality]) => [tabId, normalizedQuality(quality)]),
     );
   }
+  function normalizeTargetQualities(value, maxSamples) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .slice(0, maxSamples)
+      .map((quality) => normalizedQuality(quality))
+      .filter(Boolean)
+      .sort((left, right) => qualityNumber(right) - qualityNumber(left));
+  }
+  function normalizeRuntimeRedirectSummary(value, maxSamples) {
+    const activeTabCount = Object.hasOwn(value, "activeTabCount")
+      ? Math.min(normalizedCounter(value.activeTabCount), maxSamples)
+      : normalizeActiveTabIds(value.activeTabIds, maxSamples).length;
+    const targetQualities = normalizeTargetQualities(
+      Object.hasOwn(value, "targetQualities")
+        ? value.targetQualities
+        : Object.values(normalizeTargetsByTab(value.targetsByTab, maxSamples)),
+      maxSamples,
+    );
+    return {
+      activeTabCount,
+      lastError: normalizedRuntimeError(value.lastError),
+      targetQualities,
+      updatedAt: normalizedIsoTimestamp(value.updatedAt),
+    };
+  }
   function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
     const policyMaxSamples = normalizedMaxSamples(maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -268,7 +295,6 @@
       !Array.isArray(source.runtimeRedirects)
         ? source.runtimeRedirects
         : {};
-    const lastError = normalizedRuntimeError(runtimeSource.lastError);
     return {
       decisions: (Array.isArray(source.decisions) ? source.decisions.slice(-effectiveMaxSamples) : [])
         .map(normalizeDecision)
@@ -276,12 +302,7 @@
       generatedAt: normalizedIsoTimestamp(source.generatedAt),
       maxSamples: effectiveMaxSamples,
       qualities: normalizeQualityCounters(source.qualities),
-      runtimeRedirects: {
-        activeTabIds: normalizeActiveTabIds(runtimeSource.activeTabIds, effectiveMaxSamples),
-        lastError,
-        targetsByTab: normalizeTargetsByTab(runtimeSource.targetsByTab, effectiveMaxSamples),
-        updatedAt: normalizedIsoTimestamp(runtimeSource.updatedAt),
-      },
+      runtimeRedirects: normalizeRuntimeRedirectSummary(runtimeSource, effectiveMaxSamples),
       runtimeTransitions: (Array.isArray(source.runtimeTransitions)
         ? source.runtimeTransitions.slice(-effectiveMaxSamples)
         : []
@@ -312,12 +333,6 @@
       .map(([quality, count]) => `${quality}: ${count}`)
       .join("\n");
   }
-  function renderTargetSummary(runtimeRedirects) {
-    const targets = Object.entries(runtimeRedirects.targetsByTab ?? {})
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(([tabId, target]) => `${tabId}:${target}`);
-    return targets.join(", ") || "none";
-  }
   function render(value) {
     const diagnostics = normalizeDiagnostics(value, NORMALIZATION_OPTIONS);
     const runtimeRedirects = diagnostics.runtimeRedirects;
@@ -328,15 +343,15 @@
     summary.textContent = [
       `generatedAt: ${diagnostics.generatedAt}`,
       `totalHlsRequests: ${diagnostics.totalHlsRequests ?? 0}`,
-      `activeTabIds: ${(runtimeRedirects.activeTabIds ?? []).join(", ") || "none"}`,
-      `targetsByTab: ${renderTargetSummary(runtimeRedirects)}`,
+      `activeTabCount: ${runtimeRedirects.activeTabCount}`,
+      `targetQualities: ${runtimeRedirects.targetQualities.join(", ") || "none"}`,
       `runtimeRedirectsUpdatedAt: ${runtimeRedirects.updatedAt}`,
       `lastRuntimeRedirectError: ${runtimeRedirects.lastError ?? "none"}`,
       lastTransition
         ? `lastRuntimeTransition: ${lastTransition.action} / ${lastTransition.reason} / ${lastTransition.fromQuality ?? "none"} -> ${lastTransition.toQuality ?? "none"} / ${lastTransition.source}`
         : "lastRuntimeTransition: none",
       lastDecision
-        ? `lastDecision: ${lastDecision.ok ? "ok" : "blocked"} / ${lastDecision.reason} / tab ${lastDecision.tabId ?? "n/a"}`
+        ? `lastDecision: ${lastDecision.ok ? "ok" : "blocked"} / ${lastDecision.reason}`
         : "lastDecision: none",
       "",
       qualities || "qualities: none",

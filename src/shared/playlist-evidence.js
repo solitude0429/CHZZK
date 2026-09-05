@@ -135,12 +135,6 @@ function hasUsableLowLatencyPart(lines) {
         return true;
       }
     }
-    if (upper.startsWith("#EXT-X-PRELOAD-HINT:")) {
-      const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
-      if (attributes?.TYPE?.toUpperCase() === "PART" && isPlausiblePlaylistUri(attributes.URI)) {
-        return true;
-      }
-    }
   }
   return false;
 }
@@ -152,6 +146,14 @@ export function isLikelyHlsPlaylist(text) {
 export function isUsableHlsPlaylist(text) {
   const lines = normalizedPlaylistLines(text);
   if (!firstMeaningfulLineIsHeader(lines)) return false;
+  // A completed playlist cannot also advertise a future resource.
+  if (
+    lines.some((line) => line.toUpperCase() === "#EXT-X-ENDLIST") &&
+    lines.some((line) => line.toUpperCase().startsWith("#EXT-X-PRELOAD-HINT:"))
+  ) {
+    return false;
+  }
+  // PRELOAD-HINT alone never establishes or renews quality evidence.
   if (hasUsableMasterVariant(lines)) return true;
   if (!hasPositiveTargetDuration(lines)) return false;
   return hasUsableMediaSegment(lines) || hasUsableLowLatencyPart(lines);

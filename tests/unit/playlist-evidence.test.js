@@ -38,7 +38,7 @@ describe("bounded HLS response evidence", () => {
     );
   });
 
-  it("accepts usable LL-HLS parts and part preload hints", () => {
+  it("accepts published LL-HLS parts but not preload hints alone", () => {
     assert.equal(
       isUsableHlsPlaylist(
         '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PART:DURATION=0.333,URI="part-1.m4s?token=x"\n',
@@ -49,7 +49,7 @@ describe("bounded HLS response evidence", () => {
       isUsableHlsPlaylist(
         '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part-next.m4s"\n',
       ),
-      true,
+      false,
     );
   });
 

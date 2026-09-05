@@ -151,6 +151,9 @@ describe("diagnostics popup", () => {
     assert.equal(rendered.maxSamples, 200);
     assert.equal(rendered.totalHlsRequests, 0);
     assert.equal(rendered.samples[0].url, "https://pstatic.net/[redacted-path]/720p.m3u8?[redacted]");
+    assert.equal(rendered.runtimeRedirects.activeTabCount, 1);
+    assert.deepEqual(rendered.runtimeRedirects.targetQualities, ["1080p"]);
+    assert.doesNotMatch(JSON.stringify(rendered), /"(?:tabId|activeTabIds|targetsByTab)"/);
     assert.equal("unknown" in rendered.samples[0], false);
     assert.equal("unknown" in rendered.runtimeTransitions[0], false);
   });

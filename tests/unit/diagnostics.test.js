@@ -80,8 +80,8 @@ describe("diagnostics helpers", () => {
     });
 
     const snapshot = createDiagnosticsSnapshot(diagnostics);
-    assert.deepEqual(snapshot.runtimeRedirects.activeTabIds, [7]);
-    assert.deepEqual(snapshot.runtimeRedirects.targetsByTab, { 7: "1440p" });
+    assert.deepEqual(snapshot.runtimeRedirects.activeTabCount, 1);
+    assert.deepEqual(snapshot.runtimeRedirects.targetQualities, ["1440p"]);
     assert.equal(snapshot.decisions.length, 1);
     assert.equal(snapshot.decisions[0].url.includes("Policy=example"), false);
     assert.equal(snapshot.decisions[0].reason, "eligible-chzzk-hls-quality");
@@ -188,7 +188,7 @@ describe("diagnostics helpers", () => {
     assert.equal(normalized.totalHlsRequests, 0, "wrongly typed counters reset to zero");
     assert.deepEqual(normalized.qualities, { "1440p": Number.MAX_SAFE_INTEGER });
     assert.equal(normalized.samples.length, 1, "tail trim occurs before invalid records are dropped");
-    assert.deepEqual(Object.keys(normalized.samples[0]), ["quality", "seenAt", "tabId", "type", "url"]);
+    assert.deepEqual(Object.keys(normalized.samples[0]), ["quality", "seenAt", "type", "url"]);
     assert.equal(normalized.samples[0].url, "https://pstatic.net/[redacted-path]/720p.m3u8?[redacted]");
     assert.equal(normalized.decisions.length, 1);
     assert.deepEqual(Object.keys(normalized.decisions[0]), [
@@ -197,18 +197,17 @@ describe("diagnostics helpers", () => {
       "reason",
       "redirectedCurrentRequest",
       "seenAt",
-      "tabId",
       "targetQuality",
       "type",
       "url",
     ]);
-    assert.deepEqual(normalized.runtimeRedirects.activeTabIds, [7, Number.MAX_SAFE_INTEGER]);
-    assert.deepEqual(normalized.runtimeRedirects.targetsByTab, { 7: "1080p" });
+    assert.deepEqual(normalized.runtimeRedirects.activeTabCount, 2);
+    assert.deepEqual(normalized.runtimeRedirects.targetQualities, ["1080p"]);
     assert.equal(normalized.runtimeRedirects.lastError, "runtime-error");
     assert.deepEqual(Object.keys(normalized.runtimeRedirects), [
-      "activeTabIds",
+      "activeTabCount",
       "lastError",
-      "targetsByTab",
+      "targetQualities",
       "updatedAt",
     ]);
     assert.deepEqual(normalized.runtimeTransitions, [

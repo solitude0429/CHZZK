@@ -499,8 +499,7 @@
     const timestamp = new Date(value);
     return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : EPOCH_ISO;
   }
-  function normalizedTabId(value, { nullable = false } = {}) {
-    if (nullable && value === null) return null;
+  function normalizedTabId(value) {
     return Number.isSafeInteger(value) && value >= 0 ? value : void 0;
   }
   function normalizedType(value) {
@@ -517,19 +516,17 @@
   function normalizeSample(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const quality = normalizedQuality(value.quality);
-    const tabId = normalizedTabId(value.tabId, { nullable: true });
     const type = normalizedType(value.type);
     const url = normalizedDiagnosticUrl(value.url);
-    if (!quality || tabId === void 0 || type === void 0 || url === void 0) return null;
+    if (!quality || type === void 0 || url === void 0) return null;
     const seenAt = normalizedIsoTimestamp(value.seenAt);
     if (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) return null;
-    return { quality, seenAt, tabId, type, url };
+    return { quality, seenAt, type, url };
   }
   function normalizeDecision(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const quality = normalizedQuality(value.quality, { nullable: true });
     const targetQuality = normalizedQuality(value.targetQuality, { nullable: true });
-    const tabId = normalizedTabId(value.tabId, { nullable: true });
     const type = normalizedType(value.type);
     const url = normalizedDiagnosticUrl(value.url);
     const seenAt = normalizedIsoTimestamp(value.seenAt);
@@ -538,7 +535,6 @@
       typeof value.redirectedCurrentRequest !== "boolean" ||
       quality === void 0 ||
       targetQuality === void 0 ||
-      tabId === void 0 ||
       type === void 0 ||
       url === void 0 ||
       (seenAt === EPOCH_ISO && value.seenAt !== EPOCH_ISO) ||
@@ -554,7 +550,6 @@
       reason: value.reason,
       redirectedCurrentRequest: value.redirectedCurrentRequest,
       seenAt,
-      tabId,
       targetQuality,
       type,
       url,
@@ -618,6 +613,31 @@
         .map(([tabId, quality]) => [tabId, normalizedQuality(quality)]),
     );
   }
+  function normalizeTargetQualities(value, maxSamples) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .slice(0, maxSamples)
+      .map((quality) => normalizedQuality(quality))
+      .filter(Boolean)
+      .sort((left, right) => qualityNumber(right) - qualityNumber(left));
+  }
+  function normalizeRuntimeRedirectSummary(value, maxSamples) {
+    const activeTabCount = Object.hasOwn(value, "activeTabCount")
+      ? Math.min(normalizedCounter(value.activeTabCount), maxSamples)
+      : normalizeActiveTabIds(value.activeTabIds, maxSamples).length;
+    const targetQualities = normalizeTargetQualities(
+      Object.hasOwn(value, "targetQualities")
+        ? value.targetQualities
+        : Object.values(normalizeTargetsByTab(value.targetsByTab, maxSamples)),
+      maxSamples,
+    );
+    return {
+      activeTabCount,
+      lastError: normalizedRuntimeError(value.lastError),
+      targetQualities,
+      updatedAt: normalizedIsoTimestamp(value.updatedAt),
+    };
+  }
   function normalizeDiagnostics(value, { maxSamples = 200 } = {}) {
     const policyMaxSamples = normalizedMaxSamples(maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -628,7 +648,6 @@
       !Array.isArray(source.runtimeRedirects)
         ? source.runtimeRedirects
         : {};
-    const lastError = normalizedRuntimeError(runtimeSource.lastError);
     return {
       decisions: (Array.isArray(source.decisions) ? source.decisions.slice(-effectiveMaxSamples) : [])
         .map(normalizeDecision)
@@ -636,12 +655,7 @@
       generatedAt: normalizedIsoTimestamp(source.generatedAt),
       maxSamples: effectiveMaxSamples,
       qualities: normalizeQualityCounters(source.qualities),
-      runtimeRedirects: {
-        activeTabIds: normalizeActiveTabIds(runtimeSource.activeTabIds, effectiveMaxSamples),
-        lastError,
-        targetsByTab: normalizeTargetsByTab(runtimeSource.targetsByTab, effectiveMaxSamples),
-        updatedAt: normalizedIsoTimestamp(runtimeSource.updatedAt),
-      },
+      runtimeRedirects: normalizeRuntimeRedirectSummary(runtimeSource, effectiveMaxSamples),
       runtimeTransitions: (Array.isArray(source.runtimeTransitions)
         ? source.runtimeTransitions.slice(-effectiveMaxSamples)
         : []
@@ -666,7 +680,6 @@
     const sample = normalizeSample({
       quality,
       seenAt: now.toISOString(),
-      tabId: context.tabId ?? null,
       type: context.type ?? null,
       url,
     });
@@ -695,7 +708,6 @@
       reason: decision.reason ?? "unknown",
       redirectedCurrentRequest: Boolean(decision.redirectedCurrentRequest),
       seenAt: now.toISOString(),
-      tabId: decision.tabId ?? details.tabId ?? null,
       targetQuality: decision.targetQuality ?? null,
       type: details.type ?? null,
       url: details.url ?? "",
@@ -728,12 +740,10 @@
   ) {
     if (!diagnostics) return false;
     const maxSamples = normalizedMaxSamples(diagnostics.maxSamples, HARD_MAX_DIAGNOSTIC_SAMPLES);
-    diagnostics.runtimeRedirects = {
-      activeTabIds: normalizeActiveTabIds(activeTabIds, maxSamples),
-      lastError: normalizedRuntimeError(lastError),
-      targetsByTab: normalizeTargetsByTab(targetsByTab, maxSamples),
-      updatedAt: now.toISOString(),
-    };
+    diagnostics.runtimeRedirects = normalizeRuntimeRedirectSummary(
+      { activeTabIds, lastError, targetsByTab, updatedAt: now.toISOString() },
+      maxSamples,
+    );
     diagnostics.generatedAt = now.toISOString();
     return true;
   }
@@ -1152,18 +1162,18 @@
           return true;
         }
       }
-      if (upper.startsWith("#EXT-X-PRELOAD-HINT:")) {
-        const attributes = parseHlsAttributeList(line.slice(line.indexOf(":") + 1));
-        if (attributes?.TYPE?.toUpperCase() === "PART" && isPlausiblePlaylistUri(attributes.URI)) {
-          return true;
-        }
-      }
     }
     return false;
   }
   function isUsableHlsPlaylist(text) {
     const lines = normalizedPlaylistLines(text);
     if (!firstMeaningfulLineIsHeader(lines)) return false;
+    if (
+      lines.some((line) => line.toUpperCase() === "#EXT-X-ENDLIST") &&
+      lines.some((line) => line.toUpperCase().startsWith("#EXT-X-PRELOAD-HINT:"))
+    ) {
+      return false;
+    }
     if (hasUsableMasterVariant(lines)) return true;
     if (!hasPositiveTargetDuration(lines)) return false;
     return hasUsableMediaSegment(lines) || hasUsableLowLatencyPart(lines);
